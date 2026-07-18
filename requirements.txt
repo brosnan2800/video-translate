@@ -1,0 +1,4 @@
+# Runtime dependencies (version-locked for golden reproducibility).
+# faster-whisper transcription is non-deterministic across versions, so pin exactly.
+faster-whisper==1.2.1
+deep-translator==1.9.1

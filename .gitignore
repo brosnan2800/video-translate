@@ -1,0 +1,21 @@
+# Large binary assets — NOT tracked (machine-shared / regenerable)
+videos/
+outputs/
+.cache/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# Local project config (may contain machine-specific proxy/paths)
+.video-translate.toml
+
+# OS
+.DS_Store

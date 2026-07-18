@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "video-translate"
+version = "1.0.0"
+description = "Video → bilingual (zh/en) subtitle CLI: faster-whisper transcription + Google Translate, Jianying-importable SRT."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "yanglei" }]
+dependencies = [
+    "faster-whisper==1.2.1",
+    "deep-translator==1.9.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+video-translate = "video_translate.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: end-to-end tests that run real transcription/translation (deselect with '-m \"not slow\"')",
+]
+addopts = "-m 'not slow'"
