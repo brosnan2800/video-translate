@@ -1,5 +1,7 @@
 # video-translate
 
+> 📖 中文文档：[README.zh.md](README.zh.md)
+
 Turn a video into **Jianying(剪映)-importable bilingual (zh/en) subtitles** with a
 faithful, resumable pipeline:
 
