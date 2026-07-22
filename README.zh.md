@@ -38,10 +38,20 @@ make doctor
 .venv/bin/video-translate run "videos/apollo.mp4"             # agent 引擎（默认）
 .venv/bin/video-translate run "videos/apollo.mp4" --engine google   # 无头端到端
 
+# 4b. （仅 agent 引擎）Google 漏翻的行会落到 <base>.agent_pending.json
+.venv/bin/video-translate backfill --pending videos/apollo.agent_pending.json \
+    --out videos/apollo.zh_segments.json                      # 生成 backfill_task.json，退出码 6
+# ...... Agent 填好 backfill_task.json 后，合并并重生成：
+.venv/bin/video-translate backfill --pending videos/apollo.agent_pending.json \
+    --out videos/apollo.zh_segments.json --agent-zh videos/apollo.backfill_zh.json \
+    --segments videos/apollo.segments_en.json --outdir videos --base apollo
+
 # 5. 将 <视频目录>/apollo.bilingual.srt 导入剪映
 ```
 
-V2 默认值：`INPUT` 是位置参数；`--base` = 视频文件名主干；`--outdir` = 视频所在目录；`--lang` 自动检测；`--proxy` 自动检测（`--no-proxy` 走直连）。默认的 **agent 引擎**在转写 + merge 完成后停下，对外吐一份翻译任务文件给调用方 Agent（退出码 6）；想全自动（质量较低）跑则用 `--engine google`。各阶段也可用 `transcribe` / `translate` / `generate` 单独执行，或用 `run --skip transcribe` 续跑上次中断的部分。
+V2 默认值：`INPUT` 是位置参数；`--base` = 视频文件名主干；`--outdir` = 视频所在目录；`--lang` 自动检测；`--proxy` 自动检测（`--no-proxy` 走直连）。默认的 **agent 引擎**在转写 + merge 完成后停下，对外吐一份翻译任务文件给调用方 Agent（**退出码 6**）；想全自动（质量较低）跑则用 `--engine google`。各阶段也可用 `transcribe` / `translate` / `generate` 单独执行，或用 `run --skip transcribe` 续跑上次中断的部分。
+
+> **退出码 6 = 轮到 Agent 了。** 使用 `--engine agent` 时，`run`/`translate` 完成转写后会写出 `*.translate_task.json`（或 `backfill_task.json`），然后以退出码 6 结束。调用方 Agent 读取该文件，按 `persona` 把每条 `to_translate` 翻译成中文，写成 `*.zh_segments.json`，再运行 `generate`。本项目**不内置任何 LLM 客户端**——见 [ADR-005](docs/adr/005-agent-as-engine.md)。
 
 ## 环境要求
 
@@ -61,16 +71,37 @@ chunk = 240.0
 lang  = "auto"          # 自动检测（默认）
 
 [translate]
+src = "en"
 tgt = "zh-CN"
 
 [llm]
 persona = "你是一位资深中英字幕译者。遵循「信达雅」+ 口语感……"
+
+[hf]
+cache_dir = "~/.cache/huggingface"   # 共享模型缓存
 
 [merge]
 merge_enabled   = true
 merge_max_dur   = 8.0
 merge_max_gap   = 0.5
 ```
+
+支持的 TOML 段落：`transcribe`、`translate`、`llm`、`hf`、`merge`（`[hf] cache_dir` 映射到 `hf_cache_dir`）。环境变量覆盖：
+
+| 环境变量                  | 映射到               |
+|---------------------------|----------------------|
+| `VT_MODEL`                | model                |
+| `VT_CHUNK`                | chunk                |
+| `VT_LANG`                 | lang（用 `auto` 表示自动检测） |
+| `VT_PROXY`                | proxy                |
+| `VT_SRC` / `VT_TGT`       | src / tgt            |
+| `VT_ENGINE`               | engine（`agent`/`google`） |
+| `VT_PERSONA`              | persona              |
+| `VT_MERGE_MAX_DUR`        | merge_max_dur        |
+| `VT_MERGE_MAX_GAP`        | merge_max_gap        |
+| `VT_MERGE_MAX_CHARS`      | merge_max_chars（保留） |
+| `HF_HOME`                 | hf_cache_dir         |
+| `HTTPS_PROXY`/`HTTP_PROXY` | proxy（在 `VT_PROXY` 未设时兜底） |
 
 ## 产物
 
@@ -80,6 +111,32 @@ merge_max_gap   = 0.5
 | `<base>.zh.srt`            | 纯中文字幕                            |
 | `<base>.en.srt`            | 纯英文字幕                            |
 | `<base>.txt`              | 双语校对稿                            |
+
+## 退出码
+
+| 码   | 含义                                                     |
+|------|----------------------------------------------------------|
+| 0    | 成功                                                     |
+| 1    | 运行时错误                                               |
+| 2    | 参数错误（argparse）                                     |
+| 3    | 缺少依赖（ffmpeg / HF 模型）                              |
+| 4    | 代理错误（如传入 SOCKS 代理）                             |
+| 5    | 转写被杀死（SIGKILL）；可安全重跑                         |
+| 6    | **等待 Agent** —— 转写 + 任务已就绪，需 Agent 接手翻译    |
+
+退出码 6 是 **agent-as-engine** 设计的核心：CLI 负责吃 CPU 的转写，然后把手里的翻译任务交给调用方 Agent 并停下。非 Agent（无头）模式用 `--engine google`，不会返回 6。
+
+## 命令一览
+
+| 命令        | 作用                                                   |
+|-------------|--------------------------------------------------------|
+| `run`       | 转写 → 翻译 → 生成（完整流水线）                        |
+| `transcribe`| 视频 → `segments_en.json`（分块、可续跑、含 merge）      |
+| `translate` | `segments_en.json` → `zh_segments.json`（agent 任务 / google） |
+| `generate`  | `segments_en.json` + `zh_segments.json` → 4 个字幕文件  |
+| `backfill`  | 补全 `agent_pending.json` 并合并重生成                   |
+| `setup`     | 检查/下载 HF 模型（已有则复用）                          |
+| `doctor`    | 环境自检                                                |
 
 ## 开发（TDD + SDD）
 
@@ -97,6 +154,7 @@ make clean
 
 - **Agent 即引擎**（V2，[ADR-005](docs/adr/005-agent-as-engine.md)）— 默认的 `--engine agent` 对外吐一份翻译任务给调用方 Agent（它自带 LLM），CLI 不依赖任何 LLM 客户端。Google 是 `--engine google` 无头兜底。
 - **片段合并**（V2，[ADR-004](docs/adr/004-segment-merge-strategy.md)）— 相邻的 Whisper 碎 cue 重新拼成可读字幕块；时间戳原样取用（首段 start / 末段 end），绝不重算。默认开启（`--no-merge` 可跳过）。
+- **Backfill**（V2）— 当 `--engine google` 留下未翻译的行时，会写入 `<base>.agent_pending.json`。`backfill` 先生成一份聚焦任务（`backfill_task.json`，退出码 6）交给 Agent，随后把 Agent 填好的 `*.backfill_zh.json` 合并回去并重生成字幕文件。
 - **可续跑转写** — 音频按 `chunk` 切分；每个 `chunk_N.json` 原子落盘，重跑时跳过（[ADR-002](docs/adr/002-chunked-resume.md)）。
 - **CPU / int8** — CTranslate2 无 AMD/Metal 支持，强制使用（[ADR-001](docs/adr/001-cpu-int8.md)）。
 - **代理自动检测**（V2，[ADR-007](docs/adr/007-proxy-autodetect.md)）— `--no-proxy` / `--proxy` / 环境变量 / 探测 7890 → 直连。SOCKS 仍不支持（[ADR-003](docs/adr/003-http-proxy-only.md)）。
