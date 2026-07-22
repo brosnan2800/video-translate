@@ -11,30 +11,50 @@ user's decision. `resolve_config()` records the winning source per key in
 `Config._sources` for debuggability.
 
 ## Config fields & defaults
-| Field          | Default                     | Env var    | TOML section.key    |
-|----------------|-----------------------------|------------|---------------------|
-| `model`        | `large-v3`                  | `VT_MODEL` | `[transcribe] model`|
-| `chunk`        | `240.0`                     | `VT_CHUNK` | `[transcribe] chunk`|
-| `lang`         | `en`                        | `VT_LANG`  | `[transcribe] lang` |
-| `proxy`        | `http://127.0.0.1:7890`     | `VT_PROXY` | `[translate] proxy` |
-| `src`          | `en`                        | `VT_SRC`   | `[translate] src`   |
-| `tgt`          | `zh-CN`                     | `VT_TGT`   | `[translate] tgt`   |
-| `hf_cache_dir` | `~/.cache/huggingface`      | `HF_HOME`  | `[hf] cache_dir`    |
+| Field             | Default                     | Env var             | TOML section.key    |
+|-------------------|-----------------------------|---------------------|---------------------|
+| `model`           | `large-v3`                  | `VT_MODEL`          | `[transcribe] model`|
+| `chunk`           | `240.0`                     | `VT_CHUNK`          | `[transcribe] chunk`|
+| `lang`            | `None` (auto-detect)        | `VT_LANG`           | `[transcribe] lang` |
+| `proxy`           | `None` (auto-detect/direct) | `VT_PROXY`          | `[translate] proxy` |
+| `src`             | `en`                        | `VT_SRC`            | `[translate] src`   |
+| `tgt`             | `zh-CN`                     | `VT_TGT`            | `[translate] tgt`   |
+| `hf_cache_dir`    | `~/.cache/huggingface`      | `HF_HOME`           | `[hf] cache_dir`    |
+| `engine`          | `agent`                     | `VT_ENGINE`         | — (CLI `--engine`)  |
+| `persona`         | (信达雅+口语感 default)      | `VT_PERSONA`        | `[llm] persona`     |
+| `merge_enabled`   | `True`                      | —                   | `[merge] merge_enabled` |
+| `merge_max_dur`   | `8.0`                       | `VT_MERGE_MAX_DUR`  | `[merge] merge_max_dur` |
+| `merge_max_gap`   | `0.5`                       | `VT_MERGE_MAX_GAP`  | `[merge] merge_max_gap` |
+| `merge_max_chars` | `42`                        | `VT_MERGE_MAX_CHARS`| `[merge] merge_max_chars` |
 
 `device`/`compute_type` are intentionally **not** configurable — forced to
-`cpu`/`int8` (ADR-001). `chunk` is cast to `float` when read from env.
+`cpu`/`int8` (ADR-001). Env casts: `chunk`/`merge_max_*` → float, `merge_max_chars`
+→ int, `merge_enabled` → bool. `lang="auto"` normalises to `None`.
+
+V2 proxy resolution: `proxy=None` triggers `proxy.detect_proxy()` — order
+`--no-proxy` → `--proxy` → `VT_PROXY` → `HTTPS_PROXY`/`HTTP_PROXY` → TCP probe
+127.0.0.1:7890 → `None` (direct). Standard `HTTPS_PROXY`/`HTTP_PROXY` are read as
+a fallback only when `VT_PROXY` is unset (ADR-007).
 
 ## `.video-translate.toml` example
 ```toml
 [transcribe]
 model = "large-v3"
 chunk = 240.0
-lang  = "en"
+lang  = "auto"          # auto-detect (default)
 
 [translate]
-proxy = "http://127.0.0.1:7890"
 src   = "en"
 tgt   = "zh-CN"
+
+[llm]
+persona = "你是一位资深中英字幕译者。遵循「信达雅」+ 口语感……"
+
+[merge]
+merge_enabled   = true
+merge_max_dur   = 8.0
+merge_max_gap   = 0.5
+merge_max_chars = 42     # 剪映单行上限
 
 [hf]
 cache_dir = "~/.cache/huggingface"

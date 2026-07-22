@@ -38,3 +38,34 @@ tests and `doctor` run without the multi-GB deps installed.
 
 ## 8. Millisecond carry
 `srt_time` rolls `ms == 1000` into the next second. Regression-tested edge case.
+
+## 9. Merge preserves timestamps (V2)
+`merge_segments` takes the group's first `start` / last `end` verbatim — no
+arithmetic. Enforced by `test_all_boundary_values_come_from_input` and the merge
+golden. `max_chars` is NOT a merge gate (it's a split constraint; V2 can't split
+without word timestamps — see ADR-004).
+
+## 10. Agent engine adds no LLM client dependency (V2)
+`--engine agent` only writes a task file; the calling agent translates. Never
+`pip install openai`/`httpx`/`anthropic` into this project. Google stays as the
+`--engine google` headless fallback. (ADR-005)
+
+## 11. `--lang` auto-detect may misjudge (V2)
+Default `lang=None` lets Whisper auto-detect. On short/noisy audio it can be
+wrong; `--lang en` overrides. Golden tests force `lang="en"` (monkeypatch) so
+regression doesn't depend on detection. (ADR-006)
+
+## 12. Proxy auto-detect returns None, not raise (V2 deviation)
+`detect_proxy` returns `None` (direct) when no proxy source is found, rather than
+raising. Direct egress often works; raising would break local-only transcribe.
+`--no-proxy` forces direct. SOCKS still rejected (ADR-003/007).
+
+## 13. Exit 6 is not an error (V2)
+`run --engine agent` returns 6 after emitting the translation task. Do not retry
+`run` on exit 6 — translate the task and run `generate`. (Spec 05/11)
+
+## 14. Golden zh must be deterministic (V2)
+Golden `zh_segments.json` is retranslated with Google (pinned
+`deep-translator==1.9.1`), NOT the agent engine — LLM output drifts and would
+break the byte-exact regression. Agent translation is for production only.
+(决裁定稿 §1)

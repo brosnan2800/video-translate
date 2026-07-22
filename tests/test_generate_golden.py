@@ -44,3 +44,11 @@ def test_bilingual_keeps_english_when_zh_missing():
     assert "hello" in out[".bilingual.srt"]
     # zh-only file has no cue
     assert out[".zh.srt"].strip() == ""
+
+
+def test_v1_golden_preserved(golden_dir):
+    """V1 baseline archived as .v1 must exist (Stage 4 archive)."""
+    for suffix in (".segments_en.json", ".zh_segments.json",
+                   ".bilingual.srt", ".zh.srt", ".en.srt", ".txt"):
+        p = os.path.join(golden_dir, "apollo_story.v1" + suffix)
+        assert os.path.exists(p), f"V1 golden archive missing: {p}"

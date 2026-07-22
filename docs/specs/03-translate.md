@@ -14,11 +14,15 @@ optionally, `{base}.agent_pending.json`.
 4. Checkpoint to `out` every `CHECKPOINT_EVERY=10` segments and at the end.
 5. If `pending_path` given, write `pending` (even if empty → `[]`).
 
-## Engine
-- Primary: `deep_translator.GoogleTranslator(source=src, target=tgt)` (via proxy).
-- Defaults: `src="en"`, `tgt="zh-CN"`, `proxy="http://127.0.0.1:7890"`.
-- **Injectable**: `translate_fn` parameter allows swapping the engine (agent
-  fallback, or a stub in tests) without touching the network.
+## Engine (V2: `--engine {agent,google}`, default `agent`)
+- **agent** (default, Spec 09 / ADR-005): the CLI does NOT call an LLM. It emits a
+  translation task file (`<base>.translate_task.json`, batched + context + persona)
+  and returns exit 6 (`EXIT_AWAITING_AGENT`). The calling agent translates with its
+  own LLM and writes `zh_segments.json`. No LLM client dependency.
+- **google** (headless fallback, V1 path): `deep_translator.GoogleTranslator`
+  via auto-detected HTTP proxy. Defaults: `src="en"`, `tgt="zh-CN"`.
+- **Injectable**: `translate_fn` allows swapping the programmatic engine (used by
+  google path and tests) without touching the network.
 
 ## Fallback policy (user-specified)
 Google is the primary. Segments Google cannot translate go to

@@ -37,22 +37,26 @@ skill delegates all real work to the `video-translate` CLI documented here.
 # 1. Install (creates .venv, installs deps + this package editable)
 make install-dev
 
-# 2. Check your environment (ffmpeg, model cache, proxy, deps)
+# 2. Check your environment (ffmpeg, model cache, proxy, deps, engine)
 make doctor
 
 # 3. Download the large-v3 model once (~3GB, reused across projects)
 .venv/bin/video-translate setup            # reuses ~/.cache/huggingface if present
 
-# 4. Full pipeline on a video
-.venv/bin/video-translate run \
-    --input "videos/steveharvy-the apollo story.mp4" \
-    --outdir outputs --base apollo_story
+# 4. Full pipeline — zero config (base/outdir default from the video path)
+.venv/bin/video-translate run "videos/apollo.mp4"             # agent engine (default)
+.venv/bin/video-translate run "videos/apollo.mp4" --engine google   # headless end-to-end
 
-# 5. Import outputs/apollo_story.bilingual.srt into 剪映
+# 5. Import <video_dir>/apollo.bilingual.srt into 剪映
 ```
 
-Run stages individually with `transcribe` / `translate` / `generate`, or resume a
-partial run with `run --skip transcribe`.
+V2 defaults: `INPUT` is positional; `--base` = video filename stem; `--outdir` =
+the video's own directory; `--lang` auto-detects; `--proxy` auto-detects
+(`--no-proxy` for direct). The **agent engine** (default) stops after transcribe +
+merge and emits a translation task for the calling agent (exit 6); use
+`--engine google` for a fully automatic (lower-quality) run. Run stages
+individually with `transcribe` / `translate` / `generate`, or resume a partial run
+with `run --skip transcribe`.
 
 ## Requirements
 
@@ -72,11 +76,18 @@ Priority: **CLI args > env vars > `.video-translate.toml` > defaults**. See
 [transcribe]
 model = "large-v3"
 chunk = 240.0
-lang  = "en"
+lang  = "auto"          # auto-detect (default)
 
 [translate]
-proxy = "http://127.0.0.1:7890"
-tgt   = "zh-CN"
+tgt = "zh-CN"
+
+[llm]
+persona = "你是一位资深中英字幕译者。遵循「信达雅」+ 口语感……"
+
+[merge]
+merge_enabled   = true
+merge_max_dur   = 8.0
+merge_max_gap   = 0.5
 ```
 
 ## Outputs
@@ -90,28 +101,37 @@ tgt   = "zh-CN"
 
 ## Development (TDD + SDD)
 
-- **Specs first**: [`docs/specs/`](docs/specs) (00–07) define behavior before code.
+- **Specs first**: [`docs/specs/`](docs/specs) (00–11) define behavior before code.
 - **Decisions**: [`docs/adr/`](docs/adr) records why (CPU/int8, chunked-resume,
-  HTTP-proxy-only).
-- **Tests**: `make test` (fast unit+contract, skips `@slow`); `make test-all`
-  (includes the real e2e over the source video). The **golden regression**
-  (`tests/test_generate_golden.py`) guarantees byte-exact output vs the validated
-  `docs/golden/apollo_story.*` baseline.
+  HTTP-proxy-only, segment-merge, agent-as-engine, lang-autodetect, proxy-autodetect).
+- **Tests**: `make test` (fast unit+contract+golden, skips `@slow`); `make test-all`
+  (includes the real e2e over the source video). Golden layers:
+  `test_generate_golden` (build_outputs byte-exact), `test_merge_golden`
+  (merge_segments determinism), `test_v1_golden_preserved` (V1 archived as `.v1`).
 
 ```bash
-make test        # 49 fast tests
+make test        # ~105 fast tests
 make test-all    # + slow e2e (needs model + video)
 make clean
 ```
 
 ## Design notes
 
-- **Resumable transcription** — audio split into `chunk` chunks; each `chunk_N.json`
-  is persisted atomically and skipped on re-run ([ADR-002](docs/adr/002-chunked-resume.md)).
-- **CPU / int8** — CTranslate2 has no AMD/Metal support; forced, not configurable
+- **Agent as engine** (V2, [ADR-005](docs/adr/005-agent-as-engine.md)) — the CLI's
+  default `--engine agent` emits a translation task for the calling agent (which
+  has its own LLM); no LLM client dependency. Google is the `--engine google`
+  headless fallback.
+- **Segment merge** (V2, [ADR-004](docs/adr/004-segment-merge-strategy.md)) —
+  adjacent Whisper fragments rejoin into readable cues; timestamps taken verbatim
+  (first start / last end), never recomputed. Default ON (`--no-merge` to skip).
+- **Resumable transcription** — audio split into `chunk` chunks; each
+  `chunk_N.json` is persisted atomically and skipped on re-run
+  ([ADR-002](docs/adr/002-chunked-resume.md)).
+- **CPU / int8** — CTranslate2 has no AMD/Metal support; forced
   ([ADR-001](docs/adr/001-cpu-int8.md)).
-- **Google primary, agent fallback** — segments Google can't translate go to
-  `<base>.agent_pending.json` for an agent to backfill (Spec 03).
+- **Proxy auto-detect** (V2, [ADR-007](docs/adr/007-proxy-autodetect.md)) —
+  `--no-proxy` / `--proxy` / env / probe 7890 → direct. SOCKS still rejected
+  ([ADR-003](docs/adr/003-http-proxy-only.md)).
 
 ## License
 

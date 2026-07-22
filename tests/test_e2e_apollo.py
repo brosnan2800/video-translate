@@ -31,8 +31,10 @@ def test_full_pipeline_produces_four_files(tmp_path):
 
     from video_translate.cli import EXIT_OK, main
 
-    rc = main(["run", "--input", video, "--outdir", str(tmp_path),
-               "--base", "apollo_story"])
+    # V2: positional INPUT + --engine google for an end-to-end run (default agent
+    # engine stops at exit 6 awaiting translation).
+    rc = main(["run", video, "--outdir", str(tmp_path),
+               "--base", "apollo_story", "--engine", "google"])
     assert rc == EXIT_OK
     for suffix in (".bilingual.srt", ".zh.srt", ".en.srt", ".txt"):
         assert os.path.exists(os.path.join(tmp_path, "apollo_story" + suffix))

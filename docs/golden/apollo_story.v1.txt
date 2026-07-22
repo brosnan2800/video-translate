@@ -58,9 +58,13 @@
 中文: 我正要给我爸爸打电话。
 英文: And I was going to call my dad.
 
-[00:00:40,710 -> 00:00:45,830]
-中文: 您还记得以前可以输入代码并拨打答录机并获取消息吗？
-英文: You remember back in the day where you could punch in a code and call your answering machine and get your messages?
+[00:00:40,710 -> 00:00:44,610]
+中文: 您还记得以前您可以输入代码并拨打答录机
+英文: You remember back in the day where you could punch in a code and call your answering machine
+
+[00:00:44,610 -> 00:00:45,830]
+中文: 并收到您的消息？
+英文: and get your messages?
 
 [00:00:46,710 -> 00:00:47,730]
 中文: 所以我打电话了。
@@ -198,9 +202,13 @@
 中文: 我正要给我爸爸打电话。
 英文: And I was going to call my dad.
 
-[00:02:04,480 -> 00:02:09,860]
-中文: 您还记得以前可以输入代码并拨打答录机并获取消息吗？
-英文: You remember back in the day where you could punch in a code and call your answering machine and get your messages?
+[00:02:04,480 -> 00:02:08,620]
+中文: 您还记得以前您可以输入代码并拨打答录机
+英文: You remember back in the day where you could punch in a code and call your answering machine
+
+[00:02:08,620 -> 00:02:09,860]
+中文: 并收到您的消息？
+英文: and get your messages?
 
 [00:02:10,740 -> 00:02:11,740]
 中文: 所以我打电话了。
@@ -551,7 +559,7 @@
 英文: he said, man, I thought I told you don't come down them damn steps. I said, hey man,
 
 [00:06:12,020 -> 00:06:16,460]
-中文: 我只是饿了，伙计。我说，让我去街角看到的那家肯德基吧。让我拿一些
+中文: 我只是饿了，伙计。 I said, let me go to that KFC I saw on the corner.让我拿一些
 英文: I'm just hungry, man. I said, let me go to that KFC I saw on the corner. Just let me get some
 
 [00:06:16,460 -> 00:06:22,140]
@@ -606,9 +614,13 @@
 中文: 得到了他的屁股。所以我走下台阶，看到杰米坐在台阶上。我说，
 英文: got his ass. So I'm walking down the steps and I see Jamie sitting on the steps. I said,
 
-[00:07:42,030 -> 00:07:48,210]
-中文: 嘿，伙计，坚持住。他说，伙计，我以前从没发生过这种事。这太疯狂了。这是杰米·福克斯，伙计。
-英文: hey, man, hang in there. He said, man, that ain't never happened to me before, man. This is crazy. This is Jamie Foxx, man.
+[00:07:42,030 -> 00:07:46,090]
+中文: 嘿，伙计，坚持住。他说，伙计，我以前从没发生过这种事。这
+英文: hey, man, hang in there. He said, man, that ain't never happened to me before, man. This
+
+[00:07:46,090 -> 00:07:48,210]
+中文: 太疯狂了。这是杰米·福克斯，伙计。
+英文: is crazy. This is Jamie Foxx, man.
 
 [00:07:48,650 -> 00:07:54,860]
 中文: 喜剧界最有才华的人。现在你甚至不知道我有多紧张
@@ -647,20 +659,24 @@
 英文: And I wrote this whole joke about this dude's eyeball talking. And when the punch came,
 
 [00:08:46,970 -> 00:08:55,680]
-中文: 而这一切，阿波罗人，他们都疯了。他们失去了理智。我必须站起来。
+中文: 而这一切，阿波罗人，他们都疯了。他们失去了理智。 I got to stand.
 英文: and all this here, the Apollo man, they went crazy. They lost their mind. I got to stand.
 
 [00:08:55,720 -> 00:09:05,230]
-中文: 鼓掌，伙计。我走下舞台。我走下舞台，伙计，我开始哭了。我不能
+中文: An ovation, man. I walked off stage.我走下舞台，伙计，我开始哭了。我不能
 英文: An ovation, man. I walked off stage. I walked off stage, man, just started crying. I couldn't
 
 [00:09:05,230 -> 00:09:12,870]
-中文: 相信它。他们付钱给我。我上电视一晚赚了 750 美元。我从来没有做过
+中文: 相信它。 They paid me. I made $750 for being on TV for one night. I'd never made
 英文: believe it. They paid me. I made $750 for being on TV for one night. I'd never made
 
-[00:09:12,870 -> 00:09:19,980]
-中文: 一晚讲笑话 750 美元。这是我几周以来第一次出现在电视上。
-英文: $750 telling jokes in one night. And so that was my first television appearance a couple weeks.
+[00:09:12,870 -> 00:09:19,760]
+中文: 一晚讲笑话 750 美元。这就是我第一次在电视上露面
+英文: $750 telling jokes in one night. And so that was my first television appearance a couple
+
+[00:09:19,760 -> 00:09:19,980]
+中文: 几周。
+英文: weeks.
 
 [00:09:20,000 -> 00:09:27,120]
 中文: 后来辛巴达成为了他在异世界找到这份工作的节目主持人，
@@ -682,9 +698,13 @@
 中文: 所以我去了纽约，举办了业余之夜，我很开心，但每次
 英文: so I went to New York I hosted amateur night and I was killing but every time
 
-[00:09:53,130 -> 00:10:00,300]
-中文: 我们进入广告时段，我本来应该让热身表演像鲁本一样接管，但我知道不能让热身表演这样做，因为他
-英文: we went to commercial break I was supposed to let the warm-up act take over like Ruben does but I knew not to let the warm-up act do that because he
+[00:09:53,130 -> 00:09:56,030]
+中文: 我们进入广告时段 我本来应该让热身表演开始
+英文: we went to commercial break I was supposed to let the warm-up act take
+
+[00:09:56,030 -> 00:10:00,300]
+中文: 就像鲁本那样，但我知道不要让热身动作这样做，因为他
+英文: over like Ruben does but I knew not to let the warm-up act do that because he
 
 [00:10:00,300 -> 00:10:04,260]
 中文: 会改变人群的态度，因为阿波罗是一个狂野的盘子，所以我
@@ -694,9 +714,17 @@
 中文: 呆在那里，我做了热身和主持，并与我建立了联系
 英文: stayed out there I did the warm-up and the hosting and I created a bond with
 
-[00:10:09,560 -> 00:10:17,320]
-中文: 这就是我在阿波罗主持的第一个电视节目 Showtime 上电视的方式，最终成为播出时间最长的 Grand Oleíion
-英文: that audience and that's how I got on TV with my very first TV show I hosted Showtime at Apollo ended up being the longest running Grand Oleíion
+[00:10:09,560 -> 00:10:14,640]
+中文: 那些观众，这就是我主持的第一个电视节目上电视的方式
+英文: that audience and that's how I got on TV with my very first TV show I hosted
+
+[00:10:14,640 -> 00:10:17,280]
+中文: 阿波罗的演出时间最终成为最长的演出时间
+英文: Showtime at Apollo ended up being the longest running
+
+[00:10:17,280 -> 00:10:17,320]
+中文: 格兰德奥莱翁
+英文: Grand Oleíion
 
 [00:10:17,400 -> 00:10:19,800]
 中文: Showtime 历史上的主持人。
@@ -718,17 +746,25 @@
 中文: 你看，在你的生命中，每个人都有回头的时刻。
 英文: See, in your life, everybody has a turn back moment.
 
-[00:10:31,300 -> 00:10:35,870]
-中文: 你有一个时刻，你可以前进，也可以放弃。
-英文: You have a moment where you can go forward or you can give up.
+[00:10:31,300 -> 00:10:34,080]
+中文: 你有一个可以前进的时刻
+英文: You have a moment where you can go forward
+
+[00:10:34,080 -> 00:10:35,870]
+中文: 或者你可以放弃。
+英文: or you can give up.
 
 [00:10:35,870 -> 00:10:39,670]
 中文: 但在放弃之前你必须记住一件事
 英文: But the thing you have to keep in mind before you give up
 
-[00:10:39,670 -> 00:10:45,860]
-中文: 如果你放弃，就保证它永远不会发生。
-英文: is that if you give up, the guarantee is it will never happen.
+[00:10:39,670 -> 00:10:43,980]
+中文: 如果你放弃，保证是
+英文: is that if you give up, the guarantee is
+
+[00:10:43,980 -> 00:10:45,860]
+中文: 它永远不会发生。
+英文: it will never happen.
 
 [00:10:45,860 -> 00:10:47,920]
 中文: 这就是戒烟的保证。
@@ -790,6 +826,10 @@
 中文: 那是我永不放弃的时刻。
 英文: That was my moment of never giving up.
 
-[00:11:33,110 -> 00:11:40,030]
-中文: 那是我第一次了解到信仰就是一切，你必须保持忠诚。
-英文: That's when I first learned that faith was everything, that you have to remain faithful.
+[00:11:33,110 -> 00:11:36,050]
+中文: 那是我第一次知道信仰就是一切
+英文: That's when I first learned that faith was everything,
+
+[00:11:36,050 -> 00:11:40,030]
+中文: 你必须保持忠诚。
+英文: that you have to remain faithful.

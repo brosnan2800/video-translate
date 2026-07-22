@@ -36,11 +36,14 @@ could not translate, for agent backfill).
 | translate | `translate.py` + `proxy.py` | No (network) | Contract only |
 | generate | `generate.py` + `srt_utils.py` | **Yes (pure)** | **Byte-exact** |
 
-## Scope (v1)
-- IN: faithful migration of transcribe → translate → generate; CLI; tests; docs.
-- OUT (future): segment-merge layer (fix over-fragmented cues) and LLM
-  persona-aware translation (fix "soulless" literal MT). These are the known
-  next efforts, deliberately deferred so v1 locks in the alignment guarantee.
+## Scope
+- **v1 (locked at tag `v1.0.0`)**: faithful migration of transcribe → translate →
+  generate; CLI; tests; docs. Golden archived as `docs/golden/apollo_story.v1.*`.
+- **v2 (tag `v2.0.0`)**: segment-merge layer (Spec 08); agent-as-engine
+  translation (Spec 09, default `--engine agent`, no LLM client dep); `backfill`
+  subcommand (Spec 10); CLI/UX overhaul — zero-config positional input, auto
+  base/outdir/lang/proxy (Spec 11, ADR-006/007). V1 invariants preserved:
+  timestamps never recomputed, SOCKS rejected, CPU/int8 forced.
 
 ## Related specs
 - Segment schema: `01-segment-schema.md`

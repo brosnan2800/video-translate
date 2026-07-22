@@ -62,3 +62,71 @@ def test_resume_skips_completed_chunks_without_model(tmp_path, monkeypatch):
                              progress=lambda *_: None)
     merged = __import__("json").load(open(out, encoding="utf-8"))
     assert [s["text"] for s in merged] == ["hello", "world"]
+
+
+# --- V2 ---
+
+
+def test_transcribe_base_defaults_to_input_stem(tmp_path, monkeypatch):
+    """base=None -> derived from input filename stem."""
+    monkeypatch.setattr(T, "probe_duration", lambda p: 10.0)
+    save_json(os.path.join(str(tmp_path), "chunk_0.json"),
+              [{"start": 0, "end": 1, "text": "hi"}], indent=0)
+
+    def _boom(*a, **k):
+        raise AssertionError("extract_chunk should not run on full resume")
+
+    monkeypatch.setattr(T, "extract_chunk", _boom)
+    out = T.transcribe_video("/path/to/myvideo.mp4", str(tmp_path),
+                             progress=lambda *_: None)
+    assert out.endswith("myvideo.segments_en.json")
+
+
+def test_transcribe_lang_none_passes_language_none(tmp_path, monkeypatch):
+    """lang=None -> Whisper transcribe receives language=None (auto-detect)."""
+    import sys
+
+    captured = {}
+
+    class FakeModel:
+        def __init__(self, *a, **k):
+            pass
+
+        def transcribe(self, wav, language=None, **kw):
+            captured["language"] = language
+            return [], None
+
+    fake = type(sys)("faster_whisper")
+    fake.WhisperModel = FakeModel
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake)
+    monkeypatch.setattr(T, "probe_duration", lambda p: 10.0)
+    monkeypatch.setattr(T, "extract_chunk", lambda *a, **k: None)
+
+    T.transcribe_video("vid.mp4", str(tmp_path), base="x", lang=None,
+                       progress=lambda *_: None)
+    assert captured["language"] is None
+
+
+def test_transcribe_lang_en_passed_through(tmp_path, monkeypatch):
+    """lang='en' -> Whisper transcribe receives language='en'."""
+    import sys
+
+    captured = {}
+
+    class FakeModel:
+        def __init__(self, *a, **k):
+            pass
+
+        def transcribe(self, wav, language=None, **kw):
+            captured["language"] = language
+            return [], None
+
+    fake = type(sys)("faster_whisper")
+    fake.WhisperModel = FakeModel
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake)
+    monkeypatch.setattr(T, "probe_duration", lambda p: 10.0)
+    monkeypatch.setattr(T, "extract_chunk", lambda *a, **k: None)
+
+    T.transcribe_video("vid.mp4", str(tmp_path), base="x", lang="en",
+                       progress=lambda *_: None)
+    assert captured["language"] == "en"

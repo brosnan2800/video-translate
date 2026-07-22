@@ -6,23 +6,25 @@ Module: `cli.py`. Entry points: `video-translate` (console script) and
 ## Subcommands
 | Command      | Purpose                                                    |
 |--------------|------------------------------------------------------------|
-| `transcribe` | video → `{base}.segments_en.json` (chunked, resumable)     |
-| `translate`  | `segments_en.json` → `{base}.zh_segments.json` (+ pending) |
+| `transcribe` | video → `{base}.segments_en.json` (chunked, resumable, +merge) |
+| `translate`  | `segments_en.json` → task (agent) or `zh_segments.json` (google) |
 | `generate`   | segments + zh → four subtitle files                        |
-| `run`        | full pipeline: transcribe → translate → generate           |
+| `run`        | full pipeline (agent stops at exit 6; google end-to-end)   |
+| `backfill`   | backfill `agent_pending.json` via the agent engine         |
 | `setup`      | check/download HF model (reuse if cached)                  |
 | `doctor`     | environment self-check (never fails hard)                  |
 
-## Arguments (defaults)
-- `transcribe`: `--input` `--outdir` (required); `--base apollo_story`,
-  `--model large-v3`, `--chunk 240.0`, `--threads None`, `--lang en`.
-- `translate`: `--segments` `--out` (required); `--pending None`, `--proxy None`,
-  `--src en`, `--tgt zh-CN`.
-- `generate`: `--segments` `--zh` `--outdir` (required); `--base apollo_story`.
-- `run`: `--input` `--outdir` (required); `--base`, `--skip {transcribe,translate,
-  generate}*`, `--proxy`, `--src`, `--tgt`. `--skip` lets a re-run reuse existing
-  intermediate JSON (e.g. `--skip transcribe`).
-- `setup`: `--model large-v3`, `--proxy None`.
+## Arguments (V2 defaults)
+- `transcribe`/`run`: **`INPUT` positional**; `--outdir` (default: video's dir),
+  `--base` (default: video stem), `--lang` (default: auto-detect), `--model`,
+  `--chunk`, `--threads`, `--proxy`, `--no-proxy`, `--no-merge`. `run` also takes
+  `--engine {agent,google}` (default `agent`), `--skip`, `--src`, `--tgt`.
+- `translate`: `--segments` `--out` (required); `--engine {agent,google}`
+  (default `agent`), `--pending`, `--proxy`, `--no-proxy`, `--src`, `--tgt`.
+- `generate`: `--segments` `--zh` `--outdir` (required); `--base` (default: derived).
+- `backfill`: `--pending` `--out` (required); `--segments`, `--outdir`, `--base`,
+  `--agent-zh` (triggers merge + generate).
+- `setup`: `--model`, `--proxy`, `--no-proxy`.
 
 Config resolution (Spec 06) fills any value left as CLI-`None`.
 
@@ -35,6 +37,7 @@ Config resolution (Spec 06) fills any value left as CLI-`None`.
 | 3    | missing dependency (ffmpeg / HF model)                          |
 | 4    | proxy error (SOCKS given — ADR-003)                             |
 | 5    | transcription killed (SIGKILL); some chunks done, safe re-run  |
+| 6    | **awaiting agent action** — transcribe+task done; agent must translate (V2) |
 
 ## Contract (testable without heavy deps)
 - `build_parser()` accepts every documented flag and rejects unknown subcommands

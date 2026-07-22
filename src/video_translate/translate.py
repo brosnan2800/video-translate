@@ -1,9 +1,13 @@
-"""Incremental Google translation of English segments (via HTTP proxy).
+"""Translation of English segments to Chinese.
 
-Google Translate is the primary engine (best quality when the proxy is up).
-Translation is incremental and resumable: already-translated indices are skipped,
-progress is checkpointed every N segments, and any segment that fails after
-retries is recorded to a pending file for the agent to backfill.
+V1: incremental Google translation (via HTTP proxy), resumable, with a pending
+file for segments Google cannot translate.
+
+V2: ``--engine agent`` (default) does NOT call any LLM API. It emits a
+"translation task" file (batched, with sliding-window context + persona) for the
+calling agent (WorkBuddy/Claude Code/...) to fill using its own LLM. Google
+remains as the ``--engine google`` headless fallback. No LLM client dependency is
+added — the agent IS the engine.
 
 deep_translator is imported lazily so unit tests don't require it.
 """
@@ -12,11 +16,16 @@ from __future__ import annotations
 import time
 from typing import Any, Callable
 
+from .config import DEFAULT_PERSONA
 from .io_utils import load_json, load_json_default, save_json
 from .proxy import DEFAULT_PROXY, setup_http_proxy
 
 CHECKPOINT_EVERY = 10
 MAX_RETRIES = 3
+
+# --- agent engine defaults -------------------------------------------------
+DEFAULT_BATCH_SIZE = 8
+DEFAULT_CONTEXT_WINDOW = 2  # segments of context before + after each batch
 
 
 def _make_translator(src: str, tgt: str) -> Callable[[str], str]:
@@ -47,7 +56,7 @@ def translate_segments(
     out_path: str,
     *,
     pending_path: str | None = None,
-    proxy: str = DEFAULT_PROXY,
+    proxy: str | None = DEFAULT_PROXY,
     src: str = "en",
     tgt: str = "zh-CN",
     translate_fn: Callable[[str], str] | None = None,
@@ -96,3 +105,103 @@ def translate_segments(
         save_json(pending_path, pending, indent=2)
     progress(f"[done] translated {len(done)}/{n}, failed {len(pending)}")
     return {str(k): v for k, v in done.items()}
+
+
+# --- V2: agent engine ------------------------------------------------------
+
+
+def prepare_translate_task(
+    segments_path: str,
+    task_path: str,
+    *,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    context_window: int = DEFAULT_CONTEXT_WINDOW,
+    persona: str = DEFAULT_PERSONA,
+    index_key: str | None = None,
+    progress=print,
+) -> str:
+    """Read segments, batch them with sliding-window context, write a translation
+    task file for the calling agent to fill. Returns task_path.
+
+    The agent reads this file, translates each ``to_translate`` item per the
+    persona, and writes ``{str(index): zh}`` to ``<base>.zh_segments.json``.
+
+    ``index_key``: if given, use ``seg[index_key]`` as the item's index (used by
+    ``backfill`` where pending items carry their original zh_segments index);
+    otherwise use the positional index (0-based).
+    """
+    segs: list[dict[str, Any]] = load_json(segments_path)
+    n = len(segs)
+
+    def _idx(j: int):
+        return segs[j][index_key] if index_key else j
+
+    batches: list[dict[str, Any]] = []
+    for i in range(0, n, batch_size):
+        lo, hi = i, min(i + batch_size, n)
+        cb = [{"index": _idx(j), "text": segs[j].get("text", "")}
+              for j in range(max(0, lo - context_window), lo)]
+        tt = [{"index": _idx(j), "text": segs[j].get("text", "")} for j in range(lo, hi)]
+        ca = [{"index": _idx(j), "text": segs[j].get("text", "")}
+              for j in range(hi, min(n, hi + context_window))]
+        batches.append({
+            "batch_index": i // batch_size,
+            "context_before": cb,
+            "to_translate": tt,
+            "context_after": ca,
+        })
+    task = {
+        "version": 1,
+        "persona": persona,
+        "output_schema": {
+            "type": "object",
+            "description": (
+                "Dict mapping str(index) -> Chinese translation. Keys MUST cover "
+                "every index in to_translate[*].index (as strings)."
+            ),
+            "required_keys": "all indices in to_translate[*].index (as strings)",
+        },
+        "batches": batches,
+    }
+    save_json(task_path, task, indent=2)
+    progress(f"[agent-translate] task written: {task_path} ({len(batches)} batches, {n} segments)")
+    return task_path
+
+
+def validate_zh(
+    segments_path: str,
+    zh_path: str,
+    *,
+    progress=print,
+) -> tuple[bool, list[int]]:
+    """Check zh_segments.json completeness: every segment index has a zh entry.
+
+    Returns (ok, missing_indices).
+    """
+    segs: list[dict[str, Any]] = load_json(segments_path)
+    zh_raw: dict[str, Any] = load_json_default(zh_path, {})
+    zh_keys = {int(k) for k in zh_raw.keys()}
+    missing = [i for i in range(len(segs)) if i not in zh_keys]
+    ok = not missing
+    if ok:
+        progress(f"[validate] ok: {len(segs)} segments all translated")
+    else:
+        progress(f"[validate] missing {len(missing)} indices: {missing[:10]}...")
+    return ok, missing
+
+
+def merge_agent_zh(
+    zh_path: str,
+    agent_zh_path: str,
+    *,
+    progress=print,
+) -> dict[str, str]:
+    """Merge agent-filled zh into zh_segments.json (existing keys kept, new ones
+    added/overwritten). Returns the merged dict.
+    """
+    existing: dict[str, Any] = load_json_default(zh_path, {})
+    new: dict[str, Any] = load_json_default(agent_zh_path, {})
+    existing.update({str(k): v for k, v in new.items()})
+    save_json(zh_path, existing, indent=None)
+    progress(f"[merge-zh] merged {len(new)} translations into {zh_path}")
+    return {str(k): v for k, v in existing.items()}

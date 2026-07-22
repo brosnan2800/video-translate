@@ -13,6 +13,7 @@ translate/generate subcommands don't need the heavy library or the 3GB model.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
 
 from .ffmpeg_utils import extract_chunk, probe_duration
@@ -61,16 +62,18 @@ def transcribe_video(
     input_path: str,
     outdir: str,
     *,
-    base: str = "apollo_story",
+    base: str | None = None,
     model_name: str = "large-v3",
     chunk: float = 240.0,
     threads: int | None = None,
-    lang: str = "en",
+    lang: str | None = None,
     progress=print,
 ) -> str:
     """Transcribe `input_path` into `{outdir}/{base}.segments_en.json`.
 
-    Resumable: any chunk whose chunk_N.json already exists is reused, not re-run.
+    V2: ``base`` defaults to the input filename stem; ``lang`` defaults to None
+    (Whisper auto-detect). Resumable: any chunk whose chunk_N.json already
+    exists is reused, not re-run.
 
     Returns:
         Path to the merged segments JSON.
@@ -78,6 +81,7 @@ def transcribe_video(
     from faster_whisper import WhisperModel  # lazy: heavy import
 
     os.makedirs(outdir, exist_ok=True)
+    base = base or Path(input_path).stem
     threads = threads or os.cpu_count()
     total = probe_duration(input_path)
     plan = plan_chunks(total, chunk)

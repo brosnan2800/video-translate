@@ -28,6 +28,18 @@ def golden_zh_path(golden_dir: str) -> str:
     return os.path.join(golden_dir, "apollo_story.zh_segments.json")
 
 
+@pytest.fixture(scope="session")
+def golden_raw_segments_path(golden_dir: str) -> str:
+    """V1 unmerged segments (the raw input to the merge stage)."""
+    return os.path.join(golden_dir, "apollo_story.segments_raw.json")
+
+
+@pytest.fixture(scope="session")
+def golden_merged_segments_path(golden_dir: str) -> str:
+    """Frozen output of merge_segments(golden_raw_segments_path)."""
+    return os.path.join(golden_dir, "apollo_story.merged_segments.json")
+
+
 def _read_bytes(path: str) -> bytes:
     with open(path, "rb") as f:
         return f.read()
