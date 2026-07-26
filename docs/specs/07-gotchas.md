@@ -69,3 +69,15 @@ Golden `zh_segments.json` is retranslated with Google (pinned
 `deep-translator==1.9.1`), NOT the agent engine — LLM output drifts and would
 break the byte-exact regression. Agent translation is for production only.
 (决裁定稿 §1)
+
+## 15. `words` must survive merge (V3)
+`_emit` must carry the `words` list through merge; the split pass consumes them.
+If merge drops `words`, the word-boundary tightening (Spec 15) and word-level
+split (Spec 13) silently no-op and fall back to segment-level timing — defeating
+V3. Enforced by `test_emit_carries_words`. (ADR-008/009)
+
+## 16. Split changes cue count → zh must be retranslated (V3)
+`split_long_cues` raises the number of cues vs V2. A `zh_segments.json` built
+against V2 `segments_en.json` is therefore **invalid** for V3. Always
+retranslate from the new `segments_en.json`. Golden regen archives V2 as `.v2`.
+(决裁定稿 §2 / Spec 13)

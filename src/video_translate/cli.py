@@ -10,6 +10,9 @@ Exit codes:
     4  proxy error (e.g. SOCKS proxy given)
     5  transcription killed (SIGKILL); some chunks completed, safe to re-run
     6  awaiting agent action (transcribe + task done; agent must translate)
+    7  doctor --strict: a required environment check failed (e.g. Google
+       translate endpoint unreachable). Only raised with --strict; doctor
+       otherwise prints [MISS] and still returns 0.
 """
 from __future__ import annotations
 
@@ -32,6 +35,7 @@ EXIT_MISSING_DEP = 3
 EXIT_PROXY = 4
 EXIT_KILLED = 5
 EXIT_AWAITING_AGENT = 6
+EXIT_DOCTOR_FAIL = 7
 
 
 # --------------------------- helpers ---------------------------
@@ -86,7 +90,8 @@ def _resolve_proxy(args: argparse.Namespace) -> str | None:
 # --------------------------- doctor / setup ---------------------------
 
 def cmd_doctor(args: argparse.Namespace) -> int:
-    """Report environment readiness. Never fails hard; returns 0."""
+    """Report environment readiness. Returns 0 unless --strict and a check fails."""
+    strict = getattr(args, "strict", False)
     print(f"video-translate {__version__} — environment check\n")
     checks = [
         ("ffmpeg", _has("ffmpeg")),
@@ -94,8 +99,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         (f"HF cache dir ({_hf_cache_dir()})", os.path.isdir(_hf_cache_dir())),
         ("large-v3 model cached (reuse, no re-download)", _model_cached("large-v3")),
     ]
+    failed = False
     for name, ok in checks:
         print(f"  [{'OK ' if ok else 'MISS'}] {name}")
+        if not ok:
+            failed = True
 
     print(f"\n  device        : cpu (forced; CTranslate2 has no AMD/Metal support)")
     print(f"  compute_type  : int8")
@@ -115,6 +123,22 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     print(f"  engine        : {cfg.engine}")
     print(f"  lang          : {'auto-detect' if cfg.lang is None else cfg.lang}")
     print(f"  proxy         : auto-detect (--no-proxy for direct)")
+
+    # V3: probe Google Translate endpoint reachability via the resolved proxy,
+    # so a 7-minute transcribe won't fail first at the translate step.
+    proxy = detect_proxy()
+    try:
+        from .proxy import _probe_google_endpoint
+        reachable = _probe_google_endpoint(proxy)
+    except Exception:
+        reachable = False
+    tag = "via proxy" if proxy else "via direct"
+    print(f"  Google translate endpoint ({tag}): {'OK' if reachable else 'MISS'}")
+    if not reachable:
+        failed = True
+
+    if strict and failed:
+        return EXIT_DOCTOR_FAIL
     return EXIT_OK
 
 
@@ -158,7 +182,8 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
     outdir = args.outdir or _default_outdir(input_path)
     base = args.base or _default_base(input_path)
     cfg = resolve_config(
-        {"model": args.model, "chunk": args.chunk, "lang": args.lang},
+        {"model": args.model, "chunk": args.chunk, "lang": args.lang,
+         "merge_max_chars": getattr(args, "merge_max_chars", None)},
         cwd=os.getcwd(),
     )
     proxy = _resolve_proxy(args)
@@ -177,9 +202,13 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
             from .merge import apply_merge
             segs_path = os.path.join(outdir, f"{base}.segments_en.json")
             raw_path = os.path.join(outdir, f"{base}.segments_raw.json")
-            apply_merge(segs_path, raw_path=raw_path,
-                        max_dur=cfg.merge_max_dur, max_gap=cfg.merge_max_gap)
-            print(f"[merge] merged -> {segs_path} (raw kept at {raw_path})")
+            apply_merge(
+                segs_path, raw_path=raw_path,
+                max_dur=cfg.merge_max_dur, max_gap=cfg.merge_max_gap,
+                split_enabled=not getattr(args, "no_split", False),
+                split_max_chars=cfg.merge_max_chars,
+            )
+            print(f"[merge] merged + split -> {segs_path} (raw kept at {raw_path})")
         return EXIT_OK
     except Exception as e:  # noqa: BLE001
         print(f"[error] transcription failed: {e}", file=sys.stderr)
@@ -201,7 +230,12 @@ def cmd_translate(args: argparse.Namespace) -> int:
         else:
             base_name = os.path.splitext(out_name)[0]
         task_path = os.path.join(os.path.dirname(out), f"{base_name}.translate_task.json")
-        prepare_translate_task(segments, task_path, persona=cfg.persona)
+        glossary_text = None
+        if cfg.glossary:
+            from .glossary import load_glossary
+            glossary_text = load_glossary(cfg.glossary)
+        prepare_translate_task(segments, task_path, persona=cfg.persona,
+                                glossary=glossary_text)
         base = _derive_base(segments)
         outdir = str(Path(out).parent)
         print(_AGENT_TRANSLATE_INSTRUCTIONS.format(
@@ -227,9 +261,10 @@ def cmd_translate(args: argparse.Namespace) -> int:
 
 def cmd_generate(args: argparse.Namespace) -> int:
     base = args.base or _derive_base(args.segments)
+    gap = getattr(args, "gap", 0.0) or 0.0
     try:
         from .generate import generate_subtitles
-        generate_subtitles(args.segments, args.zh, args.outdir, base=base)
+        generate_subtitles(args.segments, args.zh, args.outdir, base=base, gap=gap)
         return EXIT_OK
     except Exception as e:  # noqa: BLE001
         print(f"[error] generate failed: {e}", file=sys.stderr)
@@ -254,7 +289,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     cfg = resolve_config(
         {"model": args.model, "chunk": args.chunk, "lang": args.lang,
          "proxy": args.proxy, "src": args.src, "tgt": args.tgt,
-         "engine": args.engine},
+         "engine": args.engine, "merge_max_chars": getattr(args, "merge_max_chars", None),
+         "glossary": getattr(args, "glossary", None)},
         cwd=os.getcwd(),
     )
 
@@ -263,13 +299,20 @@ def cmd_run(args: argparse.Namespace) -> int:
             input=input_path, outdir=outdir, base=base,
             model=cfg.model, chunk=cfg.chunk, threads=args.threads, lang=cfg.lang,
             proxy=args.proxy, no_proxy=args.no_proxy, no_merge=args.no_merge,
+            no_split=getattr(args, "no_split", False),
+            merge_max_chars=cfg.merge_max_chars,
         ))
         if rc != EXIT_OK:
             return rc
 
     if cfg.engine == "agent" and "translate" not in skip:
         from .translate import prepare_translate_task
-        prepare_translate_task(segments, task, persona=cfg.persona)
+        glossary_text = None
+        if cfg.glossary:
+            from .glossary import load_glossary
+            glossary_text = load_glossary(cfg.glossary)
+        prepare_translate_task(segments, task, persona=cfg.persona,
+                                glossary=glossary_text)
         print(_RUN_AWAITING_AGENT_INSTRUCTIONS.format(
             task=task, segments=segments, zh=zh, outdir=outdir, base=base))
         return EXIT_AWAITING_AGENT
@@ -286,6 +329,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     if "generate" not in skip:
         rc = cmd_generate(argparse.Namespace(
             segments=segments, zh=zh, outdir=outdir, base=base,
+            gap=getattr(args, "gap", 0.0) or 0.0,
         ))
         if rc != EXIT_OK:
             return rc
@@ -392,6 +436,8 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--proxy", default=None)
     t.add_argument("--no-proxy", action="store_true", help="force direct connection (no proxy)")
     t.add_argument("--no-merge", action="store_true", help="skip segment-merge stage (Stage 2)")
+    t.add_argument("--no-split", action="store_true", help="skip cue splitting (Stage 2b); keep merged cues as-is")
+    t.add_argument("--merge-max-chars", type=int, default=None, help="max chars per cue before splitting (default 42)")
     t.set_defaults(func=cmd_transcribe)
 
     tr = sub.add_parser("translate", help="Translate segments_en.json -> zh_segments.json")
@@ -404,6 +450,8 @@ def build_parser() -> argparse.ArgumentParser:
     tr.add_argument("--tgt", default="zh-CN")
     tr.add_argument("--engine", default=None, choices=["agent", "google"],
                     help="agent (default) emits a task for the calling agent; google is headless MT")
+    tr.add_argument("--glossary", default=None,
+                    help="path to glossary file (txt/json) injected into the translation persona")
     tr.set_defaults(func=cmd_translate)
 
     g = sub.add_parser("generate", help="Generate the four subtitle files")
@@ -411,6 +459,8 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--zh", required=True)
     g.add_argument("--outdir", required=True)
     g.add_argument("--base", default=None)
+    g.add_argument("--gap", type=float, default=0.2,
+                   help="min gap (s) between cues; trims trailing silence (default 0.2)")
     g.set_defaults(func=cmd_generate)
 
     r = sub.add_parser("run", help="Full pipeline: transcribe -> translate -> generate")
@@ -425,10 +475,14 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--proxy", default=None)
     r.add_argument("--no-proxy", action="store_true")
     r.add_argument("--no-merge", action="store_true")
+    r.add_argument("--no-split", action="store_true", help="skip cue splitting")
+    r.add_argument("--merge-max-chars", type=int, default=None, help="max chars per cue before splitting (default 42)")
     r.add_argument("--src", default="en")
     r.add_argument("--tgt", default="zh-CN")
     r.add_argument("--engine", default=None, choices=["agent", "google"],
                     help="agent (default) stops after task; google runs end-to-end")
+    r.add_argument("--gap", type=float, default=0.2, help="min gap (s) between cues (default 0.2)")
+    r.add_argument("--glossary", default=None, help="path to glossary file (txt/json)")
     r.set_defaults(func=cmd_run)
 
     s = sub.add_parser("setup", help="Check/download the HF model (reuse if cached)")
@@ -438,6 +492,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_setup)
 
     d = sub.add_parser("doctor", help="Environment self-check")
+    d.add_argument("--strict", action="store_true",
+                   help="return exit code 7 if any check (incl. Google endpoint) fails")
     d.set_defaults(func=cmd_doctor)
 
     b = sub.add_parser("backfill", help="Backfill agent_pending via the agent engine")

@@ -19,6 +19,8 @@ def test_defaults(tmp_path):
     assert cfg.merge_max_dur == 8.0
     assert cfg.merge_max_gap == 0.5
     assert cfg.merge_max_chars == 42
+    # V3 fields
+    assert cfg.glossary is None
 
 
 def test_toml_overrides_default(tmp_path):
@@ -99,3 +101,35 @@ def test_cli_none_is_ignored(tmp_path):
 def test_lang_auto_normalised_to_none(tmp_path):
     cfg = resolve_config({"lang": "auto"}, cwd=str(tmp_path), env={})
     assert cfg.lang is None
+
+
+# --- V3: glossary + merge_max_chars CLI flag ---
+
+
+def test_glossary_default_none(tmp_path):
+    cfg = resolve_config(cwd=str(tmp_path), env={})
+    assert cfg.glossary is None
+
+
+def test_toml_glossary(tmp_path):
+    toml = tmp_path / ".video-translate.toml"
+    toml.write_text("[translate]\nglossary = 'glossary.txt'\n", encoding="utf-8")
+    cfg = resolve_config(cwd=str(tmp_path), env={})
+    assert cfg.glossary == "glossary.txt"
+
+
+def test_env_vt_glossary(tmp_path):
+    cfg = resolve_config(cwd=str(tmp_path), env={"VT_GLOSSARY": "env_glossary.txt"})
+    assert cfg.glossary == "env_glossary.txt"
+
+
+def test_cli_glossary_override(tmp_path):
+    cfg = resolve_config({"glossary": "cli_glossary.txt"}, cwd=str(tmp_path), env={})
+    assert cfg.glossary == "cli_glossary.txt"
+    assert cfg._sources["glossary"] == "cli"
+
+
+def test_merge_max_chars_cli_flag(tmp_path):
+    cfg = resolve_config({"merge_max_chars": 50}, cwd=str(tmp_path), env={})
+    assert cfg.merge_max_chars == 50
+    assert cfg._sources["merge_max_chars"] == "cli"

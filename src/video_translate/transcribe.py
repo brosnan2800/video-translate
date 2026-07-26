@@ -107,11 +107,19 @@ def transcribe_video(
             wav, language=lang, task="transcribe",
             beam_size=BEAM_SIZE, best_of=BEST_OF,
             vad_filter=True, vad_parameters=dict(VAD_PARAMS),
+            word_timestamps=True,   # V3: word-level timestamps for split + silence
         )
         chunk_segs = [
-            {"start": round(s.start + cstart, 2),
-             "end": round(s.end + cstart, 2),
-             "text": s.text.strip()}
+            {
+                "start": round(s.start + cstart, 2),
+                "end": round(s.end + cstart, 2),
+                "text": s.text.strip(),
+                "words": [
+                    {"word": w.word, "start": round(w.start + cstart, 2),
+                     "end": round(w.end + cstart, 2)}
+                    for w in (s.words or [])
+                ],
+            }
             for s in segs
         ]
         save_json(cjson, chunk_segs, indent=0)

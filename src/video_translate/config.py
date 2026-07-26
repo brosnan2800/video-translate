@@ -49,6 +49,8 @@ class Config:
     merge_max_dur: float = 8.0
     merge_max_gap: float = 0.5
     merge_max_chars: int = 42
+    # V3 fields
+    glossary: str | None = None     # path to glossary file (txt/json), injected into persona
     _sources: dict[str, str] = field(default_factory=dict, repr=False)
 
 
@@ -114,7 +116,7 @@ def resolve_config(
         "hf_cache_dir": "HF_HOME",
         "engine": "VT_ENGINE", "persona": "VT_PERSONA",
         "merge_max_dur": "VT_MERGE_MAX_DUR", "merge_max_gap": "VT_MERGE_MAX_GAP",
-        "merge_max_chars": "VT_MERGE_MAX_CHARS",
+        "merge_max_chars": "VT_MERGE_MAX_CHARS", "glossary": "VT_GLOSSARY",
     }
     for attr, envkey in env_map.items():
         if envkey in env and env[envkey]:

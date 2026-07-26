@@ -136,3 +136,29 @@ importable file for 剪映 is `<base>.bilingual.srt`.
    expecting a different result — translate the task and `generate`.
 
 See [`docs/specs/07-gotchas.md`](docs/specs/07-gotchas.md) for the full list.
+
+---
+
+## V3 additions (word-level, splitting, glossary, doctor probe)
+
+- **`doctor` now also probes Google reachability** (V3, Spec 15): it resolves the
+  proxy and actually checks the Google Translate endpoint. By default it still
+  exits 0 and only prints `[MISS]` if unreachable — so a 7-minute transcribe
+  won't fail first. Add `--strict` to make unreachable return exit 7.
+- **Word-level timestamps (V3, Spec 12):** transcribe now uses `stable_whisper`
+  with `word_timestamps=True`. `chunk_N.json` and `segments_en.json` carry a
+  `words` list per segment. These power split + silence preservation.
+- **Splitting (V3, Spec 13):** after merge, long cues are split at **word
+  boundaries** to ~42 chars (`--merge-max-chars`). Default ON; `--no-split`
+  restores V2 behavior. Because split changes the cue count, a V3 `zh` must be
+  **retranslated** from the new `segments_en.json` — never reuse a V2 `zh`.
+- **Silence preservation (V3, Spec 15):** cues use first-word/last-word
+  boundaries (no leading-silence "early" cue), and `--gap` (default 0.2s) only
+  trims trailing silence, never fabricates gaps. Real pauses survive from the
+  source via `split_by_gap`.
+- **Glossary (V3, Spec 14):** pass `--glossary PATH` (txt/json) to keep
+  character/proper-noun names consistent across episodes. It is injected into
+  the task's persona context (soft guidance, not forced replacement).
+- See [`docs/design/translation-design.md`](docs/design/translation-design.md)
+  for the principles, and [`docs/V3-STATUS.md`](docs/V3-STATUS.md) for what
+  shipped / what's deferred.

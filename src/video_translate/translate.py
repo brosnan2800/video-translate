@@ -118,6 +118,7 @@ def prepare_translate_task(
     context_window: int = DEFAULT_CONTEXT_WINDOW,
     persona: str = DEFAULT_PERSONA,
     index_key: str | None = None,
+    glossary: str | None = None,
     progress=print,
 ) -> str:
     """Read segments, batch them with sliding-window context, write a translation
@@ -129,9 +130,17 @@ def prepare_translate_task(
     ``index_key``: if given, use ``seg[index_key]`` as the item's index (used by
     ``backfill`` where pending items carry their original zh_segments index);
     otherwise use the positional index (0-based).
+
+    ``glossary``: optional pre-formatted glossary context string (from
+    ``glossary.load_glossary``). When present it is prepended to the persona so the
+    agent keeps character/proper-noun names consistent (Spec 14 / ADR-010).
     """
     segs: list[dict[str, Any]] = load_json(segments_path)
     n = len(segs)
+
+    effective_persona = persona
+    if glossary:
+        effective_persona = glossary + "\n\n" + persona
 
     def _idx(j: int):
         return segs[j][index_key] if index_key else j
@@ -152,7 +161,8 @@ def prepare_translate_task(
         })
     task = {
         "version": 1,
-        "persona": persona,
+        "persona": effective_persona,
+        "glossary": glossary,
         "output_schema": {
             "type": "object",
             "description": (
@@ -164,7 +174,8 @@ def prepare_translate_task(
         "batches": batches,
     }
     save_json(task_path, task, indent=2)
-    progress(f"[agent-translate] task written: {task_path} ({len(batches)} batches, {n} segments)")
+    progress(f"[agent-translate] task written: {task_path} ({len(batches)} batches, {n} segments)"
+             + (f", glossary={len(glossary)} chars" if glossary else ""))
     return task_path
 
 

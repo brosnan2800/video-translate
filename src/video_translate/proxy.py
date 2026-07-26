@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import socket
+import urllib.request
 
 DEFAULT_PROXY = "http://127.0.0.1:7890"
 
@@ -96,3 +97,29 @@ def detect_proxy(
     if _probe(probe_host, probe_port, probe_timeout):
         return f"http://{probe_host}:{probe_port}"
     return None
+
+
+def _probe_google_endpoint(proxy: str | None, timeout: float = 5.0) -> bool:
+    """Return True if the Google Translate endpoint is reachable via `proxy`.
+
+    Temporarily applies the proxy env, performs a tiny HEAD/GET, then restores
+    the previous proxy env. Never raises — network failures return False.
+    """
+    saved: dict[str, str | None] = {}
+    for k in _HTTP_VARS + _SOCKS_VARS:
+        saved[k] = os.environ.get(k)
+    try:
+        setup_http_proxy(proxy)
+        url = ("https://translate.google.com/translate_a/single"
+               "?client=gtx&q=hello&sl=en&tl=zh-CN&dt=t")
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return 200 <= resp.status < 400
+    except Exception:
+        return False
+    finally:
+        for k in _HTTP_VARS + _SOCKS_VARS:
+            if saved[k] is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = saved[k]

@@ -3,7 +3,7 @@ network, no deep_translator, no proxy required."""
 import json
 import os
 
-from video_translate.translate import translate_segments
+from video_translate.translate import prepare_translate_task, translate_segments
 
 
 def _write_segments(path, texts):
@@ -67,3 +67,29 @@ def test_translate_writes_empty_pending_when_all_ok(tmp_path):
     _write_segments(seg, ["x"])
     translate_segments(seg, out, pending_path=pend, translate_fn=lambda t: t)
     assert json.load(open(pend, encoding="utf-8")) == []
+
+
+# --- V3: glossary injection into the agent task ---
+
+
+def test_prepare_task_includes_glossary(tmp_path):
+    seg = os.path.join(tmp_path, "seg.json")
+    task = os.path.join(tmp_path, "task.json")
+    _write_segments(seg, ["Iron Man"])
+    glossary = "术语表（翻译时请优先采用以下译名，保持全片一致）：\n- Iron Man => 钢铁侠"
+    prepare_translate_task(seg, task, glossary=glossary)
+    data = json.load(open(task, encoding="utf-8"))
+    assert data["glossary"] == glossary
+    # persona carries the glossary, prepended before the default persona
+    assert data["persona"].startswith(glossary)
+    assert "钢铁侠" in data["persona"]
+
+
+def test_prepare_task_without_glossary_clean(tmp_path):
+    seg = os.path.join(tmp_path, "seg.json")
+    task = os.path.join(tmp_path, "task.json")
+    _write_segments(seg, ["hello"])
+    prepare_translate_task(seg, task, glossary=None)
+    data = json.load(open(task, encoding="utf-8"))
+    assert data["glossary"] is None
+    assert "术语表" not in data["persona"]

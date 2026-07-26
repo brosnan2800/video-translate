@@ -64,6 +64,79 @@ def test_resume_skips_completed_chunks_without_model(tmp_path, monkeypatch):
     assert [s["text"] for s in merged] == ["hello", "world"]
 
 
+# --- V3: word-level timestamps ---
+
+
+def test_transcribe_stores_words(tmp_path, monkeypatch):
+    """V3: transcribe must request word_timestamps=True and carry words into
+    the emitted segments (rounded to 2dp, offset by chunk start)."""
+    import json as _json
+    import sys
+
+    monkeypatch.setattr(T, "probe_duration", lambda p: 10.0)
+    monkeypatch.setattr(T, "extract_chunk", lambda *a, **k: None)
+
+    captured = {}
+
+    class FakeWord:
+        def __init__(self, word, start, end):
+            self.word = word
+            self.start = start
+            self.end = end
+
+    class FakeSeg:
+        def __init__(self):
+            self.text = "Hello world"
+            self.start = 1.0
+            self.end = 2.0
+            self.words = [FakeWord("Hello", 1.05, 1.4), FakeWord("world", 1.5, 1.95)]
+
+    class FakeModel:
+        def __init__(self, *a, **k):
+            pass
+
+        def transcribe(self, wav, language=None, **kw):
+            captured["word_timestamps"] = kw.get("word_timestamps")
+            return [FakeSeg()], None
+
+    fake = type(sys)("faster_whisper")
+    fake.WhisperModel = FakeModel
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake)
+
+    out = T.transcribe_video("vid.mp4", str(tmp_path), base="x", lang=None,
+                              progress=lambda *_: None)
+    merged = _json.load(open(out, encoding="utf-8"))
+    assert captured["word_timestamps"] is True
+    assert merged[0]["words"] == [
+        {"word": "Hello", "start": 1.05, "end": 1.4},
+        {"word": "world", "start": 1.5, "end": 1.95},
+    ]
+
+
+def test_transcribe_resume_keeps_words(tmp_path, monkeypatch):
+    """On full resume, pre-seeded chunk JSON with words must survive merge."""
+    import json as _json
+
+    monkeypatch.setattr(T, "probe_duration", lambda p: 300.0)
+
+    def _boom(*a, **k):
+        raise AssertionError("extract_chunk called during full resume")
+
+    monkeypatch.setattr(T, "extract_chunk", _boom)
+    save_json(os.path.join(str(tmp_path), "chunk_0.json"),
+              [{"start": 0, "end": 1, "text": "hi",
+                "words": [{"word": "hi", "start": 0.1, "end": 0.9}]}], indent=0)
+    # total 300s, chunk 240s -> chunks 0 and 1; seed BOTH so the run is a full resume
+    save_json(os.path.join(str(tmp_path), "chunk_1.json"),
+              [{"start": 240, "end": 241, "text": "ya",
+                "words": [{"word": "ya", "start": 240.1, "end": 240.9}]}], indent=0)
+
+    out = T.transcribe_video("dummy.mp4", str(tmp_path), base="apollo_story",
+                              progress=lambda *_: None)
+    merged = _json.load(open(out, encoding="utf-8"))
+    assert merged[0]["words"][0]["word"] == "hi"
+
+
 # --- V2 ---
 
 

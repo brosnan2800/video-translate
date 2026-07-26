@@ -3,7 +3,7 @@
 I used to spend the night in hotel parking lots.
 
 2
-00:00:05,710 --> 00:00:06,350
+00:00:05,710 --> 00:00:06,170
 What was I going to do?
 
 3
@@ -15,7 +15,7 @@ I ain't had nowhere to stay, so I lived in the car.
 I had $35.
 
 5
-00:00:10,920 --> 00:00:15,150
+00:00:10,920 --> 00:00:15,010
 And I said, come on, God, man, I've been trying to make this dream come true.
 
 6
@@ -27,7 +27,7 @@ You done left me out here like this.
 And I was crying so hard that he just said, I didn't like hear a voice or nothing.
 
 8
-00:00:22,590 --> 00:00:24,110
+00:00:22,590 --> 00:00:23,910
 But he spoke to me.
 
 9
@@ -43,11 +43,11 @@ Now, I was fitting to quit.
 So I said, skip it.
 
 12
-00:00:34,330 --> 00:00:35,090
+00:00:34,330 --> 00:00:35,010
 I'm going to quit anyway.
 
 13
-00:00:35,210 --> 00:00:36,150
+00:00:35,210 --> 00:00:35,950
 So I got in my car.
 
 14
@@ -91,11 +91,11 @@ If you could get here Sunday night, we'd love to put you on television.
 Call me back.
 
 24
-00:01:07,300 --> 00:01:08,680
+00:01:07,300 --> 00:01:08,480
 Let me know if you can make it.
 
 25
-00:01:08,680 --> 00:01:10,810
+00:01:08,680 --> 00:01:10,650
 So I hung the phone up.
 
 26
@@ -107,7 +107,7 @@ I'm crushed.
 Because my whole dream of being on TV.
 
 28
-00:01:15,540 --> 00:01:16,840
+00:01:15,540 --> 00:01:16,740
 And I couldn't get to New York.
 
 29
@@ -131,11 +131,11 @@ So I'm standing there at the phone booth.
 I used to spend the night in hotel parking lots.
 
 34
-00:01:29,680 --> 00:01:30,380
+00:01:29,680 --> 00:01:30,180
 What was I going to do?
 
 35
-00:01:30,380 --> 00:01:31,260
+00:01:30,380 --> 00:01:31,140
 I didn't have nowhere to stay.
 
 36
@@ -147,11 +147,11 @@ So I lived in the car.
 I had $35.
 
 38
-00:01:35,830 --> 00:01:37,010
+00:01:35,830 --> 00:01:36,910
 And I said, come on, God.
 
 39
-00:01:37,110 --> 00:01:39,150
+00:01:37,110 --> 00:01:39,030
 Man, I've been trying to make this dream come true.
 
 40
@@ -159,7 +159,7 @@ Man, I've been trying to make this dream come true.
 You done left me out here like this.
 
 41
-00:01:41,470 --> 00:01:44,760
+00:01:41,470 --> 00:01:44,620
 And I was crying so hard that he just said.
 
 42
@@ -183,11 +183,11 @@ Now, I was fitting to quit.
 So I said, skip it.
 
 47
-00:01:58,290 --> 00:01:59,090
+00:01:58,290 --> 00:01:59,010
 I'm going to quit anyway.
 
 48
-00:01:59,210 --> 00:02:00,170
+00:01:59,210 --> 00:02:00,090
 So I got in my car.
 
 49
@@ -195,7 +195,7 @@ So I got in my car.
 I went to a pay phone.
 
 50
-00:02:02,540 --> 00:02:04,480
+00:02:02,540 --> 00:02:04,280
 And I was going to call my dad.
 
 51
@@ -243,11 +243,11 @@ Call me back.
 Let me know if you can make it.
 
 62
-00:02:33,710 --> 00:02:34,810
+00:02:33,710 --> 00:02:34,650
 So I hung the phone up.
 
 63
-00:02:34,850 --> 00:02:35,470
+00:02:34,850 --> 00:02:35,450
 I'm crushed.
 
 64
@@ -255,7 +255,7 @@ I'm crushed.
 Because my whole dream of being on TV.
 
 65
-00:02:39,560 --> 00:02:40,860
+00:02:39,560 --> 00:02:40,780
 And I couldn't get to New York.
 
 66
@@ -275,7 +275,7 @@ I can't make it.
 So I'm standing there at the phone booth.
 
 70
-00:02:49,240 --> 00:02:51,000
+00:02:49,240 --> 00:02:50,860
 And tears just coming down my face.
 
 71
@@ -283,7 +283,7 @@ And tears just coming down my face.
 I said, God.
 
 72
-00:02:52,000 --> 00:02:53,160
+00:02:52,000 --> 00:02:52,980
 So that must be a sign.
 
 73
@@ -291,7 +291,7 @@ So that must be a sign.
 For me to go home.
 
 74
-00:02:55,760 --> 00:02:56,360
+00:02:55,760 --> 00:02:56,240
 Because this it.
 
 75
@@ -299,11 +299,11 @@ Because this it.
 I ain't even got the money to go to the Apollo.
 
 76
-00:02:58,320 --> 00:02:59,420
+00:02:58,320 --> 00:02:59,340
 My whole thing.
 
 77
-00:02:59,540 --> 00:03:00,540
+00:02:59,540 --> 00:03:00,440
 I wanted to be on TV.
 
 78
@@ -331,7 +331,7 @@ And see if he said this Sunday.
 Because maybe he said next Sunday.
 
 84
-00:03:14,720 --> 00:03:16,840
+00:03:14,720 --> 00:03:16,680
 And I can hustle up a little bit of money or something.
 
 85
@@ -339,7 +339,7 @@ And I can hustle up a little bit of money or something.
 I don't know what I'm going to do.
 
 86
-00:03:18,220 --> 00:03:19,420
+00:03:18,220 --> 00:03:19,300
 But let me just call him back.
 
 87
@@ -347,15 +347,15 @@ But let me just call him back.
 So I called him back.
 
 88
-00:03:20,890 --> 00:03:21,750
+00:03:20,890 --> 00:03:21,630
 Steve, this is Chuck Sutton.
 
 89
-00:03:21,830 --> 00:03:22,550
+00:03:21,830 --> 00:03:22,410
 Showtime at the Apollo.
 
 90
-00:03:22,610 --> 00:03:23,570
+00:03:22,610 --> 00:03:23,430
 We saw a tape of yours.
 
 91
@@ -367,7 +367,7 @@ You're very, very funny.
 Look.
 
 93
-00:03:25,430 --> 00:03:27,470
+00:03:25,430 --> 00:03:27,370
 Opening Sunday night at Showtime at the Apollo.
 
 94
@@ -403,7 +403,7 @@ I listened to the second message.
 Said, Steve Harvey, this is Tom Sober from the Comedy Caravan.
 
 102
-00:03:46,320 --> 00:03:46,700
+00:03:46,320 --> 00:03:46,600
 I had.
 
 103
@@ -427,7 +427,7 @@ If you can get there Friday night.
 You'll make $150.
 
 108
-00:03:58,590 --> 00:04:00,000
+00:03:58,590 --> 00:03:59,840
 So I.
 
 109
@@ -467,7 +467,7 @@ So I drive to Jacksonville, Florida.
 And that night I killed.
 
 118
-00:04:16,220 --> 00:04:17,240
+00:04:16,220 --> 00:04:17,200
 I made the 150.
 
 119
@@ -483,7 +483,7 @@ If you stay tomorrow night, I'm going to give you another $150.
 So now I got $300 now.
 
 122
-00:04:29,500 --> 00:04:32,080
+00:04:29,500 --> 00:04:31,880
 So I get on the phone.
 
 123
@@ -495,15 +495,15 @@ I called Chuck Sutton.
 I said, hey, man, is the gig still available at Showtime at the Apollo?
 
 125
-00:04:39,180 --> 00:04:39,660
+00:04:39,180 --> 00:04:39,460
 He said.
 
 126
-00:04:39,660 --> 00:04:39,960
+00:04:39,660 --> 00:04:39,800
 Yeah.
 
 127
-00:04:40,000 --> 00:04:46,060
+00:04:40,000 --> 00:04:45,860
 we got one opening left. I said I'll be there. So I called Eastern Airlines, who used to be open
 
 128
@@ -515,15 +515,15 @@ back then. They had a special for $99 going from Jacksonville, Florida to New Yo
 So I parked my car at the airport. I got on a plane, flew. Everything I had was in two bags.
 
 130
-00:05:19,600 --> 00:05:25,950
+00:05:19,600 --> 00:05:25,750
 Got to the Apollo. I said, hey man, I'm here. I got there at 11 o'clock in the morning. He said,
 
 131
-00:05:25,950 --> 00:05:33,380
+00:05:25,950 --> 00:05:33,180
 you can't stay here because you don't come on to the late show tonight. I said, I ain't got nowhere
 
 132
-00:05:33,380 --> 00:05:40,000
+00:05:33,380 --> 00:05:39,900
 to go. I said, if you just let me stay in this building, man, I ain't gonna move around nothing.
 
 133
@@ -535,55 +535,55 @@ I ain't got nowhere to go. I'm in Harlem. I can't go back out here. I got these 
 I got victim road all over me, man. So he said, all right, if you go upstairs, don't come down.
 
 135
-00:05:54,260 --> 00:05:59,040
+00:05:54,260 --> 00:05:58,840
 So he put me in a dressing room on the sixth floor. So that's where all the comedians was.
 
 136
-00:05:59,040 --> 00:06:02,920
+00:05:59,040 --> 00:06:02,720
 So I stayed up there. I got hungry around three o'clock. I couldn't
 
 137
-00:06:02,920 --> 00:06:07,740
+00:06:02,920 --> 00:06:07,580
 take it no more. So I went back downstairs. A dude named Alton Liston. I said, hey man,
 
 138
-00:06:07,780 --> 00:06:12,000
+00:06:07,780 --> 00:06:11,820
 he said, man, I thought I told you don't come down them damn steps. I said, hey man,
 
 139
-00:06:12,020 --> 00:06:16,460
+00:06:12,020 --> 00:06:16,260
 I'm just hungry, man. I said, let me go to that KFC I saw on the corner. Just let me get some
 
 140
-00:06:16,460 --> 00:06:22,140
+00:06:16,460 --> 00:06:21,940
 chicken. I'll come right back. He said, man, if you ain't back in 20 minutes, you ain't getting
 
 141
-00:06:22,140 --> 00:06:28,530
+00:06:22,140 --> 00:06:28,330
 in this building. So I went, bought me some chicken, came back. So the comedians started
 
 142
-00:06:28,530 --> 00:06:35,860
+00:06:28,530 --> 00:06:35,700
 coming in the building. They started coming up on the sixth floor. So I meet this guy named D.L.
 
 143
-00:06:35,900 --> 00:06:43,010
+00:06:35,900 --> 00:06:42,810
 Hughley. I introduced myself. He introduced his self. I'm sitting there. Another guy come
 
 144
-00:06:43,010 --> 00:06:49,650
+00:06:43,010 --> 00:06:49,450
 in named Dwayne Johnson. Then this other dude walked in named Jamie Foxx. And I introduced
 
 145
-00:06:49,650 --> 00:06:55,860
+00:06:49,650 --> 00:06:55,660
 myself. We don't know each other. Ain't none of us famous. It's 1991, man. They gave everybody
 
 146
-00:06:55,860 --> 00:07:00,640
+00:06:55,860 --> 00:07:00,440
 the lineup. I was on the last show of the night. I don't go on to 11 at night. I'd have
 
 147
-00:07:00,640 --> 00:07:07,500
+00:07:00,640 --> 00:07:07,440
 had this four pieces of chicken. I'm starving, man. That chicken done wore off. I'm nervous,
 
 148
@@ -591,19 +591,19 @@ had this four pieces of chicken. I'm starving, man. That chicken done wore off. 
 man. I'm about to throw up. D.L. Hughley.
 
 149
-00:07:11,430 --> 00:07:20,530
+00:07:11,430 --> 00:07:20,330
 Went downstairs. D.L. Hughley got booed off. Dwayne Johnson got booed off. Jamie Foxx went
 
 150
-00:07:20,530 --> 00:07:27,900
+00:07:20,530 --> 00:07:27,700
 down there and got booed. They booed Jamie. Then Jamie started singing. And then they
 
 151
-00:07:27,900 --> 00:07:35,060
+00:07:27,900 --> 00:07:34,860
 started clapping. And Jamie had their ass. Then he went back to them jokes. And they
 
 152
-00:07:35,060 --> 00:07:41,970
+00:07:35,060 --> 00:07:41,830
 got his ass. So I'm walking down the steps and I see Jamie sitting on the steps. I said,
 
 153
@@ -611,19 +611,19 @@ got his ass. So I'm walking down the steps and I see Jamie sitting on the steps.
 hey, man, hang in there. He said, man, that ain't never happened to me before, man. This is crazy. This is Jamie Foxx, man.
 
 154
-00:07:48,650 --> 00:07:54,860
+00:07:48,650 --> 00:07:54,660
 The most talented people in all of comedy. And now you don't even know how nervous I
 
 155
-00:07:54,860 --> 00:08:02,110
+00:07:54,860 --> 00:08:01,910
 am, man. I can't even. My breathing is shot because these dudes been booed. So I walk
 
 156
-00:08:02,110 --> 00:08:10,660
+00:08:02,110 --> 00:08:10,460
 out. I had wrote this joke. Mike Tyson had got in a fight in Harlem with this heavyweight
 
 157
-00:08:10,660 --> 00:08:15,660
+00:08:10,660 --> 00:08:15,460
 named Mitch Green. Mike Tyson had hit the dude in the eye in the store. Now he was on
 
 158
@@ -631,7 +631,7 @@ named Mitch Green. Mike Tyson had hit the dude in the eye in the store. Now he w
 the news. His eye was swollen. So the joke I wrote was they was interviewing Mitch Green.
 
 159
-00:08:22,070 --> 00:08:27,520
+00:08:22,070 --> 00:08:27,320
 And he was telling everybody what happened. But his eye took over the interview. And I
 
 160
@@ -639,155 +639,155 @@ And he was telling everybody what happened. But his eye took over the interview.
 wrote this joke that his eye started talking and was just, I'll tell you what happened.
 
 161
-00:08:34,230 --> 00:08:39,910
+00:08:34,230 --> 00:08:39,870
 The heavyweight champ's fist is coming towards my face. I just said, Lord, Lord, Lord.
 
 162
-00:08:40,070 --> 00:08:46,970
+00:08:40,070 --> 00:08:46,770
 And I wrote this whole joke about this dude's eyeball talking. And when the punch came,
 
 163
-00:08:46,970 --> 00:08:55,680
+00:08:46,970 --> 00:08:55,520
 and all this here, the Apollo man, they went crazy. They lost their mind. I got to stand.
 
 164
-00:08:55,720 --> 00:09:05,230
+00:08:55,720 --> 00:09:05,030
 An ovation, man. I walked off stage. I walked off stage, man, just started crying. I couldn't
 
 165
-00:09:05,230 --> 00:09:12,870
+00:09:05,230 --> 00:09:12,670
 believe it. They paid me. I made $750 for being on TV for one night. I'd never made
 
 166
-00:09:12,870 --> 00:09:19,980
+00:09:12,870 --> 00:09:19,800
 $750 telling jokes in one night. And so that was my first television appearance a couple weeks.
 
 167
-00:09:20,000 --> 00:09:27,120
+00:09:20,000 --> 00:09:26,920
 later Sinbad was the host of the show he got this job at on a different world and
 
 168
-00:09:27,120 --> 00:09:34,640
+00:09:27,120 --> 00:09:34,440
 so he quit and so Mark Curry became the host and then Mark Curry got hanging
 
 169
-00:09:34,640 --> 00:09:40,560
+00:09:34,640 --> 00:09:40,360
 with Mr. Cooper and he quit and they came to me and said would you come back
 
 170
-00:09:40,560 --> 00:09:46,490
+00:09:40,560 --> 00:09:46,290
 to New York and host amateur night for us to just try you out I ain't no problem
 
 171
-00:09:46,490 --> 00:09:53,130
+00:09:46,490 --> 00:09:52,930
 so I went to New York I hosted amateur night and I was killing but every time
 
 172
-00:09:53,130 --> 00:10:00,300
+00:09:53,130 --> 00:10:00,100
 we went to commercial break I was supposed to let the warm-up act take over like Ruben does but I knew not to let the warm-up act do that because he
 
 173
-00:10:00,300 --> 00:10:04,260
+00:10:00,300 --> 00:10:04,060
 would change the attitude of the crowd because the Apollo was a wild plate so I
 
 174
-00:10:04,260 --> 00:10:09,560
+00:10:04,260 --> 00:10:09,360
 stayed out there I did the warm-up and the hosting and I created a bond with
 
 175
-00:10:09,560 --> 00:10:17,320
+00:10:09,560 --> 00:10:17,200
 that audience and that's how I got on TV with my very first TV show I hosted Showtime at Apollo ended up being the longest running Grand Oleíion
 
 176
-00:10:17,400 --> 00:10:19,800
+00:10:17,400 --> 00:10:19,600
 host in the history of Showtime.
 
 177
-00:10:19,800 --> 00:10:21,620
+00:10:19,800 --> 00:10:21,420
 I did that show for eight years.
 
 178
-00:10:21,620 --> 00:10:24,460
+00:10:21,620 --> 00:10:24,260
 Nobody ever did it for eight years.
 
 179
-00:10:24,460 --> 00:10:26,950
+00:10:24,460 --> 00:10:26,750
 And that was my turn back moment.
 
 180
-00:10:26,950 --> 00:10:31,300
+00:10:26,950 --> 00:10:31,100
 See, in your life, everybody has a turn back moment.
 
 181
-00:10:31,300 --> 00:10:35,870
+00:10:31,300 --> 00:10:35,670
 You have a moment where you can go forward or you can give up.
 
 182
-00:10:35,870 --> 00:10:39,670
+00:10:35,870 --> 00:10:39,470
 But the thing you have to keep in mind before you give up
 
 183
-00:10:39,670 --> 00:10:45,860
+00:10:39,670 --> 00:10:45,660
 is that if you give up, the guarantee is it will never happen.
 
 184
-00:10:45,860 --> 00:10:47,920
+00:10:45,860 --> 00:10:47,720
 That's the guarantee of quitting.
 
 185
-00:10:47,920 --> 00:10:51,580
+00:10:47,920 --> 00:10:51,380
 That it will never happen, no way under the sun.
 
 186
-00:10:51,580 --> 00:10:56,020
+00:10:51,580 --> 00:10:55,820
 The only way the possibility remains that it can happen
 
 187
-00:10:56,020 --> 00:11:00,460
+00:10:56,020 --> 00:11:00,260
 is if you never give up no matter what.
 
 188
-00:11:00,460 --> 00:11:03,390
+00:11:00,460 --> 00:11:03,190
 Because God is always coming.
 
 189
-00:11:03,390 --> 00:11:05,310
+00:11:03,390 --> 00:11:05,110
 He's never too late.
 
 190
-00:11:05,310 --> 00:11:10,030
+00:11:05,310 --> 00:11:09,830
 At your worst moment, look man, when they told me
 
 191
-00:11:10,030 --> 00:11:14,030
+00:11:10,030 --> 00:11:13,830
 I had to be in New York, I saw no way I could get there.
 
 192
-00:11:14,030 --> 00:11:16,330
+00:11:14,030 --> 00:11:16,130
 But that God don't.
 
 193
-00:11:16,330 --> 00:11:18,300
+00:11:16,330 --> 00:11:18,100
 He make the phone ring.
 
 194
-00:11:18,300 --> 00:11:21,520
+00:11:18,300 --> 00:11:21,320
 I end up in Florida, I make $300.
 
 195
-00:11:21,520 --> 00:11:24,560
+00:11:21,520 --> 00:11:24,360
 Then I go to New York, I make $750.
 
 196
-00:11:24,560 --> 00:11:28,260
+00:11:24,560 --> 00:11:28,060
 Almost got $1,000 out of nowhere.
 
 197
-00:11:28,260 --> 00:11:30,020
+00:11:28,260 --> 00:11:29,820
 That's what happened to me.
 
 198
-00:11:30,020 --> 00:11:33,110
+00:11:30,020 --> 00:11:32,910
 That was my moment of never giving up.
 
 199
