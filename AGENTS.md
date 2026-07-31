@@ -162,3 +162,33 @@ See [`docs/specs/07-gotchas.md`](docs/specs/07-gotchas.md) for the full list.
 - See [`docs/design/translation-design.md`](docs/design/translation-design.md)
   for the principles, and [`docs/V3-STATUS.md`](docs/V3-STATUS.md) for what
   shipped / what's deferred.
+
+## V4 additions (quality, layout, drift-snap, scene context)
+
+- **Beam search (V4):** transcribe now uses `BEAM_SIZE=5, BEST_OF=5` instead of
+  greedy — ~3-5× slower (still CPU), much fewer hallucinations.
+  `CONDITION_ON_PREVIOUS_TEXT=False` breaks cross-chunk echo loops.
+- **Hallucination filter (V4):** `drop_hallucination_segments()` uses two-signal
+  detection (word-collapse ≥50% **and** shared 3-gram with neighbour). Safe to
+  leave on; part of the default merge pipeline.
+- **Cache fingerprint (V4):** chunk cache names now include a sha1 of **all
+  recipe params** (`{base}.{fp}.chunk_N.json`). Changing any transcribe param
+  auto-invalidates old caches — no need to manually `make clean`.
+- **Output layout (V5):** final files go to `<outdir>/<base>/` with `_vN`
+  collision bumps. 剪映 always imports fresh. Use `--flat` for legacy layout,
+  `--prune-old` to keep only 2 newest.
+- **Display window (V6):** `--offset` (default 0) and `--tail` (default 0.3s)
+  shift the display window to fix "subtitle ahead of speech." These **never**
+  touch alignment timestamps — only the SRT display range.
+- **Drift-snap (V6):** `snap_drifted_words()` detects DTW word-timestamp drift
+  (a word seconds before its sentence) and snaps it before split. Default ON;
+  `--no-drift-snap` to disable. This prevents stray orphan cues like "可" from
+  mis-split words.
+- **Scene context (V6):** pass `--source "电影《天国王朝》..."` to inject
+  film/scene background into the translation persona. The agent task (v2) ships
+  a full English transcript so the LLM translates with whole-scene awareness.
+  `translate_task.json` now has `source`, `guidelines`, `full_transcript`,
+  `full_transcript_truncated` fields.
+- **VAD threshold (V4):** `VAD_THRESHOLD` lowered to 0.35 (was 0.5);
+  `--vad-threshold` exposes it. Trade-off: very short opening utterances
+  may be missed (e.g. "Saladin" at 1.84s). Manual cue recommended for imports.
