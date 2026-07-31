@@ -57,6 +57,37 @@ pipeline. Three passes (V4/V5/V6) together make the output production-grade.
 > word/silence boundaries. Display-only adjustments (`offset`, `tail`, `min_dur`)
 > never touch alignment.
 
+## Project structure
+
+```
+video-translate/
+├── src/video_translate/       # 核心源码 (14 modules)
+│   ├── cli.py                 —— CLI 入口 (run/transcribe/translate/generate/backfill/…)
+│   ├── transcribe.py          —— faster-whisper 转写引擎 + VAD + 分块缓存
+│   ├── merge.py               —— 片段合并/断句/幻觉过滤/漂移吸附（纯函数管线）
+│   ├── translate.py           —— agent 翻译任务生成 + Google Translate 兜底
+│   ├── generate.py            —— 双语句 → SRT/TXT 产物 (offset/tail 显示窗口)
+│   ├── proxy.py               —— HTTP 代理自动探测/设置
+│   ├── config.py              —— 配置解析 (TOML → env → CLI)
+│   ├── glossary.py            —— 术语表加载与注入 persona
+│   ├── models.py              —— 数据模型 (Segment 等)
+│   ├── io_utils.py            —— JSON 读写/原子写入
+│   ├── srt_utils.py           —— SRT 格式化
+│   └── ffmpeg_utils.py        —— ffmpeg/ffprobe 调用
+├── tests/                     # 183 条测试 (pytest, TDD+golden 回归)
+├── docs/                      # SDD 文档体系
+│   ├── specs/                 —— 特性规格 (00–16)
+│   ├── adr/                   —— 架构决策记录 (001–010)
+│   ├── design/                —— 原理级设计文档
+│   └── golden/                —— Golden 回归固件 (git-ignored, 本地重建)
+├── videos/                    # 视频 + 中间产物 (git-ignored)
+├── AGENTS.md                  # Agent 执行协议
+├── README.md                  # 项目文档 (中英双语)
+├── Makefile                   # 开发快捷命令
+├── pyproject.toml             # 打包/依赖/版本
+└── .gitignore
+```
+
 ---
 
 <a id="english-documentation"></a>

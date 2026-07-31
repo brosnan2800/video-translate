@@ -1,10 +1,12 @@
 # V3 状态：完成与未完成
 
+> ⚠️ **冻结于 V3（2026-07）。** 当前版本 **4.0.0**。V4+ 变更见 `README.md`「What's new in V4」章节。
+>
 > 版本：**3.0.0**（2026-07，基于 V2 工程底座）
 > 开发方式：SDD（先写 spec/ADR 再写码）+ TDD（测试先红后绿，golden 字节级回归）
 > 路线决策：V3 原计划引入 stable-ts（路线 B），Spike 实测 py3.13 不兼容后**回退路线 A**
 > （faster-whisper 原生 `word_timestamps=True` + 自写 `split_by_gap`/`split_by_length`），
-> **零新增依赖**。详见 `docs/adr/008-adopt-stable-ts.md`。
+> **零新增依赖**。详见 `docs/adr/008-stable-ts-spike-rejected.md`。
 
 ---
 
@@ -42,9 +44,9 @@
   `--glossary` / doctor `--strict`；退出码 7
 
 **文档**
-- `docs/specs/12-stable-ts-integration.md`、`13-cue-splitting.md`、
-  `14-glossary.md`、`15-timing-silence.md`、`16-design-doc.md`（中文）
-- `docs/adr/008-adopt-stable-ts.md`、`009-silence-preservation.md`、`010-glossary.md`（中文）
+- `docs/specs/12-word-level-timestamps.md`、`13-cue-splitting.md`、
+  `14-glossary.md`、`15-timing-silence.md`
+- `docs/adr/008-stable-ts-spike-rejected.md`、`009-silence-preservation.md`、`010-glossary.md`（中文）
 - `docs/specs/07-gotchas.md` — 追加"words 必须贯穿 merge"、"split 后段数变→zh 必须重译"
 - `docs/specs/11-cli-v2.md` — 补 V3 CLI 开关与退出码 7
 - `AGENTS.md` — 追加 V3 additions（doctor 探测、word、split、silence、glossary）

@@ -1,7 +1,7 @@
 # Spec 11 — CLI v2 (zero-config + engine selection)
 
-Module: `cli.py`. Supersedes the V1 CLI surface in `05-cli.md` (which is updated
-in Stage 4). Implements the CLI/UX overhaul (decision A1–A4).
+Module: `cli.py`. Supersedes the V1 CLI surface (formerly `05-cli.md`, now removed).
+Implements the CLI/UX overhaul (decision A1–A4).
 
 ## Zero-config happy path
 ```
@@ -42,7 +42,7 @@ V1 `run` parser omitted `--model/--chunk/--lang/--threads`, so `cmd_run`'s
 ## Exit codes
 0 ok · 1 runtime · 2 args · 3 missing dep · 4 proxy · 5 killed · **6 awaiting
 agent** (transcribe+task done; agent must translate). Exit 6 is new in V2
-(breaking); documented in `05-cli.md` and `AGENTS.md`.
+(breaking); documented in `AGENTS.md` and `README.md`.
 
 ## `backfill` subcommand
 Placeholder in Stage 1 (returns runtime "not yet implemented"); fully implemented

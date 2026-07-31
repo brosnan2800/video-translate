@@ -48,4 +48,4 @@ could not translate, for agent backfill).
 ## Related specs
 - Segment schema: `01-segment-schema.md`
 - Per-stage detail: `02-transcribe.md`, `03-translate.md`, `04-generate-srt.md`
-- CLI: `05-cli.md` · Config: `06-config.md` · Gotchas: `07-gotchas.md`
+- CLI: `11-cli-v2.md` · Config: `06-config.md` · Gotchas: `07-gotchas.md`

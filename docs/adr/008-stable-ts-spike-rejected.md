@@ -1,8 +1,8 @@
-# ADR-008 — 采纳 stable-ts 作词级后端
+# ADR-008 — stable-ts 调研与回退（最终采用路线 A）
 
-- 状态：接受
+- 状态：已回退（Spike 结论：路线 A，不用 stable-ts）
 - 日期：2026-07-26
-- 关联：Spec 12；风险见计划第 4 节
+- 关联：Spec 12（word-level-timestamps）；风险见计划第 4 节
 
 ## 背景
 V2 转写阶段直接用 `faster_whisper.WhisperModel`，`model.transcribe` 未开 `word_timestamps`，`chunk_N.json` 只有 `{start,end,text}`。没有词级时间戳，V3 的断行（Spec 13）与时间轴/静音修复（Spec 15）都无从落地。

@@ -20,7 +20,7 @@
 
 - 想理解"一条字幕是怎么一段段长出来的" → 直接读 `translation-design.md` 第 4 章。
 - 想理解"为什么时间戳不准、又怎么修" → `translation-design.md` §3.1–§3.2、§4.5。
-- 想理解"V3 为什么没用 stable-ts" → `translation-design.md` §6 + `adr/008-adopt-stable-ts.md`。
+- 想理解"V3 为什么没用 stable-ts" → `translation-design.md` §6 + `adr/008-stable-ts-spike-rejected.md`。
 - 想理解"断行/静音/术语表为什么这么取舍" → 对应 `adr/009-*`、`adr/010-*`。
 - 想看思想溯源 → `references.md`。
 

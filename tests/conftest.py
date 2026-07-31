@@ -2,6 +2,12 @@
 
 Golden data lives in docs/golden/ and is the validated apollo_story baseline.
 Tests reference it read-only; the generate stage must reproduce it byte-exact.
+
+docs/golden/ is git-ignored. To regenerate locally:
+    .venv/bin/video-translate run videos/apollo_story.mp4 --engine google
+    cp videos/apollo_story.segments_en.json docs/golden/
+    cp videos/apollo_story.zh_segments.json docs/golden/
+    # ... etc
 """
 from __future__ import annotations
 
@@ -11,10 +17,16 @@ import pytest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GOLDEN_DIR = os.path.join(REPO_ROOT, "docs", "golden")
+_GOLDEN_MISSING_MSG = (
+    "docs/golden/ not found (git-ignored). "
+    "Regenerate with the pipeline or skip golden tests: pytest -m 'not golden'"
+)
 
 
 @pytest.fixture(scope="session")
 def golden_dir() -> str:
+    if not os.path.isdir(GOLDEN_DIR):
+        pytest.skip(_GOLDEN_MISSING_MSG)
     return GOLDEN_DIR
 
 

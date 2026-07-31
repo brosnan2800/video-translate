@@ -43,4 +43,4 @@ added/overwritten; int keys normalised to str). Used by `backfill --agent-zh`.
 
 ## Exit code 6
 `EXIT_AWAITING_AGENT = 6` — transcribe+task done; the agent must translate and run
-`generate`. Not an error. Documented in `05-cli.md` + `AGENTS.md`.
+`generate`. Not an error. Documented in `AGENTS.md` + `README.md`.
