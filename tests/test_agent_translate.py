@@ -28,10 +28,12 @@ def test_prepare_task_creates_file(tmp_path):
     prepare_translate_task(sp, tp, progress=lambda *_: None)
     assert os.path.exists(tp)
     task = json.load(open(tp, encoding="utf-8"))
-    assert task["version"] == 1
+    assert task["version"] == 2
     assert "persona" in task
     assert "output_schema" in task
     assert "batches" in task
+    # V6 (B3): global context ships with the task
+    assert "full_transcript" in task and "guidelines" in task and "source" in task
 
 
 def test_prepare_task_batch_size_default(tmp_path):
@@ -83,6 +85,66 @@ def test_prepare_task_to_translate_indices(tmp_path):
     for b in task["batches"]:
         all_idx.extend(x["index"] for x in b["to_translate"])
     assert all_idx == list(range(20))
+
+
+# --- V6 (B3): source hint + whole-transcript context ---
+
+
+def test_prepare_task_source_prepended_to_persona(tmp_path):
+    sp = str(tmp_path / "segs.json")
+    tp = str(tmp_path / "task.json")
+    _write_segs(sp, n=3)
+    prepare_translate_task(sp, tp, persona="base persona",
+                           source="电影《天国王朝》萨拉丁片段",
+                           progress=lambda *_: None)
+    task = json.load(open(tp, encoding="utf-8"))
+    assert task["source"] == "电影《天国王朝》萨拉丁片段"
+    assert "天国王朝" in task["persona"]
+    assert task["persona"].endswith("base persona")
+
+
+def test_prepare_task_full_transcript_covers_every_segment(tmp_path):
+    sp = str(tmp_path / "segs.json")
+    tp = str(tmp_path / "task.json")
+    _write_segs(sp, n=12)
+    prepare_translate_task(sp, tp, progress=lambda *_: None)
+    task = json.load(open(tp, encoding="utf-8"))
+    assert task["full_transcript_truncated"] is False
+    lines = task["full_transcript"].splitlines()
+    assert len(lines) == 12
+    assert lines[0] == "[0] seg 0" and lines[-1] == "[11] seg 11"
+
+
+def test_prepare_task_full_transcript_truncates_with_marker(tmp_path):
+    sp = str(tmp_path / "segs.json")
+    tp = str(tmp_path / "task.json")
+    _write_segs(sp, n=50)
+    prepare_translate_task(sp, tp, max_transcript_chars=40,
+                           progress=lambda *_: None)
+    task = json.load(open(tp, encoding="utf-8"))
+    assert task["full_transcript_truncated"] is True
+    assert "truncated" in task["full_transcript"].splitlines()[-1]
+
+
+def test_prepare_task_full_transcript_can_be_disabled(tmp_path):
+    sp = str(tmp_path / "segs.json")
+    tp = str(tmp_path / "task.json")
+    _write_segs(sp, n=5)
+    prepare_translate_task(sp, tp, full_transcript=False,
+                           progress=lambda *_: None)
+    task = json.load(open(tp, encoding="utf-8"))
+    assert task["full_transcript"] == ""
+
+
+def test_prepare_task_source_and_glossary_order(tmp_path):
+    """source first, glossary second, base persona last."""
+    sp = str(tmp_path / "segs.json")
+    tp = str(tmp_path / "task.json")
+    _write_segs(sp, n=2)
+    prepare_translate_task(sp, tp, persona="P", source="SRC", glossary="GLOSS",
+                           progress=lambda *_: None)
+    p = json.load(open(tp, encoding="utf-8"))["persona"]
+    assert p.index("SRC") < p.index("GLOSS") < p.index("P")
 
 
 def test_validate_zh_complete(tmp_path):

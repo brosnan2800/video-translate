@@ -16,7 +16,7 @@ def test_generate_is_deterministic(tmp_path, golden_segments_path, golden_zh_pat
     d2 = tmp_path / "run2"
     for d in (d1, d2):
         generate_subtitles(golden_segments_path, golden_zh_path, str(d),
-                           base="apollo_story", progress=lambda *_: None)
+                           base="apollo_story", flat=True, progress=lambda *_: None)
     for suffix in (".bilingual.srt", ".zh.srt", ".en.srt", ".txt"):
         a = open(os.path.join(d1, "apollo_story" + suffix), "rb").read()
         b = open(os.path.join(d2, "apollo_story" + suffix), "rb").read()

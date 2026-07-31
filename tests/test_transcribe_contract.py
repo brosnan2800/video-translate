@@ -39,7 +39,37 @@ def test_merge_chunks_preserves_order():
 def test_forced_constants():
     assert T.DEVICE == "cpu"
     assert T.COMPUTE_TYPE == "int8"
-    assert T.BEAM_SIZE == 1 and T.BEST_OF == 1
+    # V4 quality pass: beam search (not greedy) + no cross-segment conditioning
+    assert T.BEAM_SIZE == 5 and T.BEST_OF == 5
+    assert T.CONDITION_ON_PREVIOUS_TEXT is False
+    assert T.REPETITION_PENALTY > 1.0
+    # V6 (B2): recall-biased VAD so quiet / music-underscored lines still decode
+    assert T.VAD_THRESHOLD < 0.5
+    assert T.VAD_PARAMS["threshold"] == T.VAD_THRESHOLD
+
+
+def test_vad_threshold_override_changes_fingerprint():
+    """A different VAD threshold must invalidate the chunk cache — otherwise a
+    re-run with --vad-threshold would silently reuse the old transcription."""
+    base_fp = T.transcribe_fingerprint("large-v3", 240.0, None,
+                                       T.build_vad_params())
+    tuned_fp = T.transcribe_fingerprint("large-v3", 240.0, None,
+                                        T.build_vad_params(0.2))
+    assert base_fp != tuned_fp
+    # default arg path stays identical to explicit defaults (back-compat)
+    assert T.transcribe_fingerprint("large-v3", 240.0, None) == base_fp
+
+
+def test_build_vad_params_does_not_mutate_module_default():
+    T.build_vad_params(0.9)
+    assert T.VAD_PARAMS["threshold"] == T.VAD_THRESHOLD
+
+
+def _seed_chunk(outdir: str, base: str, ci: int, payload) -> None:
+    """Seed a chunk cache at the fingerprinted path the runner will look up."""
+    fp = T.transcribe_fingerprint("large-v3", 240.0, None)
+    save_json(os.path.join(outdir, f"{base}.{fp}.chunk_{ci}.json"),
+              payload, indent=0)
 
 
 def test_resume_skips_completed_chunks_without_model(tmp_path, monkeypatch):
@@ -53,10 +83,8 @@ def test_resume_skips_completed_chunks_without_model(tmp_path, monkeypatch):
 
     monkeypatch.setattr(T, "extract_chunk", _boom)
 
-    save_json(os.path.join(outdir, "chunk_0.json"),
-              [{"start": 0, "end": 1, "text": "hello"}], indent=0)
-    save_json(os.path.join(outdir, "chunk_1.json"),
-              [{"start": 240, "end": 241, "text": "world"}], indent=0)
+    _seed_chunk(outdir, "apollo_story", 0, [{"start": 0, "end": 1, "text": "hello"}])
+    _seed_chunk(outdir, "apollo_story", 1, [{"start": 240, "end": 241, "text": "world"}])
 
     out = T.transcribe_video("dummy.mp4", outdir, base="apollo_story",
                              progress=lambda *_: None)
@@ -123,13 +151,13 @@ def test_transcribe_resume_keeps_words(tmp_path, monkeypatch):
         raise AssertionError("extract_chunk called during full resume")
 
     monkeypatch.setattr(T, "extract_chunk", _boom)
-    save_json(os.path.join(str(tmp_path), "chunk_0.json"),
-              [{"start": 0, "end": 1, "text": "hi",
-                "words": [{"word": "hi", "start": 0.1, "end": 0.9}]}], indent=0)
+    _seed_chunk(str(tmp_path), "apollo_story", 0,
+                [{"start": 0, "end": 1, "text": "hi",
+                  "words": [{"word": "hi", "start": 0.1, "end": 0.9}]}])
     # total 300s, chunk 240s -> chunks 0 and 1; seed BOTH so the run is a full resume
-    save_json(os.path.join(str(tmp_path), "chunk_1.json"),
-              [{"start": 240, "end": 241, "text": "ya",
-                "words": [{"word": "ya", "start": 240.1, "end": 240.9}]}], indent=0)
+    _seed_chunk(str(tmp_path), "apollo_story", 1,
+                [{"start": 240, "end": 241, "text": "ya",
+                  "words": [{"word": "ya", "start": 240.1, "end": 240.9}]}])
 
     out = T.transcribe_video("dummy.mp4", str(tmp_path), base="apollo_story",
                               progress=lambda *_: None)
@@ -143,8 +171,7 @@ def test_transcribe_resume_keeps_words(tmp_path, monkeypatch):
 def test_transcribe_base_defaults_to_input_stem(tmp_path, monkeypatch):
     """base=None -> derived from input filename stem."""
     monkeypatch.setattr(T, "probe_duration", lambda p: 10.0)
-    save_json(os.path.join(str(tmp_path), "chunk_0.json"),
-              [{"start": 0, "end": 1, "text": "hi"}], indent=0)
+    _seed_chunk(str(tmp_path), "myvideo", 0, [{"start": 0, "end": 1, "text": "hi"}])
 
     def _boom(*a, **k):
         raise AssertionError("extract_chunk should not run on full resume")

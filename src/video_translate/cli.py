@@ -197,6 +197,7 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
         transcribe_video(
             input_path, outdir, base=base, model_name=cfg.model,
             chunk=cfg.chunk, threads=args.threads, lang=cfg.lang,
+            vad_threshold=getattr(args, "vad_threshold", None),
         )
         if cfg.merge_enabled and not args.no_merge:
             from .merge import apply_merge
@@ -207,6 +208,7 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                 max_dur=cfg.merge_max_dur, max_gap=cfg.merge_max_gap,
                 split_enabled=not getattr(args, "no_split", False),
                 split_max_chars=cfg.merge_max_chars,
+                snap_drift=not getattr(args, "no_drift_snap", False),
             )
             print(f"[merge] merged + split -> {segs_path} (raw kept at {raw_path})")
         return EXIT_OK
@@ -217,7 +219,9 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
 
 def cmd_translate(args: argparse.Namespace) -> int:
     cfg = resolve_config(
-        {"proxy": args.proxy, "src": args.src, "tgt": args.tgt, "engine": args.engine},
+        {"proxy": args.proxy, "src": args.src, "tgt": args.tgt, "engine": args.engine,
+         "glossary": getattr(args, "glossary", None),
+         "source": getattr(args, "source", None)},
         cwd=os.getcwd(),
     )
     segments, out = args.segments, args.out
@@ -235,7 +239,8 @@ def cmd_translate(args: argparse.Namespace) -> int:
             from .glossary import load_glossary
             glossary_text = load_glossary(cfg.glossary)
         prepare_translate_task(segments, task_path, persona=cfg.persona,
-                                glossary=glossary_text)
+                                glossary=glossary_text, source=cfg.source,
+                                full_transcript=cfg.full_transcript)
         base = _derive_base(segments)
         outdir = str(Path(out).parent)
         print(_AGENT_TRANSLATE_INSTRUCTIONS.format(
@@ -262,9 +267,16 @@ def cmd_translate(args: argparse.Namespace) -> int:
 def cmd_generate(args: argparse.Namespace) -> int:
     base = args.base or _derive_base(args.segments)
     gap = getattr(args, "gap", 0.0) or 0.0
+    min_dur = getattr(args, "min_dur", 0.0) or 0.0
+    offset = getattr(args, "offset", 0.0) or 0.0
+    tail = getattr(args, "tail", 0.0) or 0.0
+    flat = getattr(args, "flat", False)
+    prune_old = getattr(args, "prune_old", False)
     try:
         from .generate import generate_subtitles
-        generate_subtitles(args.segments, args.zh, args.outdir, base=base, gap=gap)
+        generate_subtitles(args.segments, args.zh, args.outdir, base=base,
+                           gap=gap, min_dur=min_dur, offset=offset, tail=tail,
+                           flat=flat, prune_old=prune_old)
         return EXIT_OK
     except Exception as e:  # noqa: BLE001
         print(f"[error] generate failed: {e}", file=sys.stderr)
@@ -290,7 +302,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         {"model": args.model, "chunk": args.chunk, "lang": args.lang,
          "proxy": args.proxy, "src": args.src, "tgt": args.tgt,
          "engine": args.engine, "merge_max_chars": getattr(args, "merge_max_chars", None),
-         "glossary": getattr(args, "glossary", None)},
+         "glossary": getattr(args, "glossary", None),
+         "source": getattr(args, "source", None)},
         cwd=os.getcwd(),
     )
 
@@ -301,6 +314,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             proxy=args.proxy, no_proxy=args.no_proxy, no_merge=args.no_merge,
             no_split=getattr(args, "no_split", False),
             merge_max_chars=cfg.merge_max_chars,
+            vad_threshold=getattr(args, "vad_threshold", None),
+            no_drift_snap=getattr(args, "no_drift_snap", False),
         ))
         if rc != EXIT_OK:
             return rc
@@ -312,7 +327,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             from .glossary import load_glossary
             glossary_text = load_glossary(cfg.glossary)
         prepare_translate_task(segments, task, persona=cfg.persona,
-                                glossary=glossary_text)
+                                glossary=glossary_text, source=cfg.source,
+                                full_transcript=cfg.full_transcript)
         print(_RUN_AWAITING_AGENT_INSTRUCTIONS.format(
             task=task, segments=segments, zh=zh, outdir=outdir, base=base))
         return EXIT_AWAITING_AGENT
@@ -330,6 +346,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         rc = cmd_generate(argparse.Namespace(
             segments=segments, zh=zh, outdir=outdir, base=base,
             gap=getattr(args, "gap", 0.0) or 0.0,
+            min_dur=getattr(args, "min_dur", 1.0),
+            offset=getattr(args, "offset", 0.0) or 0.0,
+            tail=getattr(args, "tail", 0.3),
+            flat=getattr(args, "flat", False),
+            prune_old=getattr(args, "prune_old", False),
         ))
         if rc != EXIT_OK:
             return rc
@@ -387,7 +408,8 @@ _AGENT_TRANSLATE_INSTRUCTIONS = """\
 [AWAITING_AGENT] translation task written to:
   {task}
 AGENT ACTION REQUIRED:
-  1. Read the task file; for each batch translate the `to_translate` items to
+  1. Read the task file. FIRST read `full_transcript` (whole scene) + `source`
+     + `guidelines`, THEN translate each batch's `to_translate` items to
      Chinese following the `persona`.
   2. Save as {out} — a JSON object mapping str(index) -> zh, covering every
      index in to_translate[*].index.
@@ -398,7 +420,8 @@ _RUN_AWAITING_AGENT_INSTRUCTIONS = """\
 [AWAITING_AGENT] transcribe complete. Translation task written to:
   {task}
 AGENT ACTION REQUIRED:
-  1. Read the task file; translate each `to_translate` item per the `persona`.
+  1. Read the task file. FIRST read `full_transcript` (whole scene) + `source`
+     + `guidelines`, THEN translate each `to_translate` item per the `persona`.
   2. Save as {zh} — JSON {{str(index): zh}} covering every to_translate index.
   3. Run: video-translate generate --segments {segments} --zh {zh} --outdir {outdir} --base {base}
 """
@@ -438,6 +461,14 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--no-merge", action="store_true", help="skip segment-merge stage (Stage 2)")
     t.add_argument("--no-split", action="store_true", help="skip cue splitting (Stage 2b); keep merged cues as-is")
     t.add_argument("--merge-max-chars", type=int, default=None, help="max chars per cue before splitting (default 42)")
+    t.add_argument("--no-drift-snap", action="store_true",
+                   help="keep Whisper's raw word timestamps even when a lone "
+                        "word sits seconds ahead of its own sentence (disables "
+                        "the drift-orphan fix)")
+    t.add_argument("--vad-threshold", type=float, default=None,
+                   help="Silero VAD speech threshold (default 0.35). Lower = "
+                        "catch quieter/music-underscored lines at the cost of "
+                        "more noise; changing it invalidates the chunk cache")
     t.set_defaults(func=cmd_transcribe)
 
     tr = sub.add_parser("translate", help="Translate segments_en.json -> zh_segments.json")
@@ -452,6 +483,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="agent (default) emits a task for the calling agent; google is headless MT")
     tr.add_argument("--glossary", default=None,
                     help="path to glossary file (txt/json) injected into the translation persona")
+    tr.add_argument("--source", default=None,
+                    help="video provenance/背景 hint fed to the translator, e.g. "
+                         "'电影《天国王朝》鲍德温四世与萨拉丁会面片段'")
     tr.set_defaults(func=cmd_translate)
 
     g = sub.add_parser("generate", help="Generate the four subtitle files")
@@ -461,6 +495,22 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--base", default=None)
     g.add_argument("--gap", type=float, default=0.2,
                    help="min gap (s) between cues; trims trailing silence (default 0.2)")
+    g.add_argument("--min-dur", type=float, default=1.0,
+                   help="min display duration (s) per cue; extends short cues "
+                        "(display-only, start never moves). 0 disables (default 1.0)")
+    g.add_argument("--offset", type=float, default=0.0,
+                   help="shift every cue's DISPLAY window by N seconds "
+                        "(positive = later). Corrects Whisper's systematic "
+                        "word-timestamp drift when subtitles feel early (default 0)")
+    g.add_argument("--tail", type=float, default=0.3,
+                   help="extend each cue's DISPLAY end by N seconds so lines "
+                        "don't clear mid-sentence; the --gap clamp still wins "
+                        "(default 0.3, 0 disables)")
+    g.add_argument("--flat", action="store_true",
+                   help="legacy: write outputs flat into --outdir (no per-video "
+                        "subfolder, no version suffix)")
+    g.add_argument("--prune-old", action="store_true",
+                   help="keep only the 2 newest versioned outputs in the subfolder")
     g.set_defaults(func=cmd_generate)
 
     r = sub.add_parser("run", help="Full pipeline: transcribe -> translate -> generate")
@@ -477,12 +527,31 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--no-merge", action="store_true")
     r.add_argument("--no-split", action="store_true", help="skip cue splitting")
     r.add_argument("--merge-max-chars", type=int, default=None, help="max chars per cue before splitting (default 42)")
+    r.add_argument("--no-drift-snap", action="store_true",
+                   help="disable the drift-orphan fix (keep raw word timestamps)")
+    r.add_argument("--vad-threshold", type=float, default=None,
+                   help="Silero VAD speech threshold (default 0.35); lower = "
+                        "catch quieter lines, invalidates the chunk cache")
     r.add_argument("--src", default="en")
     r.add_argument("--tgt", default="zh-CN")
     r.add_argument("--engine", default=None, choices=["agent", "google"],
                     help="agent (default) stops after task; google runs end-to-end")
     r.add_argument("--gap", type=float, default=0.2, help="min gap (s) between cues (default 0.2)")
+    r.add_argument("--min-dur", type=float, default=1.0,
+                   help="min display duration (s) per cue; 0 disables (default 1.0)")
+    r.add_argument("--offset", type=float, default=0.0,
+                   help="shift every cue's DISPLAY window by N seconds "
+                        "(positive = later); corrects word-timestamp drift (default 0)")
+    r.add_argument("--tail", type=float, default=0.3,
+                   help="extend each cue's DISPLAY end by N seconds (default 0.3)")
     r.add_argument("--glossary", default=None, help="path to glossary file (txt/json)")
+    r.add_argument("--source", default=None,
+                   help="video provenance/背景 hint fed to the translator, e.g. "
+                        "'电影《天国王朝》鲍德温四世与萨拉丁会面片段'")
+    r.add_argument("--flat", action="store_true",
+                   help="legacy: write final outputs flat into --outdir (no per-video subfolder)")
+    r.add_argument("--prune-old", action="store_true",
+                   help="keep only the 2 newest versioned outputs in the subfolder")
     r.set_defaults(func=cmd_run)
 
     s = sub.add_parser("setup", help="Check/download the HF model (reuse if cached)")

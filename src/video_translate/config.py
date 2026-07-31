@@ -51,6 +51,9 @@ class Config:
     merge_max_chars: int = 42
     # V3 fields
     glossary: str | None = None     # path to glossary file (txt/json), injected into persona
+    # V6 (B3) fields
+    source: str | None = None       # free-text provenance/背景 hint for the translator
+    full_transcript: bool = True    # ship whole transcript in the agent task file
     _sources: dict[str, str] = field(default_factory=dict, repr=False)
 
 
@@ -78,7 +81,7 @@ def load_toml(path: str) -> dict[str, Any]:
 
 _FLOAT_ENV = {"chunk", "merge_max_dur", "merge_max_gap"}
 _INT_ENV = {"merge_max_chars"}
-_BOOL_ENV = {"merge_enabled"}
+_BOOL_ENV = {"merge_enabled", "full_transcript"}
 
 
 def _coerce_env(attr: str, raw: str) -> Any:
@@ -117,6 +120,7 @@ def resolve_config(
         "engine": "VT_ENGINE", "persona": "VT_PERSONA",
         "merge_max_dur": "VT_MERGE_MAX_DUR", "merge_max_gap": "VT_MERGE_MAX_GAP",
         "merge_max_chars": "VT_MERGE_MAX_CHARS", "glossary": "VT_GLOSSARY",
+        "source": "VT_SOURCE", "full_transcript": "VT_FULL_TRANSCRIPT",
     }
     for attr, envkey in env_map.items():
         if envkey in env and env[envkey]:

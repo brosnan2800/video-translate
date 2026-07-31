@@ -26,6 +26,25 @@ MAX_RETRIES = 3
 # --- agent engine defaults -------------------------------------------------
 DEFAULT_BATCH_SIZE = 8
 DEFAULT_CONTEXT_WINDOW = 2  # segments of context before + after each batch
+# V6 (B3): the sliding ±2-segment window is enough for local coherence but not
+# for *global* understanding — the agent could not tell that "Withdraw, or we
+# all die here" was a battlefield order, and mistranslated it. We therefore ship
+# the entire transcript in the task file so the agent reads the whole scene
+# before translating any batch. Capped so a 2-hour film doesn't blow the
+# context window; beyond the cap the transcript is truncated with a marker.
+FULL_TRANSCRIPT_MAX_CHARS = 24000
+
+# V6 (B3): explicit rules the agent must follow. Shipped in the task file so the
+# contract lives with the data, not in whatever prompt happens to invoke it.
+TRANSLATION_GUIDELINES = [
+    "先通读 full_transcript 建立全局理解（场景、说话人关系、剧情走向），再逐 batch 翻译。",
+    "source 字段给出视频出处/背景。若是已有影视、文学或历史题材作品，专有名词、人名、"
+    "称谓与经典台词一律沿用通行中文译法，不要自创。",
+    "语义歧义时以全局语境判定，不要只看单句。例如军事场景中的 'terms' 是「（议和）条件」"
+    "而非「术语」，'withdraw' 是「撤军」而非「退出」。",
+    "context_before / context_after 仅供参考，不要翻译、不要出现在输出里。",
+    "输出必须覆盖 to_translate[*].index 的每一个下标（字符串形式）。",
+]
 
 
 def _make_translator(src: str, tgt: str) -> Callable[[str], str]:
@@ -110,6 +129,53 @@ def translate_segments(
 # --- V2: agent engine ------------------------------------------------------
 
 
+def build_full_transcript(
+    segs: list[dict[str, Any]],
+    *,
+    max_chars: int = FULL_TRANSCRIPT_MAX_CHARS,
+) -> tuple[str, bool]:
+    """Render every segment as ``[index] text`` lines for whole-scene context.
+
+    Returns ``(text, truncated)``. Truncation drops whole lines from the end so
+    the transcript never ends mid-sentence, and appends an explicit marker —
+    a silently clipped transcript would be worse than a short one, because the
+    agent would assume it saw the ending.
+    """
+    lines: list[str] = []
+    used = 0
+    truncated = False
+    for i, s in enumerate(segs):
+        line = f"[{i}] {(s.get('text') or '').strip()}"
+        if used + len(line) + 1 > max_chars:
+            truncated = True
+            break
+        lines.append(line)
+        used += len(line) + 1
+    if truncated:
+        lines.append(f"...[truncated: {len(segs) - len(lines)} more segments]")
+    return "\n".join(lines), truncated
+
+
+def build_persona(
+    persona: str,
+    *,
+    source: str | None = None,
+    glossary: str | None = None,
+) -> str:
+    """Compose the effective persona: source hint + glossary + base persona."""
+    parts: list[str] = []
+    if source:
+        parts.append(
+            f"【视频出处/背景】{source}\n"
+            "翻译时必须据此还原专有名词、人名、称谓与既有译法；"
+            "涉及该作品已有中文版的台词，优先沿用通行译文。"
+        )
+    if glossary:
+        parts.append(glossary)
+    parts.append(persona)
+    return "\n\n".join(parts)
+
+
 def prepare_translate_task(
     segments_path: str,
     task_path: str,
@@ -119,6 +185,9 @@ def prepare_translate_task(
     persona: str = DEFAULT_PERSONA,
     index_key: str | None = None,
     glossary: str | None = None,
+    source: str | None = None,
+    full_transcript: bool = True,
+    max_transcript_chars: int = FULL_TRANSCRIPT_MAX_CHARS,
     progress=print,
 ) -> str:
     """Read segments, batch them with sliding-window context, write a translation
@@ -134,13 +203,22 @@ def prepare_translate_task(
     ``glossary``: optional pre-formatted glossary context string (from
     ``glossary.load_glossary``). When present it is prepended to the persona so the
     agent keeps character/proper-noun names consistent (Spec 14 / ADR-010).
+
+    ``source`` (V6/B3): free-text provenance hint, e.g. "电影《天国王朝》——
+    鲍德温四世与萨拉丁会面片段". Injected at the top of the persona so the agent
+    resolves proper nouns and domain-specific senses correctly.
+
+    ``full_transcript`` (V6/B3): ship the whole transcript alongside the batches
+    so the agent has global context, not just a ±2-segment window.
     """
     segs: list[dict[str, Any]] = load_json(segments_path)
     n = len(segs)
 
-    effective_persona = persona
-    if glossary:
-        effective_persona = glossary + "\n\n" + persona
+    effective_persona = build_persona(persona, source=source, glossary=glossary)
+    transcript, transcript_truncated = (
+        build_full_transcript(segs, max_chars=max_transcript_chars)
+        if full_transcript else ("", False)
+    )
 
     def _idx(j: int):
         return segs[j][index_key] if index_key else j
@@ -160,9 +238,13 @@ def prepare_translate_task(
             "context_after": ca,
         })
     task = {
-        "version": 1,
+        "version": 2,
         "persona": effective_persona,
+        "source": source,
         "glossary": glossary,
+        "guidelines": TRANSLATION_GUIDELINES,
+        "full_transcript": transcript,
+        "full_transcript_truncated": transcript_truncated,
         "output_schema": {
             "type": "object",
             "description": (
@@ -174,8 +256,17 @@ def prepare_translate_task(
         "batches": batches,
     }
     save_json(task_path, task, indent=2)
-    progress(f"[agent-translate] task written: {task_path} ({len(batches)} batches, {n} segments)"
-             + (f", glossary={len(glossary)} chars" if glossary else ""))
+    extra = ""
+    if source:
+        extra += f", source={source!r}"
+    if glossary:
+        extra += f", glossary={len(glossary)} chars"
+    if transcript:
+        extra += f", full_transcript={len(transcript)} chars"
+        if transcript_truncated:
+            extra += " (truncated)"
+    progress(f"[agent-translate] task written: {task_path} "
+             f"({len(batches)} batches, {n} segments){extra}")
     return task_path
 
 

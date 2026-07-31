@@ -35,12 +35,18 @@ def test_doctor_returns_ok(capsys):
 
 def test_generate_via_cli_byte_exact(tmp_path, golden_dir, golden_segments_path,
                                      golden_zh_path):
+    # --min-dur 0 / --tail 0: keep this regression pinned to the historical
+    # golden bytes. The readability defaults (V4 min-dur 1.0s, V6 tail 0.3s) are
+    # covered separately in test_generate_golden.py::test_min_dur_* / test_tail_*.
     rc = main([
         "generate",
         "--segments", golden_segments_path,
         "--zh", golden_zh_path,
         "--outdir", str(tmp_path),
         "--base", "apollo_story",
+        "--min-dur", "0",
+        "--tail", "0",
+        "--flat",
     ])
     assert rc == EXIT_OK
     got = open(os.path.join(tmp_path, "apollo_story.bilingual.srt"), "rb").read()
@@ -93,6 +99,49 @@ def test_backfill_subcommand_exists():
     p = build_parser()
     ns = p.parse_args(["backfill", "--pending", "x.json", "--out", "y.json"])
     assert ns.command == "backfill"
+
+
+# --- V6: B1' display offset/tail + B2 VAD threshold + B3 source ---
+
+
+def test_generate_parser_offset_tail_defaults():
+    p = build_parser()
+    ns = p.parse_args(["generate", "--segments", "s.json", "--zh", "z.json",
+                       "--outdir", "o"])
+    assert ns.offset == 0.0
+    assert ns.tail == 0.3
+
+
+def test_run_parser_v6_flags():
+    p = build_parser()
+    ns = p.parse_args(["run", "v.mp4", "--offset", "0.25", "--tail", "0.5",
+                       "--vad-threshold", "0.2", "--source", "《天国王朝》"])
+    assert ns.offset == 0.25
+    assert ns.tail == 0.5
+    assert ns.vad_threshold == 0.2
+    assert ns.source == "《天国王朝》"
+
+
+def test_transcribe_parser_vad_threshold_default_none():
+    p = build_parser()
+    ns = p.parse_args(["transcribe", "v.mp4"])
+    assert ns.vad_threshold is None
+
+
+def test_translate_source_reaches_task_file(tmp_path, golden_segments_path):
+    """--source must land in the emitted task file's persona (B3 wiring)."""
+    import json as _json
+
+    out = str(tmp_path / "zh.json")
+    rc = main([
+        "translate", "--segments", golden_segments_path, "--out", out,
+        "--engine", "agent", "--source", "登月纪录片",
+    ])
+    assert rc == EXIT_AWAITING_AGENT
+    task = _json.load(open(tmp_path / "zh.translate_task.json", encoding="utf-8"))
+    assert task["source"] == "登月纪录片"
+    assert "登月纪录片" in task["persona"]
+    assert task["full_transcript"]
 
 
 def test_translate_engine_agent_returns_awaiting(tmp_path, golden_segments_path, capsys):

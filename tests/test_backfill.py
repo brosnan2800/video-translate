@@ -63,8 +63,9 @@ def test_backfill_merge_then_generate(tmp_path, golden_segments_path):
     merged = json.load(open(out, encoding="utf-8"))
     assert merged["0"] == "first-zh"
     assert merged["1"] == "existing"  # preserved
-    # generate ran -> bilingual.srt exists
-    assert os.path.exists(os.path.join(str(tmp_path), "apollo_story.bilingual.srt"))
+    # generate ran -> bilingual.srt exists inside the per-video subfolder
+    assert os.path.exists(os.path.join(str(tmp_path), "apollo_story",
+                                       "apollo_story.bilingual.srt"))
 
 
 def test_backfill_uses_same_prepare_as_translate_engine(tmp_path):

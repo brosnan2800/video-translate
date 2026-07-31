@@ -12,4 +12,4 @@ Timestamps come straight from the acoustic model and are NEVER recomputed;
 translation only touches text, so audio/subtitle alignment is preserved.
 """
 
-__version__ = "3.0.0"
+__version__ = "4.0.0"

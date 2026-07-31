@@ -12,6 +12,8 @@ translate/generate subcommands don't need the heavy library or the 3GB model.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 from pathlib import Path
 from typing import Any
@@ -22,9 +24,73 @@ from .io_utils import load_json, load_json_default, save_json
 # Forced constants — see module docstring.
 DEVICE = "cpu"
 COMPUTE_TYPE = "int8"
-BEAM_SIZE = 1
-BEST_OF = 1
-VAD_PARAMS = {"min_silence_duration_ms": 500, "speech_pad_ms": 200}
+# V4 (quality pass): beam search instead of greedy. greedy (beam=1) is the
+# single biggest driver of repetition hallucinations ("movie is a movie") and
+# filler-word misreads ("I" for "uh"). beam=5 costs ~3-5x CPU time but is the
+# standard anti-hallucination setting.
+BEAM_SIZE = 5
+BEST_OF = 5
+# V4: do NOT condition each segment on the previous segment's text — carrying
+# context is what makes hallucinations self-reinforcing across segment
+# boundaries (the "and at the end of the day" repeat). Cost: slightly less
+# cross-sentence coherence, acceptable for interview content.
+CONDITION_ON_PREVIOUS_TEXT = False
+# V4: mild repetition penalty inside a single segment (1.0 = off).
+REPETITION_PENALTY = 1.1
+# V4: wider speech pad so short interjections at segment edges are not clipped
+# by VAD (the 45-46s missed host line). 200ms was too tight for talk-show pace.
+# V6 (B2): Silero's default speech threshold of 0.5 drops quiet or
+# music-underscored utterances entirely — a whole isolated line ("Saladin" over
+# the opening score) never reached the decoder, so no amount of downstream
+# fixing could recover it. 0.35 is the standard "recall over precision" setting;
+# the extra noise it admits is what the V4 hallucination filter already handles.
+# neg_threshold is left unset: faster-whisper derives max(threshold-0.15, 0.01).
+VAD_THRESHOLD = 0.35
+VAD_PARAMS = {
+    "threshold": VAD_THRESHOLD,
+    "min_silence_duration_ms": 500,
+    "speech_pad_ms": 400,
+}
+
+
+def build_vad_params(threshold: float | None = None) -> dict[str, Any]:
+    """VAD parameter dict, optionally overriding the speech threshold.
+
+    Exposed so a single hard video can be re-run more (or less) aggressively
+    without editing source; the value feeds the cache fingerprint, so changing
+    it invalidates chunk caches automatically.
+    """
+    params = dict(VAD_PARAMS)
+    if threshold is not None:
+        params["threshold"] = threshold
+    return params
+
+
+def transcribe_fingerprint(
+    model_name: str, chunk: float, lang: str | None,
+    vad: dict[str, Any] | None = None,
+) -> str:
+    """Content hash of every parameter that changes transcription output.
+
+    WHY: chunk caches ({base}.chunk_N.json) must be invalidated when the
+    transcription recipe changes — otherwise a beam=1 cache would be silently
+    reused for a beam=5 run (the same contamination class as the multi-video
+    cache collision, now extended to parameter drift).
+    """
+    payload = {
+        "model": model_name,
+        "beam": BEAM_SIZE,
+        "best_of": BEST_OF,
+        "lang": lang,
+        "compute": COMPUTE_TYPE,
+        "chunk": chunk,
+        "vad": vad if vad is not None else VAD_PARAMS,
+        "cond_prev": CONDITION_ON_PREVIOUS_TEXT,
+        "rep_penalty": REPETITION_PENALTY,
+        "word_ts": True,
+    }
+    blob = json.dumps(payload, sort_keys=True).encode()
+    return hashlib.sha1(blob).hexdigest()[:8]
 
 
 def plan_chunks(total: float, chunk: float) -> list[tuple[int, float, float]]:
@@ -54,8 +120,8 @@ def merge_chunks(chunk_lists: list[list[dict[str, Any]]]) -> list[dict[str, Any]
     return merged
 
 
-def _chunk_json_path(outdir: str, ci: int) -> str:
-    return os.path.join(outdir, f"chunk_{ci}.json")
+def _chunk_json_path(outdir: str, base: str, ci: int, fingerprint: str) -> str:
+    return os.path.join(outdir, f"{base}.{fingerprint}.chunk_{ci}.json")
 
 
 def transcribe_video(
@@ -67,6 +133,7 @@ def transcribe_video(
     chunk: float = 240.0,
     threads: int | None = None,
     lang: str | None = None,
+    vad_threshold: float | None = None,
     progress=print,
 ) -> str:
     """Transcribe `input_path` into `{outdir}/{base}.segments_en.json`.
@@ -85,12 +152,14 @@ def transcribe_video(
     threads = threads or os.cpu_count()
     total = probe_duration(input_path)
     plan = plan_chunks(total, chunk)
+    vad_params = build_vad_params(vad_threshold)
+    fp = transcribe_fingerprint(model_name, chunk, lang, vad_params)
 
     model: WhisperModel | None = None
     chunk_lists: list[list[dict[str, Any]]] = []
 
     for ci, cstart, cdur in plan:
-        cjson = _chunk_json_path(outdir, ci)
+        cjson = _chunk_json_path(outdir, base, ci, fp)
         existing = load_json_default(cjson, None)
         if existing is not None:
             progress(f"[skip] chunk {ci} already done (segs={len(existing)})")
@@ -101,12 +170,14 @@ def transcribe_video(
             progress(f"[load] {model_name} device={DEVICE} compute={COMPUTE_TYPE} threads={threads}")
             model = WhisperModel(model_name, device=DEVICE, compute_type=COMPUTE_TYPE, cpu_threads=threads)
 
-        wav = os.path.join(outdir, f"chunk_{ci}.wav")
+        wav = os.path.join(outdir, f"{base}.{fp}.chunk_{ci}.wav")
         extract_chunk(input_path, wav, cstart, cdur)
         segs, _info = model.transcribe(
             wav, language=lang, task="transcribe",
             beam_size=BEAM_SIZE, best_of=BEST_OF,
-            vad_filter=True, vad_parameters=dict(VAD_PARAMS),
+            condition_on_previous_text=CONDITION_ON_PREVIOUS_TEXT,
+            repetition_penalty=REPETITION_PENALTY,
+            vad_filter=True, vad_parameters=dict(vad_params),
             word_timestamps=True,   # V3: word-level timestamps for split + silence
         )
         chunk_segs = [
