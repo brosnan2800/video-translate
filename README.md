@@ -4,34 +4,58 @@ Turn a video into **Jianying(剪映)-importable bilingual (zh/en) subtitles** wi
 faithful, resumable pipeline. This single file holds **both the English and the
 中文 documentation** so they never drift apart.
 
-English Documentation → [jump](#english-documentation) ｜ 中文文档 → [jump](#中文文档)
+> **📖 [中文文档 ↓](#中文文档)** &nbsp;|&nbsp; English Documentation → [jump](#english-documentation)
 
 ---
 
-## What's new in V3
+## What's new in V4
 
-- **Word-level timestamps** — `segments_en.json` items now carry a
-  `words:[{word,start,end}]` field (faster-whisper `word_timestamps=True`).
-- **Cue splitting (断行)** — after merge, over-long cues (> `merge_max_chars`,
-  default **42**, the 剪映 single-line limit) are split at **word boundaries**;
-  real inter-scene silence swallowed by the ASR is split back out so it survives
-  into the timeline (**fixes issue #001**). Default ON; `--no-split` disables it;
-  `--merge-max-chars` overrides the width.
-- **`--gap` (default 0.2s)** on `generate`/`run` — trims trailing silence so
-  adjacent cues keep at least `gap` spacing and never overlap; it never fabricates
-  silence where the real gap is already larger.
-- **Glossary** — `--glossary PATH` (txt/json), env `VT_GLOSSARY`, TOML
-  `[translate] glossary` injects a term→译名 map into the translation persona so
-  character/proper-noun names stay consistent across episodes (soft guidance, not
-  forced replacement).
-- **doctor probes Google reachability** — the env check now also verifies the
-  Google Translate endpoint via the resolved proxy, so a long transcribe won't
-  fail first at the translate step. Default still exits 0 (prints `[MISS]`);
-  `--strict` returns exit code **7**.
+V4 is a quality + layout + robustness batch built on top of V3's word-level
+pipeline. Three passes (V4/V5/V6) together make the output production-grade.
 
-> Design invariant (unchanged since V1): **timestamps are acoustic facts** produced
-> by transcription and are never recomputed downstream — translation only rewrites
-> text, and split/gap only trim or cut at real word/silence boundaries.
+### V4 — transcription quality pass
+- **Beam search** — `BEAM_SIZE=5, BEST_OF=5` replaces greedy decoding; ~3-5×
+  slower (still CPU/int8) but far fewer hallucinations.
+- **Anti-hallucination** — `CONDITION_ON_PREVIOUS_TEXT=False` breaks cross-chunk
+  echo loops; `REPETITION_PENALTY=1.1` suppresses degenerate repetition.
+- **Hallucination filter** — `drop_hallucination_segments()` uses two-signal
+  detection (word-collapse ≥50% **and** ≥3 shared consecutive words with a
+  neighbour) to avoid false positives.
+- **Fragment rejoin** — `merge_short_cues()` merges sub-second / ≤3-word orphans
+  leftward while respecting sentence-final punctuation (不会跨句合并).
+- **Cache fingerprint** — chunk cache names now include a sha1 of **all
+  transcription recipe params** (`{base}.{fp}.chunk_N.json`); param changes
+  auto-invalidate old caches.
+- **Display window** — `--min-dur` (default 1.0s, library default 0) extends
+  short-cue display time without touching alignment timestamps.
+
+### V5 — output layout
+- **Sub-folder output** — final 4 files land in `<outdir>/<base>/` with
+  collision-based `_vN` version suffixes so 剪映 treats every re-run as a fresh
+  import (no more stale cache).
+- `--flat` reverts to legacy flat layout; `--prune-old` keeps only the two
+  newest versions in the sub-folder.
+
+### V6 — Baldwin 《天国王朝》 reported-issue fixes
+- **B4 drift-snap** — `snap_drifted_words()` detects DTW word-timestamp drift
+  (a single word landing seconds ahead of its sentence) and snaps it onto the
+  sentence start before cue splitting; fixes the stray "可" orphan cue
+  (12 → 10 segments on the real Baldwin clip).
+- **B1' offset / tail** — `--offset` (default 0) and `--tail` (default 0.3s) on
+  `generate`/`run` shift the **display window** so subtitles don't fire before
+  the line is spoken; alignment timestamps are never touched.
+- **B3 scene context** — `--source` + full-transcript injection + translation
+  guidelines in the agent task (task version bumped to 2) so military-dialogue
+  senses ("terms", "withdraw", "withdrawal") translate from whole-scene context.
+- **B2 VAD tuning** — `VAD_THRESHOLD` lowered to 0.35 (was 0.5); `--vad-threshold`
+  exposes it. Known trade-off: very short opening utterances may still be missed
+  (Saladin case — manual cue recommended for the 剪映 import).
+
+> Design invariant (unchanged since V1): **alignment timestamps are acoustic
+> facts** produced by transcription and are never recomputed downstream —
+> translation only rewrites text, and split/merge/gap only trim or cut at real
+> word/silence boundaries. Display-only adjustments (`offset`, `tail`, `min_dur`)
+> never touch alignment.
 
 ---
 
@@ -93,7 +117,7 @@ make doctor
 # 5. Import <video_dir>/apollo.bilingual.srt into 剪映
 ```
 
-V3 defaults: `INPUT` is positional; `--base` = video filename stem; `--outdir` =
+V4 defaults: `INPUT` is positional; `--base` = video filename stem; `--outdir` =
 the video's own directory; `--lang` auto-detects; `--proxy` auto-detects
 (`--no-proxy` for direct). Cue splitting is **ON** by default (`--no-split` to
 skip); `--gap` defaults to **0.2s**. The **agent engine** (default) stops after
@@ -163,10 +187,13 @@ Supported TOML sections: `transcribe`, `translate`, `llm`, `hf`, `merge`
 | `VT_MERGE_MAX_GAP`      | merge_max_gap        |
 | `VT_MERGE_MAX_CHARS`    | merge_max_chars (cue split width) |
 | `VT_GLOSSARY`           | glossary (V3)        |
+| `VT_SOURCE`             | source (V6: film/scene background for translation persona) |
+| `VT_FULL_TRANSCRIPT`    | full_transcript (V6: include full EN transcript in task, default true) |
+| `VT_VAD_THRESHOLD`      | vad_threshold (V4: Silero VAD threshold, default 0.35) |
 | `HF_HOME`               | hf_cache_dir         |
 | `HTTPS_PROXY`/`HTTP_PROXY` | proxy (fallback if `VT_PROXY` unset) |
 
-### V3 CLI flags
+### V4 CLI flags
 
 | Flag (subcommand)            | Default | Meaning                                                        |
 |------------------------------|---------|----------------------------------------------------------------|
@@ -174,16 +201,29 @@ Supported TOML sections: `transcribe`, `translate`, `llm`, `hf`, `merge`
 | `--merge-max-chars N` (`transcribe`/`run`) | 42 | max chars per cue before splitting (剪映 width) |
 | `--gap N` (`generate`/`run`) | 0.2 | min gap (s) between cues; trims trailing silence, no overlap |
 | `--glossary PATH` (`translate`/`run`) | — | glossary txt/json injected into the translation persona |
+| `--offset N` (`generate`/`run`) | 0 | push display window start later (s), fix subtitle-ahead-of-speech (V6) |
+| `--tail N` (`generate`/`run`) | 0.3 | extend display window end (s), prevent premature fade (V6) |
+| `--min-dur N` (`generate`/`run`) | 1.0 | minimum cue display duration (s); 0 to disable (V4) |
+| `--source TEXT` (`translate`/`run`) | — | film/scene background injected into translation persona (V6) |
+| `--vad-threshold N` (`transcribe`/`run`) | 0.35 | Silero VAD sensitivity; lower = more speech detected (V4) |
+| `--no-drift-snap` (`transcribe`/`run`) | off | disable DTW word-drift snapping before cue splitting (V6) |
+| `--flat` (`generate`/`run`) | off | legacy flat output layout (no sub-folder, no _vN suffix) (V5) |
+| `--prune-old` (`generate`/`run`) | off | keep only 2 newest versions in the sub-folder (V5) |
 | `--strict` (`doctor`) | off | return exit code 7 if any check (incl. Google endpoint) fails |
 
-### Outputs
+### Outputs (V5: sub-folder with version suffix)
+
+All 4 final files land in `<outdir>/<base>/` with collision-based `_vN` version
+suffixes. The first run produces `<base>.*`; subsequent runs produce
+`<base>_v1.*`, `<base>_v2.*`, etc., so 剪映 always imports a fresh copy.
+`--flat` reverts to the legacy flat layout.
 
 | File                       | Use                                  |
 |----------------------------|--------------------------------------|
-| `<base>.bilingual.srt`     | 中文在上 / 英文在下，导入剪映         |
-| `<base>.zh.srt`            | 纯中文字幕                            |
-| `<base>.en.srt`            | 纯英文字幕                            |
-| `<base>.txt`               | 双语校对稿                            |
+| `<base>[_vN].bilingual.srt`| 中文在上 / 英文在下，导入剪映         |
+| `<base>[_vN].zh.srt`       | 纯中文字幕                            |
+| `<base>[_vN].en.srt`       | 纯英文字幕                            |
+| `<base>[_vN].txt`          | 双语校对稿                            |
 
 `segments_en.json` items also carry `words:[{word,start,end}]` (V3) used for
 word-level cue windows and silence-preserving splits.
@@ -224,7 +264,7 @@ stops. Non-agent (headless) runs use `--engine google` and never return 6.
   HTTP-proxy-only, segment-merge, agent-as-engine, lang-autodetect, proxy-autodetect,
   silence-preservation, glossary).
 - **Design**: [`docs/design/`](docs/design) is the principle-level write-up
-  (architecture, word-level alignment, the cue-splitting mechanism, V1→V2→V3 evolution).
+  (architecture, word-level alignment, the cue-splitting mechanism, V1→V2→V3→V4 evolution).
 - **Tests**: `make test` (fast unit+contract+golden, skips `@slow`); `make test-all`
   (includes the real e2e over the source video). Golden layers:
   `test_generate_golden` (build_outputs byte-exact), `test_merge_golden`
@@ -232,7 +272,7 @@ stops. Non-agent (headless) runs use `--engine google` and never return 6.
   `test_v2_golden_preserved` (V2 archived as `.v2`).
 
 ```bash
-make test        # ~140 fast tests
+make test        # ~183 fast tests
 make test-all    # + slow e2e (needs model + video)
 make clean
 ```
@@ -268,6 +308,21 @@ make clean
   ([ADR-003](docs/adr/003-http-proxy-only.md)).
 - **doctor Google probe** (V3) — verifies the Google Translate endpoint via the
   resolved proxy; default prints `[MISS]` and exits 0, `--strict` returns 7.
+- **Transcription quality** (V4) — beam search (`BEAM_SIZE=5, BEST_OF=5`) replaces
+  greedy; `CONDITION_ON_PREVIOUS_TEXT=False` breaks cross-chunk echo; `REPETITION_PENALTY`
+  suppresses loops; hallucination filter uses two-signal detection to avoid false
+  positives.
+- **Output layout** (V5) — final files go to a versioned sub-folder
+  (`<base>[_vN].*`) so 剪映 cache collisions are impossible; `--flat` / `--prune-old`
+  control the behaviour.
+- **Drift snap** (V6) — `snap_drifted_words()` detects DTW word-timestamp drift
+  (single words landing seconds ahead of their sentence) and snaps them before
+  cue splitting (`--no-drift-snap` to disable).
+- **Display window** (V6) — `--offset` / `--tail` shift the display window without
+  touching alignment timestamps, fixing subtitle-ahead-of-speech.
+- **Scene-context translation** (V6) — `--source` injects film/scene background;
+  the agent task ships a full English transcript so the LLM translates with
+  whole-scene awareness (military-dialogue senses like "terms"/"withdraw").
 
 ---
 
@@ -320,7 +375,7 @@ make doctor
 # 5. 将 <视频目录>/apollo.bilingual.srt 导入剪映
 ```
 
-V3 默认值：`INPUT` 是位置参数；`--base` = 视频文件名主干；`--outdir` = 视频所在目录；`--lang` 自动检测；`--proxy` 自动检测（`--no-proxy` 走直连）。**断行（cue split）默认开启**（`--no-split` 可关）；`--gap` 默认 **0.2s**。默认的 **agent 引擎**在转写 + merge + 断行后停下，对外吐一份翻译任务文件给调用方 Agent（**退出码 6**）；想全自动（质量较低）跑则用 `--engine google`。各阶段也可用 `transcribe` / `translate` / `generate` 单独执行，或用 `run --skip transcribe` 续跑上次中断的部分。
+V4 默认值：`INPUT` 是位置参数；`--base` = 视频文件名主干；`--outdir` = 视频所在目录；`--lang` 自动检测；`--proxy` 自动检测（`--no-proxy` 走直连）。**断行（cue split）默认开启**（`--no-split` 可关）；`--gap` 默认 **0.2s**；`--tail` 默认 **0.3s**；`--min-dur` 默认 **1.0s**。默认的 **agent 引擎**在转写 + merge + 断行后停下，对外吐一份翻译任务文件给调用方 Agent（**退出码 6**）；想全自动（质量较低）跑则用 `--engine google`。各阶段也可用 `transcribe` / `translate` / `generate` 单独执行，或用 `run --skip transcribe` 续跑上次中断的部分。
 
 > **退出码 6 = 轮到 Agent 了。** 使用 `--engine agent` 时，`run`/`translate` 完成转写后会写出 `*.translate_task.json`（或 `backfill_task.json`），然后以退出码 6 结束。调用方 Agent 读取该文件，按 `persona`（与可选的术语表）把每条 `to_translate` 翻译成中文，写成 `*.zh_segments.json`，再运行 `generate`。本项目**不内置任何 LLM 客户端**——见 [ADR-005](docs/adr/005-agent-as-engine.md)。
 
@@ -374,10 +429,13 @@ merge_max_chars = 42     # V3：断行单行宽度（此前为保留字段）
 | `VT_MERGE_MAX_GAP`        | merge_max_gap        |
 | `VT_MERGE_MAX_CHARS`      | merge_max_chars（断行宽度） |
 | `VT_GLOSSARY`             | glossary（V3）       |
+| `VT_SOURCE`               | source（V6：影片/场景背景描述，注入翻译 persona） |
+| `VT_FULL_TRANSCRIPT`      | full_transcript（V6：翻译任务是否附全文上下文，默认 true） |
+| `VT_VAD_THRESHOLD`        | vad_threshold（V4：Silero VAD 阈值，默认 0.35） |
 | `HF_HOME`                 | hf_cache_dir         |
 | `HTTPS_PROXY`/`HTTP_PROXY` | proxy（在 `VT_PROXY` 未设时兜底） |
 
-### V3 新增 CLI 参数
+### V4 新增 CLI 参数
 
 | 参数（子命令）               | 默认  | 含义                                                |
 |------------------------------|-------|-----------------------------------------------------|
@@ -385,16 +443,27 @@ merge_max_chars = 42     # V3：断行单行宽度（此前为保留字段）
 | `--merge-max-chars N`（`transcribe`/`run`） | 42 | 每行最大字符数（剪映宽度），超过即断行        |
 | `--gap N`（`generate`/`run`） | 0.2 | 相邻 cue 最小间隔（秒）；裁掉尾随静音、不重叠    |
 | `--glossary PATH`（`translate`/`run`） | — | 术语表（txt/json），注入翻译 persona            |
+| `--offset N`（`generate`/`run`） | 0 | 显示窗口起点后移（秒），解决"字幕比声音早出"（V6） |
+| `--tail N`（`generate`/`run`） | 0.3 | 显示窗口尾端延长（秒），防止字幕过早消失（V6） |
+| `--min-dur N`（`generate`/`run`） | 1.0 | 字幕最短显示时长（秒）；设为 0 关闭（V4） |
+| `--source TEXT`（`translate`/`run`） | — | 影片/场景背景描述，注入翻译 persona（V6） |
+| `--vad-threshold N`（`transcribe`/`run`） | 0.35 | Silero VAD 灵敏度；越低检出越多语音（V4） |
+| `--no-drift-snap`（`transcribe`/`run`） | 关 | 关闭 DTW 词级漂移吸附，保留原始断句（V6） |
+| `--flat`（`generate`/`run`） | 关 | 退回扁平旧布局（无子文件夹、无 _vN 后缀）（V5） |
+| `--prune-old`（`generate`/`run`） | 关 | 子文件夹内仅保留最新两份版本（V5） |
 | `--strict`（`doctor`） | 关 | 任一检查（含 Google 端点）失败则返回退出码 7     |
 
-### 产物
+### 产物（V5：子文件夹 + 版本后缀）
+
+所有 4 个最终文件写入 `<outdir>/<base>/` 子文件夹，带碰撞式 `_vN` 版本后缀。
+首次运行产出 `<base>.*`，后续重跑自动 bump 为 `<base>_v1.*`、`<base>_v2.*`……剪映每次当新文件导入，杜绝缓存错乱。`--flat` 退回扁平旧布局。
 
 | 文件                       | 用途                                 |
 |----------------------------|--------------------------------------|
-| `<base>.bilingual.srt`     | 中文在上 / 英文在下，导入剪映         |
-| `<base>.zh.srt`            | 纯中文字幕                            |
-| `<base>.en.srt`            | 纯英文字幕                            |
-| `<base>.txt`              | 双语校对稿                            |
+| `<base>[_vN].bilingual.srt`| 中文在上 / 英文在下，导入剪映         |
+| `<base>[_vN].zh.srt`       | 纯中文字幕                            |
+| `<base>[_vN].en.srt`       | 纯英文字幕                            |
+| `<base>[_vN].txt`          | 双语校对稿                            |
 
 `segments_en.json` 的每一项还带 `words:[{word,start,end}]`（V3），用于词级 cue 窗口与"保留静音"式断行。
 
@@ -429,7 +498,7 @@ merge_max_chars = 42     # V3：断行单行宽度（此前为保留字段）
 
 - **先写规格**：[`docs/specs/`](docs/specs)（00–16）在写代码前定义行为。
 - **决策记录**：[`docs/adr/`](docs/adr) 记录「为什么」（CPU/int8、分块续跑、仅 HTTP 代理、segment-merge、agent-as-engine、语种自动检测、代理自动检测、保留静音、术语表）。
-- **设计文档**：[`docs/design/`](docs/design) 是原理级说明（架构、词级对齐、断句整体机制、V1→V2→V3 演进）。
+- **设计文档**：[`docs/design/`](docs/design) 是原理级说明（架构、词级对齐、断句整体机制、V1→V2→V3→V4 演进）。
 - **测试**：`make test`（快速单测 + 契约 + golden，跳过 `@slow`）；`make test-all`（含基于源视频的真实 e2e）。golden 分层：`test_generate_golden`（build_outputs 字节级一致）、`test_merge_golden`（merge_segments 确定性）、`test_v1_golden_preserved`（V1 归档为 `.v1`）、`test_v2_golden_preserved`（V2 归档为 `.v2`）。
 
 ```bash
@@ -449,6 +518,11 @@ make clean
 - **CPU / int8** — CTranslate2 无 AMD/Metal 支持，强制使用（[ADR-001](docs/adr/001-cpu-int8.md)）。
 - **代理自动检测**（V2，[ADR-007](docs/adr/007-proxy-autodetect.md)）— `--no-proxy` / `--proxy` / 环境变量 / 探测 7890 → 直连。SOCKS 仍不支持（[ADR-003](docs/adr/003-http-proxy-only.md)）。
 - **doctor 探测 Google 端点**（V3）— 经解析出的代理探测 Google 翻译端点可达性；默认打印 `[MISS]` 并退出 0，`--strict` 返回 7。
+- **转写质量**（V4）— 束搜索（`BEAM_SIZE=5, BEST_OF=5`）替代贪婪解码；`CONDITION_ON_PREVIOUS_TEXT=False` 截断跨段复读；`REPETITION_PENALTY` 抑制循环；幻觉过滤器用双信号检测防误删。
+- **输出布局**（V5）— 最终文件进版本化子文件夹（`<base>[_vN].*`），剪映缓存冲突从根上消除；`--flat`/`--prune-old` 控制行为。
+- **漂移吸附**（V6）— `snap_drifted_words()` 检测 DTW 词级时间戳漂移（单个词比所在句子早数秒），在断句前吸附回去（`--no-drift-snap` 可关）。
+- **显示窗口**（V6）— `--offset`/`--tail` 平移显示窗口而不触碰对齐时间戳，修复"字幕比声音早出"。
+- **场景上下文翻译**（V6）— `--source` 注入影片/场景背景；agent 任务附带完整英文全文，LLM 基于全场景理解翻译（军事对话中 "terms"/"withdraw" 等准确还原）。
 
 ## License
 
