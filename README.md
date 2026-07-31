@@ -4,11 +4,18 @@ Turn a video into **Jianying(剪映)-importable bilingual (zh/en) subtitles** wi
 faithful, resumable pipeline. This single file holds **both the English and the
 中文 documentation** so they never drift apart.
 
+**Highlights / 核心特性**
+- Video → Jianying(剪映)-importable bilingual (zh/en) subtitles with audio-accurate alignment — 视频转剪映中英双语字幕，字幕与音频精确对齐
+- Agent-as-engine: the CLI does the transcription and hands a translation task to the calling Agent (no bundled LLM); `--engine google` is the headless fallback — Agent 即引擎：CLI 负责转写，翻译任务交给调用方 Agent（无内置 LLM），`--engine google` 无头兜底
+- faster-whisper `large-v3` on CPU/int8, chunked and resumable — faster-whisper large-v3，纯 CPU/int8，分块可续跑
+- V4 transcription quality (beam search / anti-hallucination) + V5 versioned output + V6 drift-snap & scene-context translation — V4 转写质量（束搜索 / 抗幻觉）+ V5 版本化输出 + V6 漂移吸附 / 场景上下文翻译
+- HTTP-proxy only (Clash); SOCKS is rejected — 仅支持 HTTP 代理（Clash），不支持 SOCKS
+
 > **📖 [中文文档 ↓](#中文文档)** &nbsp;|&nbsp; English Documentation → [jump](#english-documentation)
 
 ---
 
-## What's new in V4
+## What's new in v4.0.0
 
 V4 is a quality + layout + robustness batch built on top of V3's word-level
 pipeline. Three passes (V4/V5/V6) together make the output production-grade.
@@ -533,7 +540,7 @@ merge_max_chars = 42     # V3：断行单行宽度（此前为保留字段）
 - **测试**：`make test`（快速单测 + 契约 + golden，跳过 `@slow`）；`make test-all`（含基于源视频的真实 e2e）。golden 分层：`test_generate_golden`（build_outputs 字节级一致）、`test_merge_golden`（merge_segments 确定性）、`test_v1_golden_preserved`（V1 归档为 `.v1`）、`test_v2_golden_preserved`（V2 归档为 `.v2`）。
 
 ```bash
-make test        # 约 140 个快测
+make test        # 约 183 个快测
 make test-all    # + 慢速 e2e（需模型 + 视频）
 make clean
 ```
@@ -557,4 +564,12 @@ make clean
 
 ## License
 
-Private project. See repository owner.
+Released under the **MIT License** — see [LICENSE](LICENSE) for the full text.
+
+Copyright (c) 2026 BruceYang
+
+## 许可证
+
+本项目基于 **MIT 许可证** 发布，完整文本见 [LICENSE](LICENSE)。
+
+版权所有 (c) 2026 BruceYang
