@@ -10,8 +10,8 @@
 import os, sys, time, json
 from pathlib import Path
 
-VIDEO = "/Users/yanglei/Movies/翻译/steveharvy-the apollo story.mp4"
-OUTDIR = Path("/Users/yanglei/Movies/翻译/subtitles")
+VIDEO = os.path.expanduser("~/Movies/翻译/steveharvy-the apollo story.mp4")
+OUTDIR = Path(os.path.expanduser("~/Movies/翻译/subtitles"))
 OUTDIR.mkdir(parents=True, exist_ok=True)
 
 # 仅使用 HTTP 代理 (7890 是 HTTP 代理, 不要用 socks, 否则 huggingface_hub 的 httpx 会报缺 socksio)

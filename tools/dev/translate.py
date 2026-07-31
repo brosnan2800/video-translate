@@ -8,9 +8,9 @@ os.environ.pop("ALL_PROXY", None)
 
 from deep_translator import GoogleTranslator
 
-SRC = "/Users/yanglei/Movies/翻译/subtitles/apollo_story.segments_en.json"
-ZH_OUT = "/Users/yanglei/Movies/翻译/subtitles/zh_segments.json"
-PENDING = "/Users/yanglei/Movies/翻译/subtitles/agent_pending.json"
+SRC = os.path.expanduser("~/Movies/翻译/subtitles/apollo_story.segments_en.json")
+ZH_OUT = os.path.expanduser("~/Movies/翻译/subtitles/zh_segments.json")
+PENDING = os.path.expanduser("~/Movies/翻译/subtitles/agent_pending.json")
 
 segs = json.load(open(SRC))
 n = len(segs)

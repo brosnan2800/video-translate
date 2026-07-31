@@ -4,8 +4,8 @@
 import os, time, json, subprocess
 from pathlib import Path
 
-VIDEO = "/Users/yanglei/Movies/翻译/steveharvy-the apollo story.mp4"
-OUTDIR = Path("/Users/yanglei/Movies/翻译/subtitles")
+VIDEO = os.path.expanduser("~/Movies/翻译/steveharvy-the apollo story.mp4")
+OUTDIR = Path(os.path.expanduser("~/Movies/翻译/subtitles"))
 OUTDIR.mkdir(parents=True, exist_ok=True)
 PROXY = "http://127.0.0.1:7890"
 for k in ("http_proxy","https_proxy","HTTP_PROXY","HTTPS_PROXY"): os.environ[k]=PROXY

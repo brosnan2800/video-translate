@@ -1,6 +1,6 @@
 import json, os
 
-BASE = "/Users/yanglei/Movies/翻译/subtitles"
+BASE = os.path.expanduser("~/Movies/翻译/subtitles")
 segs = json.load(open(f"{BASE}/apollo_story.segments_en.json"))
 zh = {int(k): v for k, v in json.load(open(f"{BASE}/zh_segments.json")).items()}
 
