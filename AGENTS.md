@@ -192,3 +192,70 @@ See [`docs/specs/07-gotchas.md`](docs/specs/07-gotchas.md) for the full list.
 - **VAD threshold (V4):** `VAD_THRESHOLD` lowered to 0.35 (was 0.5);
   `--vad-threshold` exposes it. Trade-off: very short opening utterances
   may be missed (e.g. "Saladin" at 1.84s). Manual cue recommended for imports.
+
+## V7 additions (quiet / low-volume & whisper video handling)
+
+Discovered 2026-08-04 on the 《母与子》上/下 clips. **No code changed** — V7 is
+a battle-tested *operating procedure* for videos whose audio is too quiet/low
+for the default VAD (0.35) to segment correctly. The default V1–V6 pipeline
+silently drops most speech as "silence" on these.
+
+### Root cause
+VAD mis-segments quiet audio because the **level is too low**, not because the
+model is weak. Healthy speech ≈ mean −16..−20 dB / max ≈ 0 dB. When
+`mean_volume < -20` or `max_volume < -5`, the default VAD 0.35 treats most of
+the clip as silence (e.g. 24 of 26 s cut on a −20.9 / −5.3 dB clip).
+
+Also note: VAD leakage is **not** limited to quiet audio. On music-heavy clips
+where speech is buried under the score, the overall level can still read normal
+(e.g. −14 dB) yet VAD 0.35 drops most speech as "silence" — see the
+LongLiveTheKing case (2026-08-05): default VAD emitted only 2 stray fragments,
+but a VAD-off bare run exposed 30 s of real dialogue. **Whenever the default
+VAD output looks suspiciously sparse or timestamps are oddly split, run a
+VAD-off bare pass first** before delivering.
+
+### Standard procedure (quiet/low video)
+1. **Probe level:** `ffmpeg -i <vid> -af volumedetect -f null -`
+   If mean < -20 or max < -5 → low level, proceed to normalize.
+2. **Normalize (audio only, stream-copy video):**
+   `ffmpeg -y -i <vid> -af loudnorm=I=-16:TP=-1.5:LRA=11 -c:v copy -c:a aac -b:a 192k /tmp/<name>_norm.mp4`
+3. **DELETE old chunk cache** — `transcribe_fingerprint` keys on params only,
+   NOT audio content. After normalization the params are unchanged, so a stale
+   cache would be reused. `rm videos/<name>.<fp>.chunk_*.json` before re-running.
+4. **Run with tuned VAD + locked language:**
+   `run /tmp/<name>_norm.mp4 --base <name> --outdir <orig_dir> --vad-threshold 0.1 --lang en --tail 0.4`
+   (normalized level is healthy, so 0.1 is safe; `--lang en` avoids the V6
+   "hi"/Indic mis-detect trap). If 0.1 still misses segments, probe sub-ranges
+   with `ffmpeg -ss N -i <norm> -af volumedetect` to tell real silence/music vs
+   dropped speech.
+5. **Verify & generate** as normal (Section 2).
+
+### Hard-won pitfalls (the actual value of V7)
+- **Cache trap:** normalized and original files share one cache fingerprint →
+  future runs on the *original* would hit the normalized cache. Clear manually.
+- **Regeneration discipline:** when re-`generate`ing the same video multiple
+  times, **never `rm -rf` the output subfolder** to dodge the collision bump —
+  that freezes the filename at the no-suffix first version and 剪映 re-imports
+  the stale cached file. Let `generate` auto-bump `_v1/_v2`, or `mv` the final
+  to `<base>_vN`.
+- **Whisper / faint speech:** acoustic features don't look like speech, so
+  `loudnorm` does NOT help. Solution: disable VAD (`vad_filter=False`) and let
+  faster-whisper run bare over the whole clip. The CLI hard-codes
+  `vad_filter=True`, so use a standalone script calling the faster-whisper API
+  (extract audio → `WhisperModel.transcribe(vad_filter=False)` → restore
+  timestamps + N offset). **Always set `HF_HUB_OFFLINE=1
+  TRANSFORMERS_OFFLINE=1`** to avoid proxy hits when checking the model.
+- **VAD over-split + isolated hallucination:** the opposite trap — VAD can cut
+  transient env/music into short fragments; whisper then hallucinates filler
+  ("I love you, baby.") on them with no context. **Always cross-check VAD
+  fragments against a VAD-off, `word_timestamps=True` bare run** before trusting
+  them.
+- **Translation method (quiet/whisper mis-IDs):** for known films/clips,
+  **WebSearch the original script** (search a unique line). Priority:
+  original script > context inference > phonetic guess. Edit `segment.text` to
+  fix the EN line without shifting timestamps.
+
+### Limits
+- VAD 0.1 still correctly marks pure music/ambient as non-speech (expected).
+- whisper still mis-hears very faint speech (e.g. martyr→mother); correct via
+  context at the translation layer, keep the EN line as transcribed.

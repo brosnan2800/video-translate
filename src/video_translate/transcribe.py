@@ -37,6 +37,15 @@ BEST_OF = 5
 CONDITION_ON_PREVIOUS_TEXT = False
 # V4: mild repetition penalty inside a single segment (1.0 = off).
 REPETITION_PENALTY = 1.1
+# A: recover stylized / sung / impression audio that whisper's DEFAULT
+# no_speech gate (0.6) silently drops as "non-speech". 0.0 = never suppress a
+# window as silence. The only downside is a little more hallucination in true
+# silence, which the downstream hallucination filter already bounds.
+NO_SPEECH_THRESHOLD = 0.0
+# A: temperature fallback — whisper retries at higher temperature when the
+# first pass is low-confidence, recovering mumbled / stylized lines instead of
+# emitting nothing.
+TEMPERATURE_FALLBACK = [0.0, 0.2, 0.4]
 # V4: wider speech pad so short interjections at segment edges are not clipped
 # by VAD (the 45-46s missed host line). 200ms was too tight for talk-show pace.
 # V6 (B2): Silero's default speech threshold of 0.5 drops quiet or
@@ -69,6 +78,9 @@ def build_vad_params(threshold: float | None = None) -> dict[str, Any]:
 def transcribe_fingerprint(
     model_name: str, chunk: float, lang: str | None,
     vad: dict[str, Any] | None = None,
+    use_vad: bool = False,
+    no_speech_threshold: float = NO_SPEECH_THRESHOLD,
+    temperature: list[float] | None = None,
 ) -> str:
     """Content hash of every parameter that changes transcription output.
 
@@ -76,6 +88,10 @@ def transcribe_fingerprint(
     transcription recipe changes — otherwise a beam=1 cache would be silently
     reused for a beam=5 run (the same contamination class as the multi-video
     cache collision, now extended to parameter drift).
+
+    The fingerprint now includes the VAD on/off flag, the no_speech gate and
+    the temperature fallback, so any change to the recovery recipe forces a
+    clean re-transcription instead of reusing a stale chunk cache.
     """
     payload = {
         "model": model_name,
@@ -84,9 +100,12 @@ def transcribe_fingerprint(
         "lang": lang,
         "compute": COMPUTE_TYPE,
         "chunk": chunk,
-        "vad": vad if vad is not None else VAD_PARAMS,
+        "vad_filter": use_vad,
+        "vad": vad if (use_vad and vad is not None) else None,
         "cond_prev": CONDITION_ON_PREVIOUS_TEXT,
         "rep_penalty": REPETITION_PENALTY,
+        "no_speech": no_speech_threshold,
+        "temp": temperature or TEMPERATURE_FALLBACK,
         "word_ts": True,
     }
     blob = json.dumps(payload, sort_keys=True).encode()
@@ -134,6 +153,9 @@ def transcribe_video(
     threads: int | None = None,
     lang: str | None = None,
     vad_threshold: float | None = None,
+    use_vad: bool = False,
+    no_speech_threshold: float = NO_SPEECH_THRESHOLD,
+    temperature: list[float] | None = None,
     progress=print,
 ) -> str:
     """Transcribe `input_path` into `{outdir}/{base}.segments_en.json`.
@@ -153,7 +175,10 @@ def transcribe_video(
     total = probe_duration(input_path)
     plan = plan_chunks(total, chunk)
     vad_params = build_vad_params(vad_threshold)
-    fp = transcribe_fingerprint(model_name, chunk, lang, vad_params)
+    fp = transcribe_fingerprint(model_name, chunk, lang, vad_params,
+                                use_vad=use_vad,
+                                no_speech_threshold=no_speech_threshold,
+                                temperature=temperature)
 
     model: WhisperModel | None = None
     chunk_lists: list[list[dict[str, Any]]] = []
@@ -177,7 +202,10 @@ def transcribe_video(
             beam_size=BEAM_SIZE, best_of=BEST_OF,
             condition_on_previous_text=CONDITION_ON_PREVIOUS_TEXT,
             repetition_penalty=REPETITION_PENALTY,
-            vad_filter=True, vad_parameters=dict(vad_params),
+            vad_filter=use_vad,
+            **(dict(vad_parameters=vad_params) if use_vad else {}),
+            no_speech_threshold=no_speech_threshold,
+            temperature=temperature or TEMPERATURE_FALLBACK,
             word_timestamps=True,   # V3: word-level timestamps for split + silence
         )
         chunk_segs = [
@@ -204,3 +232,63 @@ def transcribe_video(
     save_json(out, all_segs, indent=0)
     progress(f"[merge] total {len(all_segs)} segments -> {out}")
     return out
+
+
+def transcribe_window(
+    input_path: str, start: float, end: float,
+    *,
+    lang: str | None = None,
+    use_vad: bool = False,
+    model_name: str = "large-v3",
+    threads: int | None = None,
+    no_speech_threshold: float = NO_SPEECH_THRESHOLD,
+    temperature: list[float] | None = None,
+) -> list[dict[str, Any]]:
+    """Transcribe a single [start, end) window with a forced ``lang``.
+
+    Returns segments with ABSOLUTE timestamps (each segment/word time is
+    shifted by ``start``). Used by the ``resegment`` command to fix
+    mis-detected language spans (e.g. Japanese lines heard as English)
+    without re-running the whole video.
+    """
+    import tempfile
+    from faster_whisper import WhisperModel
+
+    threads = threads or os.cpu_count()
+    vad_params = build_vad_params(None)
+    dur = max(0.1, end - start)
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
+        wav = tf.name
+    try:
+        extract_chunk(input_path, wav, start, dur)
+        model = WhisperModel(model_name, device=DEVICE, compute_type=COMPUTE_TYPE,
+                             cpu_threads=threads)
+        segs, _info = model.transcribe(
+            wav, language=lang, task="transcribe",
+            beam_size=BEAM_SIZE, best_of=BEST_OF,
+            condition_on_previous_text=CONDITION_ON_PREVIOUS_TEXT,
+            repetition_penalty=REPETITION_PENALTY,
+            vad_filter=use_vad,
+            **(dict(vad_parameters=vad_params) if use_vad else {}),
+            no_speech_threshold=no_speech_threshold,
+            temperature=temperature or TEMPERATURE_FALLBACK,
+            word_timestamps=True,
+        )
+        out = []
+        for s in segs:
+            words = [
+                {"word": w.word,
+                 "start": round(w.start + start, 2),
+                 "end": round(w.end + start, 2)}
+                for w in (s.words or [])
+            ]
+            out.append({
+                "start": round(s.start + start, 2),
+                "end": round(s.end + start, 2),
+                "text": s.text.strip(),
+                "words": words,
+            })
+        return out
+    finally:
+        if os.path.exists(wav):
+            os.remove(wav)

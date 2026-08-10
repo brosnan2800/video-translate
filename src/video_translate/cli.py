@@ -87,6 +87,24 @@ def _resolve_proxy(args: argparse.Namespace) -> str | None:
     return detect_proxy(cli_proxy=cli_proxy, cli_no_proxy=cli_no_proxy)
 
 
+def _translate_proxy(args: argparse.Namespace) -> str | None:
+    """Resolve + apply the HTTP proxy, but ONLY for the google translate engine.
+
+    The default ``agent`` engine does NOT make any network call — the calling
+    agent (WorkBuddy / Claude Code / ...) does the translation — so for it we
+    never touch proxy env vars and never probe Google. Returns the resolved
+    proxy url (or None for a direct connection). Raises ValueError (-> exit 4)
+    on a SOCKS proxy, which would break huggingface_hub's httpx client.
+    """
+    proxy = _resolve_proxy(args)
+    try:
+        setup_http_proxy(proxy)
+    except ValueError as e:
+        print(f"[error] {e}", file=sys.stderr)
+        raise
+    return proxy
+
+
 # --------------------------- doctor / setup ---------------------------
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -122,20 +140,24 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     cfg = resolve_config(cwd=os.getcwd())
     print(f"  engine        : {cfg.engine}")
     print(f"  lang          : {'auto-detect' if cfg.lang is None else cfg.lang}")
-    print(f"  proxy         : auto-detect (--no-proxy for direct)")
 
-    # V3: probe Google Translate endpoint reachability via the resolved proxy,
-    # so a 7-minute transcribe won't fail first at the translate step.
-    proxy = detect_proxy()
-    try:
-        from .proxy import _probe_google_endpoint
-        reachable = _probe_google_endpoint(proxy)
-    except Exception:
-        reachable = False
-    tag = "via proxy" if proxy else "via direct"
-    print(f"  Google translate endpoint ({tag}): {'OK' if reachable else 'MISS'}")
-    if not reachable:
-        failed = True
+    # The default `agent` engine translates locally via the calling agent and
+    # never touches the network — so we do NOT probe Google for it. Only the
+    # headless `google` engine needs the proxy + endpoint reachability check.
+    if cfg.engine == "google":
+        print(f"  proxy         : auto-detect (--no-proxy for direct)")
+        proxy = detect_proxy()
+        try:
+            from .proxy import _probe_google_endpoint
+            reachable = _probe_google_endpoint(proxy)
+        except Exception:
+            reachable = False
+        tag = "via proxy" if proxy else "via direct"
+        print(f"  Google translate endpoint ({tag}): {'OK' if reachable else 'MISS'}")
+        if not reachable:
+            failed = True
+    else:
+        print(f"  proxy         : n/a (agent engine translates locally; no network)")
 
     if strict and failed:
         return EXIT_DOCTOR_FAIL
@@ -186,22 +208,17 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
          "merge_max_chars": getattr(args, "merge_max_chars", None)},
         cwd=os.getcwd(),
     )
-    proxy = _resolve_proxy(args)
-    try:
-        setup_http_proxy(proxy)
-    except ValueError as e:
-        print(f"[error] {e}", file=sys.stderr)
-        return EXIT_PROXY
     try:
         from .transcribe import transcribe_video
         transcribe_video(
             input_path, outdir, base=base, model_name=cfg.model,
             chunk=cfg.chunk, threads=args.threads, lang=cfg.lang,
             vad_threshold=getattr(args, "vad_threshold", None),
+            use_vad=getattr(args, "vad", False),
         )
+        segs_path = os.path.join(outdir, f"{base}.segments_en.json")
         if cfg.merge_enabled and not args.no_merge:
             from .merge import apply_merge
-            segs_path = os.path.join(outdir, f"{base}.segments_en.json")
             raw_path = os.path.join(outdir, f"{base}.segments_raw.json")
             apply_merge(
                 segs_path, raw_path=raw_path,
@@ -211,6 +228,17 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                 snap_drift=not getattr(args, "no_drift_snap", False),
             )
             print(f"[merge] merged + split -> {segs_path} (raw kept at {raw_path})")
+        # B: coverage self-audit + automatic gap recovery (skip with --no-audit)
+        if not getattr(args, "no_audit", False):
+            from .fill_gaps import fill_gaps
+            from .io_utils import load_json, save_json
+            segs = load_json(segs_path)
+            recovered = fill_gaps(
+                input_path, segs, lang=cfg.lang,
+                use_vad=getattr(args, "vad", False),
+            )
+            if recovered is not segs:
+                save_json(segs_path, recovered, indent=0)
         return EXIT_OK
     except Exception as e:  # noqa: BLE001
         print(f"[error] transcription failed: {e}", file=sys.stderr)
@@ -247,8 +275,11 @@ def cmd_translate(args: argparse.Namespace) -> int:
             task=task_path, segments=segments, out=out, outdir=outdir, base=base))
         return EXIT_AWAITING_AGENT
 
-    # google engine (headless fallback)
-    proxy = _resolve_proxy(args)
+    # google engine (headless fallback) — the ONLY path that needs a proxy
+    try:
+        proxy = _translate_proxy(args)
+    except ValueError:
+        return EXIT_PROXY
     try:
         from .translate import translate_segments
         translate_segments(
@@ -256,8 +287,7 @@ def cmd_translate(args: argparse.Namespace) -> int:
             proxy=proxy, src=cfg.src, tgt=cfg.tgt,
         )
         return EXIT_OK
-    except ValueError as e:  # SOCKS proxy
-        print(f"[error] {e}", file=sys.stderr)
+    except ValueError:  # SOCKS proxy (already reported)
         return EXIT_PROXY
     except Exception as e:  # noqa: BLE001
         print(f"[error] translation failed: {e}", file=sys.stderr)
@@ -272,6 +302,25 @@ def cmd_generate(args: argparse.Namespace) -> int:
     tail = getattr(args, "tail", 0.0) or 0.0
     flat = getattr(args, "flat", False)
     prune_old = getattr(args, "prune_old", False)
+
+    # V11: agent translation is written batch-by-batch keyed by segment index;
+    # one skipped line shifts every later translation while the English track
+    # stays correct — invisible in logs, obvious to a viewer. Catch it before
+    # rendering. Warning only; --no-align-check silences it.
+    if not getattr(args, "no_align_check", False):
+        try:
+            import json as _json
+            from .verify_align import report as _align_report
+            with open(args.segments, encoding="utf-8") as _f:
+                _segs = _json.load(_f)
+            with open(args.zh, encoding="utf-8") as _f:
+                _zh = _json.load(_f)
+            if not _align_report(_segs, _zh):
+                print("[align] verify the flagged range before shipping "
+                      "(--no-align-check to silence)", file=sys.stderr)
+        except Exception as e:  # noqa: BLE001
+            print(f"[align] check skipped ({e})", file=sys.stderr)
+
     try:
         from .generate import generate_subtitles
         generate_subtitles(args.segments, args.zh, args.outdir, base=base,
@@ -315,6 +364,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             no_split=getattr(args, "no_split", False),
             merge_max_chars=cfg.merge_max_chars,
             vad_threshold=getattr(args, "vad_threshold", None),
+            vad=getattr(args, "vad", False),
+            no_audit=getattr(args, "no_audit", False),
             no_drift_snap=getattr(args, "no_drift_snap", False),
         ))
         if rc != EXIT_OK:
@@ -354,6 +405,63 @@ def cmd_run(args: argparse.Namespace) -> int:
         ))
         if rc != EXIT_OK:
             return rc
+    return EXIT_OK
+
+
+def cmd_resegment(args: argparse.Namespace) -> int:
+    """Re-transcribe given time windows with a forced language and splice
+    the clean segments back into the existing segments_en.json.
+
+    Used to fix mis-detected language spans (e.g. Japanese lines in an
+    otherwise-English trailer that Whisper heard as English gibberish) without
+    re-running the whole video. The re-transcribed segments are tagged with a
+    ``lang`` field so the translation step can branch per segment.
+    """
+    dep = _require_ffmpeg()
+    if dep is not None:
+        return dep
+    segs_path = args.segments
+    if not os.path.exists(segs_path):
+        print(f"[error] segments file not found: {segs_path}", file=sys.stderr)
+        return EXIT_RUNTIME
+    segments = load_json(segs_path)
+    windows: list[tuple[float, float]] = []
+    for w in args.windows:
+        try:
+            s, e = w.split("-")
+            windows.append((float(s), float(e)))
+        except ValueError:
+            print(f"[error] bad window '{w}', expected 'start-end' (seconds)",
+                  file=sys.stderr)
+            return EXIT_RUNTIME
+    windows.sort()
+
+    from .transcribe import transcribe_window
+    new_segs: list[dict[str, Any]] = []
+    for (ws, we) in windows:
+        print(f"[resegment] window {ws:.1f}-{we:.1f}s lang={args.lang} ...",
+              flush=True)
+        window_segs = transcribe_window(
+            args.video, ws, we, lang=args.lang,
+            use_vad=getattr(args, "vad", False),
+            model_name=args.model, threads=args.threads,
+        )
+        for seg in window_segs:
+            seg = dict(seg)
+            seg["lang"] = args.lang
+            new_segs.append(seg)
+        print(f"    -> {len(window_segs)} clean segment(s)", flush=True)
+
+    # drop originals overlapping any window, then merge + sort by start
+    kept = [
+        seg for seg in segments
+        if not any(seg["start"] < we and seg["end"] > ws for (ws, we) in windows)
+    ]
+    merged = kept + new_segs
+    merged.sort(key=lambda s: s["start"])
+    save_json(segs_path, merged, indent=0)
+    print(f"[resegment] done: {len(segments)} -> {len(merged)} segments "
+          f"({len(new_segs)} re-transcribed as '{args.lang}') -> {segs_path}")
     return EXIT_OK
 
 
@@ -469,6 +577,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Silero VAD speech threshold (default 0.35). Lower = "
                         "catch quieter/music-underscored lines at the cost of "
                         "more noise; changing it invalidates the chunk cache")
+    t.add_argument("--vad", action="store_true",
+                   help="enable Silero VAD before decoding (default: OFF — "
+                        "full raw decode; use VAD only for very clean "
+                        "single-speaker audio)")
+    t.add_argument("--no-audit", action="store_true",
+                   help="skip the coverage self-audit + gap recovery step after "
+                        "transcription (audit runs by default)")
     t.set_defaults(func=cmd_transcribe)
 
     tr = sub.add_parser("translate", help="Translate segments_en.json -> zh_segments.json")
@@ -511,6 +626,8 @@ def build_parser() -> argparse.ArgumentParser:
                         "subfolder, no version suffix)")
     g.add_argument("--prune-old", action="store_true",
                    help="keep only the 2 newest versioned outputs in the subfolder")
+    g.add_argument("--no-align-check", action="store_true",
+                   help="skip the zh/en index-drift audit run before rendering")
     g.set_defaults(func=cmd_generate)
 
     r = sub.add_parser("run", help="Full pipeline: transcribe -> translate -> generate")
@@ -532,6 +649,13 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--vad-threshold", type=float, default=None,
                    help="Silero VAD speech threshold (default 0.35); lower = "
                         "catch quieter lines, invalidates the chunk cache")
+    r.add_argument("--vad", action="store_true",
+                   help="enable Silero VAD before decoding (default: OFF — "
+                        "full raw decode; use VAD only for very clean "
+                        "single-speaker audio)")
+    r.add_argument("--no-audit", action="store_true",
+                   help="skip the coverage self-audit + gap recovery step after "
+                        "transcription (audit runs by default)")
     r.add_argument("--src", default="en")
     r.add_argument("--tgt", default="zh-CN")
     r.add_argument("--engine", default=None, choices=["agent", "google"],
@@ -553,6 +677,21 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--prune-old", action="store_true",
                    help="keep only the 2 newest versioned outputs in the subfolder")
     r.set_defaults(func=cmd_run)
+
+    rs = sub.add_parser("resegment",
+                        help="Re-transcribe time windows with a forced language and splice into segments_en.json")
+    rs.add_argument("--segments", required=True, help="path to segments_en.json to patch")
+    rs.add_argument("--video", required=True, help="source video (for re-transcription)")
+    rs.add_argument("--windows", required=True, nargs="+",
+                    help="time windows to re-transcribe, each 'start-end' in seconds, "
+                         "e.g. 12.0-18.5 41.0-45.0")
+    rs.add_argument("--lang", required=True,
+                    help="forced language for the windows (e.g. ja, en, zh)")
+    rs.add_argument("--model", default="large-v3")
+    rs.add_argument("--threads", type=int, default=None)
+    rs.add_argument("--vad", action="store_true",
+                    help="enable VAD for the re-transcription windows")
+    rs.set_defaults(func=cmd_resegment)
 
     s = sub.add_parser("setup", help="Check/download the HF model (reuse if cached)")
     s.add_argument("--model", default="large-v3")
