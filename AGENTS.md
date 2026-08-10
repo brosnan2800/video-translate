@@ -11,6 +11,21 @@ for behavior → [`docs/adr/`](docs/adr) for the "why".
 
 ---
 
+## 项目铁律（cross-tool hard rules — 任何工具 / 任何 Agent 都必须遵守）
+
+1. **本协议（AGENTS.md）是项目唯一权威。** 开工前先 Read 本文件；不要用各自记忆替代。
+   README 是指路口，AGENTS.md 是规则本身。换工具（Claude Code / Codex / Trae / Cursor）
+   也只读这个文件，不依赖 WorkBuddy 的私有 memory。
+2. **每次提交必须同步文档。** 改代码的同时，必须更新 `AGENTS.md` + `README.md` +
+   相关 `docs/specs`、`docs/adr`；只改代码不更新文档的提交视为**未完成**，不得合并/推送。
+3. **改代码始终遵循 SDD + TDD。** 先写/更新 spec（行为）+ ADR（决策），再用测试护航
+   （`make test` 必须 green，golden 测试保字节级稳定）。
+
+> 注意：`.workbuddy/`（含 memory/skills）是 WorkBuddy 私有数据，**永不提交**；
+> 已写入 `.gitignore`。跨工具可移植的规则只能落在仓库文件（AGENTS.md / README / docs）里。
+
+---
+
 ## 0. Trigger & video interaction (conversational)
 
 When the user asks to translate/subtitle a video ("翻译这个视频 / 生成字幕 /
@@ -239,12 +254,13 @@ VAD-off bare pass first** before delivering.
   the stale cached file. Let `generate` auto-bump `_v1/_v2`, or `mv` the final
   to `<base>_vN`.
 - **Whisper / faint speech:** acoustic features don't look like speech, so
-  `loudnorm` does NOT help. Solution: disable VAD (`vad_filter=False`) and let
-  faster-whisper run bare over the whole clip. The CLI hard-codes
-  `vad_filter=True`, so use a standalone script calling the faster-whisper API
-  (extract audio → `WhisperModel.transcribe(vad_filter=False)` → restore
-  timestamps + N offset). **Always set `HF_HUB_OFFLINE=1
-  TRANSFORMERS_OFFLINE=1`** to avoid proxy hits when checking the model.
+  `loudnorm` does NOT help. **VAD is now opt-in (off by default)** — the default
+  `transcribe`/`run` already calls faster-whisper bare (`vad_filter=False`). To
+  force VAD on for clean studio audio, pass **`--vad`** (see V13). For one-off raw
+  passes you may still call the faster-whisper API directly (extract audio →
+  `WhisperModel.transcribe(vad_filter=False)` → restore timestamps + N offset).
+  **Always set `HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1`** to avoid proxy hits when
+  checking the model.
 - **VAD over-split + isolated hallucination:** the opposite trap — VAD can cut
   transient env/music into short fragments; whisper then hallucinates filler
   ("I love you, baby.") on them with no context. **Always cross-check VAD
@@ -259,3 +275,84 @@ VAD-off bare pass first** before delivering.
 - VAD 0.1 still correctly marks pure music/ambient as non-speech (expected).
 - whisper still mis-hears very faint speech (e.g. martyr→mother); correct via
   context at the translation layer, keep the EN line as transcribed.
+
+---
+
+## V8–V13 additions (hardening: no-VAD default, gap-fill, alignment guard, engine-first)
+
+> Code state as of commit `ea77a83` (master). These close the five defect classes
+> found on the Jamie Foxx fan-edit (2026-08-10). They are **not optional tuning** —
+> they are the default pipeline now.
+
+### V8 — mixed-language audio (auto-detect is asymmetric)
+- `language="ja"` over English audio triggers X→ja cross-lingual generation: Whisper
+  understands the English sense, then emits fluent Japanese. Katakana = proper-noun
+  transliteration shell; hiragana particles + kanji = real translation. Mixed output
+  = English sense → Japanese translation, **not** transliteration.
+- auto-detect mislabels a mixed clip as the minority language → majority-language
+  segments get "translated" into the minority language (source label wrong, but sense
+  still passes downstream).
+- **Discipline:** default `auto`; only use `resegment --lang ja` / `--lang en` when you
+  *know* the source is mixed. Don't wait to see the output — that failure is invisible.
+- **Hallucination iron rule:** a segment packing lots of text into a tiny window
+  (e.g. 16 chars in 0.64 s) is low-confidence Whisper hallucination — drop it, don't translate.
+
+### V9 — language handling decision (user-ratified)
+- **Default `auto`; never force a language** (already the default, no code change needed).
+- No per-sentence auto-detection mechanism — over-engineering for a rare case; manual
+  `resegment`/`--lang` correction suffices.
+- auto→en over "English-dominated + a Japanese line" is the *invisible* failure (the
+  Japanese line is silently decoded into fluent English, no subtitle tell). auto→ja is
+  *visible* (your own language shows up). Hence default `auto` is safer than forcing `en`.
+
+### V10 — big-segment drop fix (two silence gates)
+Root cause on fan-edits (laughter / score / overlapping speech, low SNR): speech is
+dropped wholesale.
+1. When VAD is enabled, it marks "speech inside laughter/score" as silence and discards
+   it — which is why VAD is now **opt-in (off by default)**.
+2. Even with VAD off (the default), Whisper's internal `no_speech_threshold` (default 0.6)
+   still blanks low-SNR windows.
+**Fix:** `NO_SPEECH_THRESHOLD = 0.0` + `TEMPERATURE_FALLBACK=[0.0,0.2,0.4]`. VAD is now
+opt-in (off by default), so the default `run` already runs VAD-off; add `--vad` only for
+clean studio audio. Clean interview/stand-up clips (high SNR) rarely hit this — **content
+type, not video length, decides**. Use `run --no-proxy` for transcribe-only when the model
+is cached.
+
+### V11 — fill_gaps audit (`fill_gaps.py`, new module)
+Recovers dropped speech missed by the gap scan:
+1. **Inter-segment holes:** gap > 8 s between neighbours → extract + force-decode
+   (`no_speech_threshold=0.0, temperature=0.0`).
+2. **In-segment collapse:** timeline continuous (gap scan blind). Flag when
+   `cps = len(text)/dur < median*0.45` and `dur ≥ 4 s`.
+3. **Prefix collapse (first-segment lock):** probe pad too large drags a neighbour's
+   tail into the window start → decoder emits a fragment then predicts end-of-transcript
+   → whole window blanked. Fix: `_PROBE_PADS=(0.2,0.0,0.5)` multi-pad, pick by covered
+   duration.
+4. **Echo leak:** forced decode over true silence emits a neighbour's tail; skip when
+   `difflib.SequenceMatcher > 0.7` matches a neighbour. Only insert holes with *new* narration.
+5. **Audit is not one-shot:** re-scan until no new holes.
+
+### V12 — zh/en index drift guard (`verify_align.py`, new module)
+Agent writes translations batch-by-batch keyed by index; skipping one line shifts every
+later translation by one (`zh[i]` actually = `en[i+1]`). **English track unchanged, so
+the pipeline is invisible** — counts match, indices contiguous, no nulls, SRT valid, yet
+wrong. v4 reused v3's mis-aligned translations via `(start,text)` key → inherited + amplified.
+- **Self-check runs automatically before `generate`** (warning only):
+  ① length-profile Pearson correlation sliding window vs shift ±1/±2 (main signal,
+     language-agnostic); ② source digits present in `zh[i]` but found in `zh[i±1/±2]` =
+     off-by-N fingerprint. Disable with `--no-align-check`.
+- **Iron rule A:** batch-by-index translation needs a cross-modal consistency check —
+  "three checks pass" ≠ aligned.
+- **Iron rule B:** before reusing old translations, first verify the old translations
+  themselves were aligned.
+- **Fix discipline:** a blind shift re-pollutes (we had inserted 40 segments in v4) —
+  re-translate the mis-aligned contiguous range, asserting index coverage (no gaps/dupes).
+
+### V13 — orchestration: engine-first, guard wired in
+- **Agent engine is decided first; proxy/Google probe only runs under `--engine google`.**
+  With `--engine agent` (default) there is no network/proxy dependency at all — this is
+  the design from ADR-005. Don't probe Google just because the binary started.
+- The V12 alignment self-check is now **wired into `cmd_generate`** (runs before
+  `generate_subtitles`), so drift is caught at render time, not by a human viewer.
+- CLI flags: `--vad` (opt-in Silero VAD; default off), `--no-audit`, `--no-align-check`.
+  `doctor` stays the preflight entry point.

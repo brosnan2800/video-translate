@@ -64,6 +64,42 @@ pipeline. Three passes (V4/V5/V6) together make the output production-grade.
 > word/silence boundaries. Display-only adjustments (`offset`, `tail`, `min_dur`)
 > never touch alignment.
 
+---
+
+## What's new since V6 (V7–V13 hardening)
+
+These close the defect classes found on the Jamie Foxx fan-edit (2026-08-10). As of
+commit `ea77a83`, they are the **default** pipeline, not optional tuning.
+
+- **V7 — quiet / music-heavy video procedure:** probe level, normalize, run VAD-off;
+  regenerate discipline (`_vN` bump, never `rm -rf` the output subfolder).
+- **V8 — mixed-language audio:** auto-detect is asymmetric; `language="ja"` over
+  English triggers X→ja translation, not transliteration. Default `auto`; only
+  `resegment --lang` when you *know* the source is mixed.
+- **V9 — language decision:** default `auto`, no per-sentence detection; auto→en over
+  mixed audio is the *invisible* failure, so `auto` beats forcing `en`.
+- **V10 — big-segment drop fix:** `NO_SPEECH_THRESHOLD = 0.0` + temperature fallback.
+  Two silence gates (VAD + Whisper internal) were dropping low-SNR speech. VAD is now
+  opt-in (off by default), so the default run is already VAD-off; add `--vad` only for
+  clean studio audio. Content type, not length, decides.
+- **V11 — `fill_gaps.py`:** recovers inter-segment holes (>8 s), in-segment collapse
+  (`cps` vs median), prefix-collapse multi-pad probe (`_PROBE_PADS`), and echo dedup
+  (`difflib` ratio > 0.7). Audit iterates until no new holes.
+- **V12 — `verify_align.py`:** catches zh/en index drift before render (agent skips a
+  line → whole-batch shift, invisible because English track is unchanged). Length-profile
+  Pearson correlation (main signal) + digit co-occurrence; wired into `generate`,
+  `--no-align-check` to silence.
+- **V13 — orchestration:** agent engine is decided *first*; proxy/Google probe only under
+  `--engine google`. CLI flags `--vad` (opt-in) / `--no-audit` / `--no-align-check`;
+  `doctor` stays preflight.
+
+> **Project iron rules (cross-tool):** (1) `AGENTS.md` is the sole authority — read it
+> first, don't substitute local memory. (2) Every commit must update `AGENTS.md` +
+> `README.md` + relevant `docs/` — code-only commits are incomplete. (3) SDD + TDD always:
+> spec/ADR first, `make test` green, golden tests guard byte-stability.
+
+---
+
 ## Project structure
 
 ```
@@ -248,6 +284,9 @@ Supported TOML sections: `transcribe`, `translate`, `llm`, `hf`, `merge`
 | `--flat` (`generate`/`run`) | off | legacy flat output layout (no sub-folder, no _vN suffix) (V5) |
 | `--prune-old` (`generate`/`run`) | off | keep only 2 newest versions in the sub-folder (V5) |
 | `--strict` (`doctor`) | off | return exit code 7 if any check (incl. Google endpoint) fails |
+| `--vad` (`transcribe`/`run`) | off | opt-in Silero VAD; default run is VAD-off (bare), which fixes VAD drop on music-heavy/low-SNR audio (V10) |
+| `--no-audit` (`transcribe`/`run`) | off | skip the fill_gaps hole audit (V11) |
+| `--no-align-check` (`generate`) | off | skip the zh/en index-drift guard (V12) |
 
 ### Outputs (V5: sub-folder with version suffix)
 
@@ -490,6 +529,9 @@ merge_max_chars = 42     # V3：断行单行宽度（此前为保留字段）
 | `--flat`（`generate`/`run`） | 关 | 退回扁平旧布局（无子文件夹、无 _vN 后缀）（V5） |
 | `--prune-old`（`generate`/`run`） | 关 | 子文件夹内仅保留最新两份版本（V5） |
 | `--strict`（`doctor`） | 关 | 任一检查（含 Google 端点）失败则返回退出码 7     |
+| `--vad`（`transcribe`/`run`） | 关 | Silero VAD 改为「选开」：默认即裸跑（关 VAD），正好是修复音乐重/低信噪比音频漏切的方案（V10）；干净录音可显式加 `--vad` 开启 |
+| `--no-audit`（`transcribe`/`run`） | 关 | 跳过 fill_gaps 空洞审计（V11） |
+| `--no-align-check`（`generate`） | 关 | 跳过 zh/en 索引漂移护栏（V12） |
 
 ### 产物（V5：子文件夹 + 版本后缀）
 

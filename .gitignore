@@ -22,3 +22,6 @@ dist/
 
 # Golden test fixtures (regenerated locally from source video)
 docs/golden/
+
+# WorkBuddy private data (memory / skills) — never track
+.workbuddy/
