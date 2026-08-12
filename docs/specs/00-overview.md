@@ -49,3 +49,4 @@ could not translate, for agent backfill).
 - Segment schema: `01-segment-schema.md`
 - Per-stage detail: `02-transcribe.md`, `03-translate.md`, `04-generate-srt.md`
 - CLI: `11-cli-v2.md` · Config: `06-config.md` · Gotchas: `07-gotchas.md`
+- Hardening (V7–V13): `16-fill-gaps.md` (V11 coverage audit) · `17-verify-align.md` (V12 zh/en index-drift guard)

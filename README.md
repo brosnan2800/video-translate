@@ -9,6 +9,7 @@ faithful, resumable pipeline. This single file holds **both the English and the
 - Agent-as-engine: the CLI does the transcription and hands a translation task to the calling Agent (no bundled LLM); `--engine google` is the headless fallback — Agent 即引擎：CLI 负责转写，翻译任务交给调用方 Agent（无内置 LLM），`--engine google` 无头兜底
 - faster-whisper `large-v3` on CPU/int8, chunked and resumable — faster-whisper large-v3，纯 CPU/int8，分块可续跑
 - V4 transcription quality (beam search / anti-hallucination) + V5 versioned output + V6 drift-snap & scene-context translation — V4 转写质量（束搜索 / 抗幻觉）+ V5 版本化输出 + V6 漂移吸附 / 场景上下文翻译
+- V7–V13 hardening (music-heavy VAD-off, mixed-language auto, big-segment gap-fill, zh/en alignment guard) — V7–V13 加固（音乐重关 VAD、混合语种 auto、大段漏字补洞、中英文索引漂移护栏）
 - HTTP-proxy only (Clash); SOCKS is rejected — 仅支持 HTTP 代理（Clash），不支持 SOCKS
 
 > **📖 [中文文档 ↓](#中文文档)** &nbsp;|&nbsp; English Documentation → [jump](#english-documentation)
@@ -82,7 +83,7 @@ commit `ea77a83`, they are the **default** pipeline, not optional tuning.
   Two silence gates (VAD + Whisper internal) were dropping low-SNR speech. VAD is now
   opt-in (off by default), so the default run is already VAD-off; add `--vad` only for
   clean studio audio. Content type, not length, decides.
-- **V11 — `fill_gaps.py`:** recovers inter-segment holes (>8 s), in-segment collapse
+- **V11 — `fill_gaps.py`:** recovers inter-segment holes (≥2 s by default), in-segment collapse
   (`cps` vs median), prefix-collapse multi-pad probe (`_PROBE_PADS`), and echo dedup
   (`difflib` ratio > 0.7). Audit iterates until no new holes.
 - **V12 — `verify_align.py`:** catches zh/en index drift before render (agent skips a
@@ -416,6 +417,20 @@ make clean
 ```
 
 设计不变量：**时间戳是声学事实**，由转写阶段产生，下游绝不重算——翻译只改写文本，字幕始终与音频对齐。
+
+### V6 之后新增（V7–V13 加固）
+
+以下修复来自 Jamie Foxx 粉丝混剪（2026-08-10）实战中暴露的缺陷类。自提交 `ea77a83` 起，它们已是**默认管线**，不是可选调参。
+
+- **V7 — 安静 / 音乐重视频处理流程**：探电平、归一化、关 VAD 裸跑；重生成纪律（`_vN` 自动递增，绝不 `rm -rf` 输出子文件夹）。
+- **V8 — 混合语种音频**：auto 检测不对称；英文上压 `language="ja"` 会触发 X→ja 翻译而非音译。默认 `auto`；仅当你**确定**源含混合语种时才用 `resegment --lang`。
+- **V9 — 语种决策**：默认 `auto`，不做逐句检测；auto→en 压混合音频是"静默失败"，所以 `auto` 比强制 `en` 更安全。
+- **V10 — 大段漏字修复**：`NO_SPEECH_THRESHOLD = 0.0` + 温度回退。两道静音闸门（VAD + Whisper 内部）曾丢弃低信噪比语音。VAD 改为选开（默认关），所以默认跑就是关 VAD 裸跑；仅干净录音才显式加 `--vad`。决定因素是内容类型，不是视频长度。
+- **V11 — `fill_gaps.py`**：回收段间空洞（默认 ≥2 s）、段内塌陷（cps 低于文件自身中位数比例）、prefix-collapse 多 pad 探针（`_PROBE_PADS`）、回声去重（`difflib` ratio > 0.7）。审计多轮迭代直到无新洞。详见 [Spec 16](docs/specs/16-fill-gaps.md)。
+- **V12 — `verify_align.py`**：渲染前捕获 zh/en 索引漂移（agent 漏翻一行 → 整批平移，因英文轨不变而静默不可见）。长度剖面 Pearson 相关（主信号）+ 数字共现；已接入 `generate`，`--no-align-check` 可关。详见 [Spec 17](docs/specs/17-verify-align.md)。
+- **V13 — 编排**：先决定 agent 引擎；仅 `--engine google` 时才探代理 / Google 可达性。CLI 旗标 `--vad`（选开）/ `--no-audit` / `--no-align-check`；`doctor` 仍是预检。
+
+> **项目铁律（跨工具）**：(1) `AGENTS.md` 是唯一权威——先读它，别用各自 memory 替代。(2) 每次提交必须同步 `AGENTS.md` + `README.md` + 相关 `docs/`——只改代码不更文档 = 未完成。(3) 始终 SDD + TDD：spec/ADR 先行，`make test` 必绿，golden 测试守卫字节稳定。
 
 ### 面向 AI Agent / 自动化
 
