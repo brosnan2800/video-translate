@@ -94,6 +94,11 @@ commit `ea77a83`, they are the **default** pipeline, not optional tuning.
   `--engine google`. CLI flags `--vad` (opt-in) / `--no-audit` / `--no-align-check`;
   `doctor` stays preflight.
 
+> **Pit narrative (symptom → root cause → fix → lesson) for V8–V13:** see
+> [`docs/POSTMORTEM-JamieFoxx.md`](POSTMORTEM-JamieFoxx.md). The bullets above are the
+> *solution* view; the post-mortem is the *what-we-stepped-on* view, including the
+> unresolved Oval Office overlap-echo / 0.44s-flash item.
+
 > **Project iron rules (cross-tool):** (1) `AGENTS.md` is the sole authority — read it
 > first, don't substitute local memory. (2) Every commit must update `AGENTS.md` +
 > `README.md` + relevant `docs/` — code-only commits are incomplete. (3) SDD + TDD always:

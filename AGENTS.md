@@ -276,6 +276,11 @@ VAD-off bare pass first** before delivering.
 - whisper still mis-hears very faint speech (e.g. martyr→mother); correct via
   context at the translation layer, keep the EN line as transcribed.
 
+> The V8–V13 pit narrative (big-segment drop, in-segment collapse, prefix
+> collapse, echo leak, zh/en drift, residual holes, plus the unresolved Oval
+> Office overlap-echo item) is in [`docs/POSTMORTEM-JamieFoxx.md`](docs/POSTMORTEM-JamieFoxx.md)
+> — this section only covers V7 and earlier.
+
 ---
 
 ## V8–V13 additions (hardening: no-VAD default, gap-fill, alignment guard, engine-first)
