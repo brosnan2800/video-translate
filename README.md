@@ -240,6 +240,7 @@ glossary = "glossary.txt"   # V3: consistent 译名 for names/terms
 
 [llm]
 persona = "你是一位资深中英字幕译者。遵循「信达雅」+ 口语感……"
+# 纯文本诗歌（无时间轴）翻译规范见 AGENTS.md §纯文本诗歌翻译：信达雅 + 许渊冲三美论（意美/音美/形美），与带轴字幕规范区分。
 
 [hf]
 cache_dir = "~/.cache/huggingface"   # shared model cache
@@ -500,6 +501,7 @@ glossary = "glossary.txt"   # V3：人名/术语统一译名
 
 [llm]
 persona = "你是一位资深中英字幕译者。遵循「信达雅」+ 口语感……"
+# 纯文本诗歌（无时间轴）翻译规范见 AGENTS.md §纯文本诗歌翻译：信达雅 + 许渊冲三美论（意美/音美/形美），与带轴字幕规范区分。
 
 [hf]
 cache_dir = "~/.cache/huggingface"   # 共享模型缓存
