@@ -58,3 +58,16 @@ def extract_chunk(input_path: str, wav_path: str, start: float, dur: float) -> N
         build_extract_cmd(input_path, wav_path, start, dur),
         capture_output=True, check=True,
     )
+
+
+def build_audio_profile_cmd(input_path: str, noise: str = "-30dB", d: float = 0.3) -> list[str]:
+    """Build the ffmpeg command that runs volumedetect + silencedetect in one pass.
+
+    Both filters log to stderr; the caller parses it (see
+    ``video_translate.audio_profile``). No output file is written (`-f null -`).
+    """
+    return [
+        "ffmpeg", "-hide_banner", "-nostats", "-i", input_path,
+        "-af", f"volumedetect,silencedetect=noise={noise}:d={d}",
+        "-f", "null", "-",
+    ]

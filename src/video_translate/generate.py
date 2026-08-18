@@ -17,7 +17,7 @@ import os
 import re
 from typing import Any
 
-from .io_utils import load_json, write_text
+from .io_utils import load_json, write_text, save_json
 from .srt_utils import block, srt_time
 
 OUTPUT_SUFFIXES = (".bilingual.srt", ".zh.srt", ".en.srt", ".txt")
@@ -215,6 +215,10 @@ def generate_subtitles(
         path = os.path.join(out_dir, out_base + suffix)
         write_text(path, content)
         written.append(path)
+    # Sidecar: persist display-window options so `verify` (Spec 18 presentation
+    # lane) can auto-check that the perceived window wasn't over-tightened.
+    save_json(os.path.join(out_dir, out_base + ".generate_opts.json"),
+              {"gap": gap, "min_dur": min_dur, "offset": offset, "tail": tail})
     if prune_old:
         _prune_old_versions(out_dir, base)
     progress(

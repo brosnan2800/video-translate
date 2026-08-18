@@ -93,6 +93,18 @@ commit `ea77a83`, they are the **default** pipeline, not optional tuning.
 - **V13 — orchestration:** agent engine is decided *first*; proxy/Google probe only under
   `--engine google`. CLI flags `--vad` (opt-in) / `--no-audit` / `--no-align-check`;
   `doctor` stays preflight.
+- **ADR-012 / Spec 18 — independent acoustic reference + unified `verify` gate:** whisper's
+  word/segment timestamps are DTW *posterior estimates* (they drift, ≠ acoustic fact). `doctor
+  --video` now computes an audio profile (volumedetect level + silencedetect gaps) and
+  **auto-routes VAD** (`--vad` / bare / `--vad-threshold 0.1`) so the choice is no longer a
+  guess. New `verify` command runs three orthogonal lanes — **acoustic** (each cue vs the
+  independent silencedetect reference: in-silence / cross-silence / first-cue-early),
+  **content** (`validate_zh` coverage + `verify_align` index drift, plus `--semantic` agent
+  reread task), **presentation** (flags `tail`/`min_dur` stripped to 0). `fill_gaps` and
+  `drop_hallucination_segments` now also use the silence reference to avoid resurrecting
+  isolated hallucinations (e.g. the IF片头 "Hubsan" phantom). See
+  [`docs/adr/012-acoustic-timestamp-truth.md`](docs/adr/012-acoustic-timestamp-truth.md) and
+  [`docs/specs/18-verify.md`](docs/specs/18-verify.md).
 
 > **Pit narrative (symptom → root cause → fix → lesson) for V8–V13:** see
 > [`docs/POSTMORTEM-JamieFoxx.md`](POSTMORTEM-JamieFoxx.md). The bullets above are the
@@ -294,6 +306,9 @@ Supported TOML sections: `transcribe`, `translate`, `llm`, `hf`, `merge`
 | `--vad` (`transcribe`/`run`) | off | opt-in Silero VAD; default run is VAD-off (bare), which fixes VAD drop on music-heavy/low-SNR audio (V10) |
 | `--no-audit` (`transcribe`/`run`) | off | skip the fill_gaps hole audit (V11) |
 | `--no-align-check` (`generate`) | off | skip the zh/en index-drift guard (V12) |
+| `--video PATH` (`doctor`) | — | also compute an audio profile + VAD routing recommendation (ADR-012) |
+| `verify` subcommand | — | self-check gate: acoustic / content / presentation lanes (`--video`, `--zh`, `--semantic`, `--strict`); see [Spec 18](docs/specs/18-verify.md) |
+| `--semantic` (`verify`) | off | emit an agent-side semantic reread task (en/zh pairs + context) for the calling agent to flag omit/add/wrong; CLI never calls an LLM (ADR-005) |
 
 ### Outputs (V5: sub-folder with version suffix)
 
@@ -339,7 +354,8 @@ stops. Non-agent (headless) runs use `--engine google` and never return 6.
 | `generate`  | `segments_en.json` + `zh_segments.json` → 4 subtitle files |
 | `backfill`  | fill `agent_pending.json` and merge + regenerate           |
 | `setup`     | check/download the HF model (reuse if cached)             |
-| `doctor`    | environment self-check (+ Google endpoint probe)           |
+| `doctor`    | environment self-check (+ Google endpoint probe; `--video` adds audio profile + VAD routing) |
+| `verify`    | unified self-check gate: acoustic / content / presentation lanes (Spec 18) |
 
 ### Development (TDD + SDD)
 
@@ -435,6 +451,7 @@ make clean
 - **V11 — `fill_gaps.py`**：回收段间空洞（默认 ≥2 s）、段内塌陷（cps 低于文件自身中位数比例）、prefix-collapse 多 pad 探针（`_PROBE_PADS`）、回声去重（`difflib` ratio > 0.7）。审计多轮迭代直到无新洞。详见 [Spec 16](docs/specs/16-fill-gaps.md)。
 - **V12 — `verify_align.py`**：渲染前捕获 zh/en 索引漂移（agent 漏翻一行 → 整批平移，因英文轨不变而静默不可见）。长度剖面 Pearson 相关（主信号）+ 数字共现；已接入 `generate`，`--no-align-check` 可关。详见 [Spec 17](docs/specs/17-verify-align.md)。
 - **V13 — 编排**：先决定 agent 引擎；仅 `--engine google` 时才探代理 / Google 可达性。CLI 旗标 `--vad`（选开）/ `--no-audit` / `--no-align-check`；`doctor` 仍是预检。
+- **ADR-012 / Spec 18 — 独立声学参照 + 统一 `verify` 门**：whisper 的词 / 段时间戳是 DTW 后验估计（会漂移，≠ 声学事实）。`doctor --video` 现在计算音频画像（volumedetect 电平 + silencedetect 静音）并**自动路由 VAD**（`--vad` / 裸跑 / `--vad-threshold 0.1`），不再靠拍脑袋。新增 `verify` 命令跑三道正交 lane——**声学**（每个 cue vs 独立 silencedetect 参照：落在静音 / 跨静音 / 首句提前）、**内容**（`validate_zh` 覆盖 + `verify_align` 索引漂移，外加 `--semantic` agent 回读任务）、**表现**（报警 `tail`/`min_dur` 被削为 0）。`fill_gaps` 与 `drop_hallucination_segments` 也用静音参照避免复活孤立幻觉（如 IF 片头 "Hubsan" 幻影）。详见 [ADR-012](docs/adr/012-acoustic-timestamp-truth.md) 与 [Spec 18](docs/specs/18-verify.md)。
 
 > **项目铁律（跨工具）**：(1) `AGENTS.md` 是唯一权威——先读它，别用各自 memory 替代。(2) 每次提交必须同步 `AGENTS.md` + `README.md` + 相关 `docs/`——只改代码不更文档 = 未完成。(3) 始终 SDD + TDD：spec/ADR 先行，`make test` 必绿，golden 测试守卫字节稳定。
 
@@ -554,6 +571,9 @@ merge_max_chars = 42     # V3：断行单行宽度（此前为保留字段）
 | `--vad`（`transcribe`/`run`） | 关 | Silero VAD 改为「选开」：默认即裸跑（关 VAD），正好是修复音乐重/低信噪比音频漏切的方案（V10）；干净录音可显式加 `--vad` 开启 |
 | `--no-audit`（`transcribe`/`run`） | 关 | 跳过 fill_gaps 空洞审计（V11） |
 | `--no-align-check`（`generate`） | 关 | 跳过 zh/en 索引漂移护栏（V12） |
+| `--video PATH`（`doctor`） | — | 同时计算音频画像 + VAD 路由建议（ADR-012） |
+| `verify` 子命令 | — | 自检门：声学 / 内容 / 表现 三 lane（`--video`、`--zh`、`--semantic`、`--strict`）；见 [Spec 18](docs/specs/18-verify.md) |
+| `--semantic`（`verify`） | 关 | 吐出 agent 侧语义回读任务（en/zh 对 + 上下文），由调用方 Agent 标记漏译/加译/错译；CLI 不调 LLM（ADR-005） |
 
 ### 产物（V5：子文件夹 + 版本后缀）
 
@@ -594,7 +614,8 @@ merge_max_chars = 42     # V3：断行单行宽度（此前为保留字段）
 | `generate`  | `segments_en.json` + `zh_segments.json` → 4 个字幕文件  |
 | `backfill`  | 补全 `agent_pending.json` 并合并重生成                   |
 | `setup`     | 检查/下载 HF 模型（已有则复用）                          |
-| `doctor`    | 环境自检（含 Google 端点探测）                           |
+| `doctor`    | 环境自检（含 Google 端点探测；`--video` 加音频画像 + VAD 路由） |
+| `verify`    | 统一自检门：声学 / 内容 / 表现 三 lane（Spec 18）         |
 
 ### 开发（TDD + SDD）
 

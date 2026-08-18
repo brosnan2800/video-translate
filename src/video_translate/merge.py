@@ -53,6 +53,14 @@ _TOKEN_RE = re.compile(r"[a-z0-9']+")
 # Signal 2 without signal 1 would delete real repeated speech ("I agree. I
 # agree."); signal 1 without signal 2 might delete real but poorly-aligned
 # speech. Together they are surgically specific to the failure mode.
+#
+# ADR-012 adds a THIRD, standalone signal for the isolated-silence case the
+# dual signal misses: a segment whose entire window lies inside a detected
+# silence interval has no acoustic backing (it is phantom text whisper placed
+# in silence — e.g. the IF片头 "Hubsan x4" drone model). It has no neighbour to
+# share an n-gram with, so signals 1+2 never fire. The independent silencedetect
+# reference is the only thing that catches it. Silence == no speech, so dropping
+# is safe; it only triggers when `silence_intervals` is supplied.
 
 
 def _tokens(text: str) -> list[str]:
@@ -87,22 +95,39 @@ def _collapse_ratio(seg: dict[str, Any]) -> float:
     return zero / len(words)
 
 
+def _in_silence_window(start: float, end: float,
+                       silences: list[tuple[float, float]],
+                       eps: float = 1e-3) -> bool:
+    """True when [start, end] lies entirely inside one detected silence interval."""
+    for (s0, s1) in silences:
+        if start >= s0 - eps and end <= s1 + eps:
+            return True
+    return False
+
+
 def drop_hallucination_segments(
     segs: list[dict[str, Any]],
     *,
     min_words: int = 3,
     collapse_ratio: float = 0.5,
     ngram: int = 3,
+    silence_intervals: list[tuple[float, float]] | None = None,
     progress=print,
 ) -> list[dict[str, Any]]:
     """Drop hallucination segments (see module comment above). Pure filter:
     returns a new list; never mutates input. Non-suspect segments pass through
     untouched, preserving order and timestamps.
+
+    ADR-012: when `silence_intervals` is supplied, a segment whose whole window
+    sits inside a detected silence interval is dropped as an isolated-silence
+    hallucination (no acoustic backing), independently of the collapse/repeat
+    dual signal.
     """
     kept: list[dict[str, Any]] = []
     n = len(segs)
     for i, s in enumerate(segs):
         words = s.get("words") or []
+        dropped = False
         if len(words) >= min_words and _collapse_ratio(s) >= collapse_ratio:
             toks = _tokens(s.get("text") or "")
             prev = _tokens(segs[i - 1].get("text") or "") if i > 0 else []
@@ -113,8 +138,17 @@ def drop_hallucination_segments(
                          f"({s.get('start')}-{(s.get('end'))}): "
                          f"{(s.get('text') or '')!r} "
                          f"[collapsed {len(words)}w + repeated n-gram]")
-                continue
-        kept.append(s)
+                dropped = True
+        if not dropped and silence_intervals:
+            st = float(s.get("start", 0.0))
+            en = float(s.get("end", 0.0))
+            if _in_silence_window(st, en, silence_intervals):
+                progress(f"[hallucination] drop seg#{i} "
+                         f"({st}-{en}): {(s.get('text') or '')!r} "
+                         f"[isolated in silence interval — no acoustic backing]")
+                dropped = True
+        if not dropped:
+            kept.append(s)
     return kept
 
 
@@ -426,6 +460,7 @@ def apply_merge(
     snap_drift: bool = True,
     drift_gap: float = DEFAULT_DRIFT_GAP,
     rejoin_short: bool = True,
+    silence_intervals: list[tuple[float, float]] | None = None,
     progress=print,
 ) -> str:
     """Pipeline hook: read `segments_path` (raw), save a copy to `raw_path`,
@@ -449,7 +484,8 @@ def apply_merge(
     save_json(raw_path, raw, indent=0)
     if drop_hallucinations:
         before = len(raw)
-        raw = drop_hallucination_segments(raw, progress=progress)
+        raw = drop_hallucination_segments(
+            raw, silence_intervals=silence_intervals, progress=progress)
         dropped = before - len(raw)
         if dropped:
             progress(f"[hallucination] dropped {dropped} segment(s) "

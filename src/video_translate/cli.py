@@ -27,6 +27,10 @@ from . import __version__
 from .config import DEFAULT_HF_CACHE, resolve_config
 from .io_utils import load_json, save_json
 from .proxy import detect_proxy, setup_http_proxy
+from .audio_profile import analyze_audio
+from .verify import verify_acoustic, verify_presentation
+from .translate import validate_zh
+from .verify_align import report as align_report
 
 EXIT_OK = 0
 EXIT_RUNTIME = 1
@@ -159,6 +163,23 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     else:
         print(f"  proxy         : n/a (agent engine translates locally; no network)")
 
+    # ADR-012: audio profile + automatic VAD routing recommendation.
+    video = getattr(args, "video", None)
+    if video:
+        try:
+            from .audio_profile import analyze_audio, recommend_vad
+            prof = analyze_audio(video)
+            if prof.ok:
+                flag, rationale = recommend_vad(prof)
+                print(f"\n  audio profile : mean={prof.mean_vol} dB, max={prof.max_vol} dB, "
+                      f"{len(prof.silence_intervals)} silence gap(s)")
+                print(f"  VAD routing   : {flag}")
+                print(f"                  ({rationale})")
+            else:
+                print(f"\n  audio profile : unavailable (ffmpeg profile failed; default bare run)")
+        except Exception as e:  # noqa: BLE001
+            print(f"\n  audio profile : unavailable ({e}); default bare run")
+
     if strict and failed:
         return EXIT_DOCTOR_FAIL
     return EXIT_OK
@@ -217,6 +238,14 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
             use_vad=getattr(args, "vad", False),
         )
         segs_path = os.path.join(outdir, f"{base}.segments_en.json")
+        # ADR-012: compute the independent silence reference ONCE and share it
+        # with both the hallucination filter (merge) and the gap audit.
+        silences: list[tuple[float, float]] | None = None
+        try:
+            prof = analyze_audio(input_path)
+            silences = prof.silence_intervals if prof.ok else None
+        except Exception:  # noqa: BLE001
+            silences = None
         if cfg.merge_enabled and not args.no_merge:
             from .merge import apply_merge
             raw_path = os.path.join(outdir, f"{base}.segments_raw.json")
@@ -226,6 +255,7 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                 split_enabled=not getattr(args, "no_split", False),
                 split_max_chars=cfg.merge_max_chars,
                 snap_drift=not getattr(args, "no_drift_snap", False),
+                silence_intervals=silences,
             )
             print(f"[merge] merged + split -> {segs_path} (raw kept at {raw_path})")
         # B: coverage self-audit + automatic gap recovery (skip with --no-audit)
@@ -236,6 +266,7 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
             recovered = fill_gaps(
                 input_path, segs, lang=cfg.lang,
                 use_vad=getattr(args, "vad", False),
+                silence_intervals=silences,
             )
             if recovered is not segs:
                 save_json(segs_path, recovered, indent=0)
@@ -546,6 +577,142 @@ AGENT ACTION REQUIRED:
 """
 
 
+# --------------------------- verify gate (Spec 18) ---------------------------
+
+# suffixes whose stem is the video base (used to locate the generate_opts sidecar)
+_BASE_STRIP_SUFFIXES = (
+    ".segments_en.json", ".segments_raw.json", ".translate_task.json",
+    ".zh_segments.json", ".backfill_task.json", ".agent_pending.json",
+)
+
+
+def _derive_base(segments_path: str) -> str:
+    name = os.path.basename(segments_path)
+    for suf in _BASE_STRIP_SUFFIXES:
+        if name.endswith(suf):
+            return name[: -len(suf)]
+    return os.path.splitext(name)[0]
+
+
+def _find_generate_opts(segments_path: str) -> dict | None:
+    """Locate the display-window sidecar written by `generate` (Spec 18)."""
+    seg_dir = os.path.dirname(segments_path)
+    base = _derive_base(segments_path)
+    candidates = [
+        os.path.join(seg_dir, base, base + ".generate_opts.json"),
+        os.path.join(seg_dir, base + ".generate_opts.json"),
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            try:
+                return load_json(c)
+            except Exception:  # noqa: BLE001
+                return None
+    return None
+
+
+def cmd_verify(args: argparse.Namespace) -> int:
+    """Unified self-check gate: acoustic / content / presentation lanes (Spec 18).
+
+    Returns 0 normally; with --strict, returns a non-zero code if any lane flags
+    an issue (so CI can fail on warnings).
+    """
+    segments_path = args.segments
+    zh_path = getattr(args, "zh", None)
+    video = getattr(args, "video", None)
+    strict = getattr(args, "strict", False)
+    noise = getattr(args, "noise", "-30dB")
+    d = getattr(args, "d", 0.3)
+    opts_path = getattr(args, "opts", None)
+    semantic = getattr(args, "semantic", False)
+    semantic_out = getattr(args, "semantic_out", None)
+
+    segments = load_json(segments_path)
+
+    # ---- Lane 1: acoustic -------------------------------------------------
+    silences: list[tuple[float, float]] = []
+    audio_ok = False
+    if video:
+        prof = analyze_audio(video, noise=noise, d=d)
+        silences = prof.silence_intervals
+        audio_ok = prof.ok
+        if prof.ok:
+            print(f"[verify:acoustic] {len(silences)} silence gap(s) from "
+                  f"silencedetect (independent reference)")
+        else:
+            print("[verify:acoustic] audio profile unavailable — lane skipped")
+    else:
+        print("[verify:acoustic] skipped: pass --video to enable (needs "
+              "silencedetect reference)")
+
+    offset = 0.0
+    if opts_path and os.path.exists(opts_path):
+        opts = load_json(opts_path)
+    else:
+        opts = _find_generate_opts(segments_path) or {}
+    offset = float(opts.get("offset", 0.0) or 0.0)
+    acoustic_issues = verify_acoustic(segments, silences, offset=offset) if silences else []
+
+    # ---- Lane 2: content (reuses validate_zh + verify_align) ---------------
+    content_flags = 0
+    if zh_path:
+        ok_zh, missing = validate_zh(segments_path, zh_path)
+        if not ok_zh:
+            content_flags += 1
+        zh = {int(k): v for k, v in load_json(zh_path).items()}
+        align_ok = align_report(segments, zh)
+        if not align_ok:
+            content_flags += 1
+    else:
+        print("[verify:content] skipped: pass --zh to enable")
+
+    # ---- Lane 3: presentation ---------------------------------------------
+    first_start = None
+    words0 = segments[0].get("words") if segments else None
+    if words0:
+        first_start = words0[0]["start"]
+    elif segments:
+        first_start = segments[0].get("start")
+    presentation_issues = verify_presentation(opts, first_start, silences, offset=offset)
+
+    # ---- report -----------------------------------------------------------
+    any_flag = bool(acoustic_issues) or content_flags > 0 or bool(presentation_issues)
+    print(f"\n=== verify report ===")
+    print(f"  acoustic : {len(acoustic_issues)} issue(s)"
+          + ("" if silences else " (no reference)"))
+    for it in acoustic_issues:
+        print(f"    - [{it['type']}] cue #{it['index']} "
+              f"{it.get('start'):.2f}->{it.get('end'):.2f}s")
+    print(f"  content  : {'ok' if (zh_path and content_flags == 0) else 'skipped/flagged'}"
+          f" ({content_flags} flag(s))")
+    print(f"  presentation: {len(presentation_issues)} issue(s)")
+    for it in presentation_issues:
+        detail = it.get("detail") or f"start={it.get('start'):.2f}s"
+        print(f"    - [{it['type']}] {detail}")
+
+    # ---- Lane 2b: semantic reread task (agent-side; CLI never calls an LLM) --
+    if semantic and zh_path:
+        from .verify import build_semantic_reread_task
+        zh = {int(k): v for k, v in load_json(zh_path).items()}
+        task = build_semantic_reread_task(segments, zh)
+        out = semantic_out or os.path.join(
+            os.path.dirname(segments_path),
+            _derive_base(segments_path) + ".semantic_reread_task.json",
+        )
+        save_json(out, task, indent=2)
+        print(f"\n  semantic  : reread task written -> {out}")
+        print(f"              ({len(task['pairs'])} pairs) — agent rereads "
+              f"each (en,zh) and flags omit/add/wrong")
+    elif semantic and not zh_path:
+        print("\n  semantic  : skipped (needs --zh)")
+
+    if not any_flag:
+        print("  => clean (no lane flagged)")
+    if strict and any_flag:
+        return EXIT_RUNTIME
+    return EXIT_OK
+
+
 # --------------------------- parser ---------------------------
 
 def build_parser() -> argparse.ArgumentParser:
@@ -702,7 +869,31 @@ def build_parser() -> argparse.ArgumentParser:
     d = sub.add_parser("doctor", help="Environment self-check")
     d.add_argument("--strict", action="store_true",
                    help="return exit code 7 if any check (incl. Google endpoint) fails")
+    d.add_argument("--video", default=None,
+                   help="optional video path: also compute an audio profile and a "
+                        "VAD routing recommendation (ADR-012)")
     d.set_defaults(func=cmd_doctor)
+
+    v = sub.add_parser("verify", help="Self-check gate: acoustic/content/presentation lanes (Spec 18)")
+    v.add_argument("--segments", required=True, help="path to segments_en.json")
+    v.add_argument("--zh", default=None, help="path to zh_segments.json (enables content lane)")
+    v.add_argument("--video", default=None,
+                   help="video path; enables the acoustic lane (silencedetect reference)")
+    v.add_argument("--opts", default=None,
+                   help="path to a generate_opts.json (display-window params); "
+                        "auto-located next to the segments if omitted")
+    v.add_argument("--noise", default="-30dB", help="silencedetect noise gate (default -30dB)")
+    v.add_argument("--d", type=float, default=0.3, help="silencedetect min silence dur (s)")
+    v.add_argument("--strict", action="store_true",
+                   help="return non-zero if any lane flags an issue (CI)")
+    v.add_argument("--semantic", action="store_true",
+                   help="emit an agent-side semantic reread task (en/zh pairs + "
+                        "context) for the calling agent to flag omit/add/wrong; "
+                        "CLI itself never calls an LLM (ADR-005)")
+    v.add_argument("--semantic-out", default=None,
+                   help="path for the semantic reread task JSON (default: next "
+                        "to --segments as <base>.semantic_reread_task.json)")
+    v.set_defaults(func=cmd_verify)
 
     b = sub.add_parser("backfill", help="Backfill agent_pending via the agent engine")
     b.add_argument("--pending", required=True, help="path to <base>.agent_pending.json")

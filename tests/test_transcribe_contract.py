@@ -50,14 +50,21 @@ def test_forced_constants():
 
 def test_vad_threshold_override_changes_fingerprint():
     """A different VAD threshold must invalidate the chunk cache — otherwise a
-    re-run with --vad-threshold would silently reuse the old transcription."""
+    re-run with --vad-threshold would silently reuse the old transcription.
+
+    The threshold only affects output when VAD is ON (use_vad=True), which is
+    the real cache-invalidation scenario (ADR-011). When VAD is off the
+    threshold is irrelevant, so the fingerprint stays identical.
+    """
     base_fp = T.transcribe_fingerprint("large-v3", 240.0, None,
-                                       T.build_vad_params())
+                                       T.build_vad_params(), use_vad=True)
     tuned_fp = T.transcribe_fingerprint("large-v3", 240.0, None,
-                                        T.build_vad_params(0.2))
+                                        T.build_vad_params(0.2), use_vad=True)
     assert base_fp != tuned_fp
-    # default arg path stays identical to explicit defaults (back-compat)
-    assert T.transcribe_fingerprint("large-v3", 240.0, None) == base_fp
+    # VAD off: threshold irrelevant -> identical fingerprint regardless of value
+    off_a = T.transcribe_fingerprint("large-v3", 240.0, None, T.build_vad_params())
+    off_b = T.transcribe_fingerprint("large-v3", 240.0, None, T.build_vad_params(0.2))
+    assert off_a == off_b
 
 
 def test_build_vad_params_does_not_mutate_module_default():

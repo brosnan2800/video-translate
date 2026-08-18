@@ -113,6 +113,36 @@ def _cps(seg: dict[str, Any]) -> float:
     return len((seg.get("text") or "").strip()) / max(dur, 0.01)
 
 
+_EPS = 1e-3
+
+
+def _hole_in_silence(gs: float, ge: float,
+                     silences: list[tuple[float, float]]) -> bool:
+    """True when a hole window lies entirely inside a detected silence interval.
+
+    ADR-012: a hole that is *genuine* silence (intro/outro/pause) must NOT be
+    force-decoded — doing so is exactly how isolated hallucinations (e.g. the
+    IF片头 "Hubsan x4" drone model) get "recovered" into the timeline.
+    """
+    for (s0, s1) in silences:
+        if gs >= s0 - _EPS and ge <= s1 + _EPS:
+            return True
+    return False
+
+
+def _profile_silences(input_path: str, noise: str, d: float) -> list[tuple[float, float]]:
+    """Best-effort silence intervals via the independent silencedetect reference.
+
+    Returns [] on any failure so callers fall back to the legacy behaviour.
+    """
+    try:
+        from .audio_profile import analyze_audio
+        prof = analyze_audio(input_path, noise=noise, d=d)
+        return prof.silence_intervals if prof.ok else []
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def find_collapsed(
     segments: list[dict[str, Any]],
     *,
@@ -152,6 +182,9 @@ def fill_gaps(
     temperature: list[float] | None = None,
     collapse_min_dur: float = 4.0,
     collapse_ratio: float = 0.45,
+    silence_intervals: list[tuple[float, float]] | None = None,
+    silencedetect_noise: str = "-30dB",
+    silencedetect_d: float = 0.3,
     progress=print,
 ) -> list[dict[str, Any]]:
     """Audit `segments` for dropped speech in `input_path` and recover it.
@@ -183,6 +216,25 @@ def fill_gaps(
             holes.append((float(segments[i - 1]["end"]), float(segments[i]["start"])))
     if total and float(segments[-1]["end"]) < total - min_gap:
         holes.append((float(segments[-1]["end"]), float(total)))
+
+    # 1a) ADR-012: drop holes that are *genuine* silence (detected silence
+    # interval fully covers the hole). Force-decoding these is what resurrects
+    # isolated hallucinations into the timeline — leave them as silence.
+    if holes:
+        silences = (
+            silence_intervals
+            if silence_intervals is not None
+            else _profile_silences(input_path, silencedetect_noise, silencedetect_d)
+        )
+        if silences:
+            kept: list[tuple[float, float]] = []
+            for (gs, ge) in holes:
+                if _hole_in_silence(gs, ge, silences):
+                    progress(f"[audit] hole {gs:.1f}->{ge:.1f}s: genuine silence "
+                             f"(silencedetect) — skipped, not force-decoded")
+                else:
+                    kept.append((gs, ge))
+            holes = kept
 
     # 1b) collect in-segment collapses (continuous timeline, missing speech)
     collapsed = find_collapsed(

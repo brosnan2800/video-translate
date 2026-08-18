@@ -6,10 +6,20 @@ import cleanly into Jianying (剪映). It is a faithful, testable migration of a
 previously validated ad-hoc pipeline.
 
 ## Design invariant (the one rule everything serves)
-> **Timestamps are acoustic facts, never recomputed.**
-> faster-whisper's `start`/`end` are carried unchanged through the entire
-> pipeline. Translation only rewrites text. This guarantees audio/subtitle
-> alignment "for free" — the property the user validated as near-perfect.
+> **Timestamps are carried unchanged, never recomputed** — but they are *not*
+> acoustic facts.
+> faster-whisper's `start`/`end` (word- and segment-level) are DTW *posterior
+> estimates*: they drift and collapse, they are not ground truth. Therefore:
+> - Segment boundaries are anchored to **VAD / silence** where possible
+>   (content-type routing, ADR-011);
+> - Alignment must be cross-checked against an **independent reference**
+>   (`ffmpeg silencedetect` measured silence), never self-asserted by whisper;
+> - True acoustic repair (forced alignment, 96% vs word-level 82%) depends on
+>   WhisperX and is locked to GPU (MAJOR_VERSION_PLAN T3); the Mac path only
+>   *detects + routes*, it does not *repair*.
+> Subtitle correctness has three orthogonal layers — **acoustic / content /
+> presentation** (Spec 18) — and must not be collapsed into one.
+> See ADR-012.
 
 ## Three-stage pipeline
 ```
@@ -49,4 +59,4 @@ could not translate, for agent backfill).
 - Segment schema: `01-segment-schema.md`
 - Per-stage detail: `02-transcribe.md`, `03-translate.md`, `04-generate-srt.md`
 - CLI: `11-cli-v2.md` · Config: `06-config.md` · Gotchas: `07-gotchas.md`
-- Hardening (V7–V13): `16-fill-gaps.md` (V11 coverage audit) · `17-verify-align.md` (V12 zh/en index-drift guard)
+- Hardening (V7–V13): `16-fill-gaps.md` (V11 coverage audit) · `17-verify-align.md` (V12 zh/en index-drift guard) · `18-verify.md` (unified self-check: acoustic/content/presentation lanes, ADR-012)
