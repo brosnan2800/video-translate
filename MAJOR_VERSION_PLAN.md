@@ -159,7 +159,8 @@
 - GitHub 开 `feat/v5-cuda-windows`；Mac 主分支保持可用、不合并本计划代码直至 Windows 验证通过。
 - 新增 ADR（建议）：
   - **ADR-011**：撤销 ADR-001 的 CUDA 禁令，加 opt-in `device=cuda` 路径（呼应 ADR-001 的 "Revisit when"）。
-  - **ADR-012**：WhisperX / stable-ts 引入决策，正式回应 ADR-008 的回退。
+  - **ADR-012**：修订「时间戳是声学事实」不变量，引入独立声学参照 + 分层校验（见正文，已落地）。
+  - **ADR-013**：WhisperX 强制对齐（GPU 盒）引入决策，正式回应 ADR-008 的回退；Mac 永不引入（见正文，已落地）。
 - 本计划文档（`MAJOR_VERSION_PLAN.md`）随仓库走，作为 Windows 端开发的唯一事实来源。
 
 ---

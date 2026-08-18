@@ -2,7 +2,7 @@
 
 - 状态：接受
 - 日期：2026-08-18
-- 关联：Spec 00（不变量，待修订）、ADR-011（VAD 选开）、Spec 16（fill-gaps）、Spec 17（verify_align）、Spec 18（verify 三 lane）、ADR-008（stable-ts 拒收）、MAJOR_VERSION_PLAN T3（WhisperX/GPU）
+- 关联：Spec 00（不变量，待修订）、ADR-011（VAD 选开）、Spec 16（fill-gaps）、Spec 17（verify_align）、Spec 18（verify 三 lane）、ADR-008（stable-ts 拒收）、ADR-013（Phase 3 WhisperX/GPU 强制对齐，延后）、MAJOR_VERSION_PLAN T3（WhisperX/GPU）
 
 ## 背景
 Spec 00 的设计不变量写道：
