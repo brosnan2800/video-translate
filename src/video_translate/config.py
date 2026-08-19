@@ -3,9 +3,9 @@
 Priority (highest wins): CLI args > environment variables > project-level
 `.video-translate.toml` > built-in defaults.
 
-Only project-level config is supported (no user-level layer). device/compute_type
-are intentionally NOT configurable — they are forced to cpu/int8 (CTranslate2 has
-no AMD/Metal GPU support on this class of machine).
+Only project-level config is supported (no user-level layer). V5 (ADR-014)
+adds ``device``/``compute_type`` (default "auto") — CUDA is resolved when an
+NVIDIA GPU is present, otherwise the historical cpu/int8 behaviour is unchanged.
 
 V2: adds engine/persona/merge_* fields; lang defaults to None (auto-detect);
 proxy defaults to None (auto-detect via proxy.detect_proxy). The literal
@@ -42,6 +42,9 @@ class Config:
     src: str = "en"
     tgt: str = "zh-CN"
     hf_cache_dir: str = DEFAULT_HF_CACHE
+    # V5 (ADR-014) fields
+    device: str = "auto"             # "auto" -> CUDA if available, else cpu
+    compute_type: str = "auto"       # "auto" -> int8_float16 on cuda, else int8
     # V2 fields
     engine: str = "agent"
     persona: str = DEFAULT_PERSONA
@@ -117,6 +120,7 @@ def resolve_config(
         "model": "VT_MODEL", "chunk": "VT_CHUNK", "lang": "VT_LANG",
         "proxy": "VT_PROXY", "src": "VT_SRC", "tgt": "VT_TGT",
         "hf_cache_dir": "HF_HOME",
+        "device": "VT_DEVICE", "compute_type": "VT_COMPUTE_TYPE",
         "engine": "VT_ENGINE", "persona": "VT_PERSONA",
         "merge_max_dur": "VT_MERGE_MAX_DUR", "merge_max_gap": "VT_MERGE_MAX_GAP",
         "merge_max_chars": "VT_MERGE_MAX_CHARS", "glossary": "VT_GLOSSARY",

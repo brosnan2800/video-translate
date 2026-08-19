@@ -30,6 +30,18 @@ def test_doctor_returns_ok(capsys):
     rc = main(["doctor"])
     assert rc == EXIT_OK
     out = capsys.readouterr().out
+    # V5 (ADR-014): doctor reports the RESOLVED device/compute_type (CUDA when
+    # available, else cpu/int8). Assert both field labels are always present.
+    assert "device" in out and "compute_type" in out
+
+
+def test_doctor_cpu_fallback_without_cuda(capsys, monkeypatch):
+    """On a CUDA-free machine, doctor resolves to cpu/int8 (historical)."""
+    import video_translate.transcribe as transcribe
+    monkeypatch.setattr(transcribe, "_cuda_available", lambda: False)
+    rc = main(["doctor"])
+    assert rc == EXIT_OK
+    out = capsys.readouterr().out
     assert "cpu" in out and "int8" in out
 
 

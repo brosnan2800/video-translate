@@ -37,8 +37,11 @@ def test_merge_chunks_preserves_order():
 
 
 def test_forced_constants():
-    assert T.DEVICE == "cpu"
-    assert T.COMPUTE_TYPE == "int8"
+    # V5 (ADR-014): device is no longer a hard-coded constant; it defaults to
+    # "auto" and resolves to cpu/int8 on a CUDA-free machine.
+    assert T.DEFAULT_DEVICE == "auto"
+    assert T.DEFAULT_COMPUTE_TYPE == "auto"
+    assert T.resolve_device("cpu", "int8") == ("cpu", "int8")
     # V4 quality pass: beam search (not greedy) + no cross-segment conditioning
     assert T.BEAM_SIZE == 5 and T.BEST_OF == 5
     assert T.CONDITION_ON_PREVIOUS_TEXT is False
@@ -46,6 +49,19 @@ def test_forced_constants():
     # V6 (B2): recall-biased VAD so quiet / music-underscored lines still decode
     assert T.VAD_THRESHOLD < 0.5
     assert T.VAD_PARAMS["threshold"] == T.VAD_THRESHOLD
+
+
+def test_resolve_device_explicit_override():
+    """Explicit device/compute_type are honoured verbatim (no auto-probing)."""
+    assert T.resolve_device("cuda", "float16") == ("cuda", "float16")
+    assert T.resolve_device("cpu", None) == ("cpu", "int8")
+
+
+def test_resolve_device_auto_cpu_fallback(monkeypatch):
+    """On a CUDA-free machine, auto resolves to the historical cpu/int8."""
+    monkeypatch.setattr(T, "_cuda_available", lambda: False)
+    assert T.resolve_device("auto", "auto") == ("cpu", "int8")
+    assert T.resolve_device(None, None) == ("cpu", "int8")
 
 
 def test_vad_threshold_override_changes_fingerprint():

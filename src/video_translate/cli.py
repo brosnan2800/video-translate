@@ -127,8 +127,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         if not ok:
             failed = True
 
-    print(f"\n  device        : cpu (forced; CTranslate2 has no AMD/Metal support)")
-    print(f"  compute_type  : int8")
+    cfg = resolve_config(cwd=os.getcwd())
+    from .transcribe import resolve_device
+    dev, ct = resolve_device(cfg.device, cfg.compute_type)
+    print(f"\n  device        : {dev} (configured '{cfg.device}'; "
+          f"CUDA {'yes' if _cuda_available() else 'no'})")
+    print(f"  compute_type  : {ct} (configured '{cfg.compute_type}')")
     print(f"  NVIDIA CUDA   : {'yes' if _cuda_available() else 'no (CPU-only path)'}")
 
     try:
@@ -141,7 +145,6 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print(f"  deep-translator: installed")
     except Exception:
         print(f"  deep-translator: NOT installed")
-    cfg = resolve_config(cwd=os.getcwd())
     print(f"  engine        : {cfg.engine}")
     print(f"  lang          : {'auto-detect' if cfg.lang is None else cfg.lang}")
 
@@ -200,7 +203,10 @@ def cmd_setup(args: argparse.Namespace) -> int:
         return EXIT_PROXY
     try:
         from faster_whisper import WhisperModel
-        WhisperModel(model, device="cpu", compute_type="int8")  # triggers download
+        from .transcribe import resolve_device
+        dev, ct = resolve_device(getattr(args, "device", None),
+                                 getattr(args, "compute_type", None))
+        WhisperModel(model, device=dev, compute_type=ct)  # triggers download
         print(f"[setup] {model} ready.")
         return EXIT_OK
     except Exception as e:  # noqa: BLE001
@@ -226,7 +232,9 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
     base = args.base or _default_base(input_path)
     cfg = resolve_config(
         {"model": args.model, "chunk": args.chunk, "lang": args.lang,
-         "merge_max_chars": getattr(args, "merge_max_chars", None)},
+         "merge_max_chars": getattr(args, "merge_max_chars", None),
+         "device": getattr(args, "device", None),
+         "compute_type": getattr(args, "compute_type", None)},
         cwd=os.getcwd(),
     )
     try:
@@ -236,6 +244,7 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
             chunk=cfg.chunk, threads=args.threads, lang=cfg.lang,
             vad_threshold=getattr(args, "vad_threshold", None),
             use_vad=getattr(args, "vad", False),
+            device=cfg.device, compute_type=cfg.compute_type,
         )
         segs_path = os.path.join(outdir, f"{base}.segments_en.json")
         # ADR-012: compute the independent silence reference ONCE and share it
@@ -267,6 +276,7 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                 input_path, segs, lang=cfg.lang,
                 use_vad=getattr(args, "vad", False),
                 silence_intervals=silences,
+                device=cfg.device, compute_type=cfg.compute_type,
             )
             if recovered is not segs:
                 save_json(segs_path, recovered, indent=0)
@@ -383,7 +393,9 @@ def cmd_run(args: argparse.Namespace) -> int:
          "proxy": args.proxy, "src": args.src, "tgt": args.tgt,
          "engine": args.engine, "merge_max_chars": getattr(args, "merge_max_chars", None),
          "glossary": getattr(args, "glossary", None),
-         "source": getattr(args, "source", None)},
+         "source": getattr(args, "source", None),
+         "device": getattr(args, "device", None),
+         "compute_type": getattr(args, "compute_type", None)},
         cwd=os.getcwd(),
     )
 
@@ -398,6 +410,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             vad=getattr(args, "vad", False),
             no_audit=getattr(args, "no_audit", False),
             no_drift_snap=getattr(args, "no_drift_snap", False),
+            device=cfg.device, compute_type=cfg.compute_type,
         ))
         if rc != EXIT_OK:
             return rc
@@ -476,6 +489,8 @@ def cmd_resegment(args: argparse.Namespace) -> int:
             args.video, ws, we, lang=args.lang,
             use_vad=getattr(args, "vad", False),
             model_name=args.model, threads=args.threads,
+            device=getattr(args, "device", None),
+            compute_type=getattr(args, "compute_type", None),
         )
         for seg in window_segs:
             seg = dict(seg)
@@ -730,6 +745,11 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--model", default="large-v3")
     t.add_argument("--chunk", type=float, default=240.0)
     t.add_argument("--threads", type=int, default=None)
+    t.add_argument("--device", default=None, choices=["auto", "cpu", "cuda"],
+                   help="compute device (default auto: CUDA if available, else cpu)")
+    t.add_argument("--compute-type", default=None,
+                   choices=["auto", "float16", "int8", "int8_float16"],
+                   help="quantization (default auto: int8_float16 on cuda, int8 on cpu)")
     t.add_argument("--lang", default=None, help="source language (default: auto-detect)")
     t.add_argument("--proxy", default=None)
     t.add_argument("--no-proxy", action="store_true", help="force direct connection (no proxy)")
@@ -806,6 +826,11 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--chunk", type=float, default=None)
     r.add_argument("--lang", default=None, help="source language (default: auto-detect)")
     r.add_argument("--threads", type=int, default=None)
+    r.add_argument("--device", default=None, choices=["auto", "cpu", "cuda"],
+                   help="compute device (default auto: CUDA if available, else cpu)")
+    r.add_argument("--compute-type", default=None,
+                   choices=["auto", "float16", "int8", "int8_float16"],
+                   help="quantization (default auto: int8_float16 on cuda, int8 on cpu)")
     r.add_argument("--proxy", default=None)
     r.add_argument("--no-proxy", action="store_true")
     r.add_argument("--no-merge", action="store_true")
@@ -856,12 +881,22 @@ def build_parser() -> argparse.ArgumentParser:
                     help="forced language for the windows (e.g. ja, en, zh)")
     rs.add_argument("--model", default="large-v3")
     rs.add_argument("--threads", type=int, default=None)
+    rs.add_argument("--device", default=None, choices=["auto", "cpu", "cuda"],
+                    help="compute device (default auto: CUDA if available, else cpu)")
+    rs.add_argument("--compute-type", default=None,
+                    choices=["auto", "float16", "int8", "int8_float16"],
+                    help="quantization (default auto)")
     rs.add_argument("--vad", action="store_true",
                     help="enable VAD for the re-transcription windows")
     rs.set_defaults(func=cmd_resegment)
 
     s = sub.add_parser("setup", help="Check/download the HF model (reuse if cached)")
     s.add_argument("--model", default="large-v3")
+    s.add_argument("--device", default=None, choices=["auto", "cpu", "cuda"],
+                   help="compute device (default auto: CUDA if available, else cpu)")
+    s.add_argument("--compute-type", default=None,
+                   choices=["auto", "float16", "int8", "int8_float16"],
+                   help="quantization (default auto)")
     s.add_argument("--proxy", default=None)
     s.add_argument("--no-proxy", action="store_true")
     s.set_defaults(func=cmd_setup)

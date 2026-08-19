@@ -46,7 +46,7 @@ from typing import Any
 
 from .ffmpeg_utils import extract_chunk, probe_duration
 from .transcribe import (
-    DEVICE, COMPUTE_TYPE, BEAM_SIZE, BEST_OF,
+    BEAM_SIZE, BEST_OF, resolve_device,
     CONDITION_ON_PREVIOUS_TEXT, REPETITION_PENALTY,
     NO_SPEECH_THRESHOLD, TEMPERATURE_FALLBACK, build_vad_params,
 )
@@ -185,6 +185,8 @@ def fill_gaps(
     silence_intervals: list[tuple[float, float]] | None = None,
     silencedetect_noise: str = "-30dB",
     silencedetect_d: float = 0.3,
+    device: str | None = None,
+    compute_type: str | None = None,
     progress=print,
 ) -> list[dict[str, Any]]:
     """Audit `segments` for dropped speech in `input_path` and recover it.
@@ -252,8 +254,9 @@ def fill_gaps(
     # 2) force-decode each suspect window, drop echoes, splice real speech back
     os.environ.setdefault("HF_HUB_OFFLINE", "1")
     vad_params = build_vad_params(None)
+    dev, ct = resolve_device(device, compute_type)
     from faster_whisper import WhisperModel
-    model = WhisperModel(model_name, device=DEVICE, compute_type=COMPUTE_TYPE,
+    model = WhisperModel(model_name, device=dev, compute_type=ct,
                          cpu_threads=threads)
 
     def _decode_once(gs: float, ge: float, pad: float,

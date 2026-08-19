@@ -6,24 +6,68 @@ execution environments and gets SIGKILLed. We split the audio into chunks, persi
 each chunk's result as chunk_N.json, and merge at the end. If the process is killed,
 re-running skips already-completed chunks (true resume — the original script lacked this).
 
-GOTCHA: CTranslate2 only supports NVIDIA CUDA, so device/compute_type are forced to
-cpu/int8. faster_whisper is imported lazily so that unit/contract tests and the
-translate/generate subcommands don't need the heavy library or the 3GB model.
+GOTCHA: CTranslate2 only supports NVIDIA CUDA (no AMD/Metal GPU path), so the
+default device/compute_type is cpu/int8. Since V5 the device is no longer a
+hard-coded constant: it resolves from ``device=auto`` (CUDA when an NVIDIA GPU
+is present, else cpu) and can be pinned via CLI/config/env (ADR-014). On a
+machine without CUDA this resolves to the exact historical cpu/int8 behaviour,
+so Mac output is byte-for-byte unchanged. faster_whisper is imported lazily so
+that unit/contract tests and the translate/generate subcommands don't need the
+heavy library or the 3GB model.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import os
+import shutil
 from pathlib import Path
 from typing import Any
 
 from .ffmpeg_utils import extract_chunk, probe_duration
 from .io_utils import load_json, load_json_default, save_json
 
-# Forced constants — see module docstring.
-DEVICE = "cpu"
-COMPUTE_TYPE = "int8"
+# Default device/compute_type — kept as module-level defaults for backward
+# compatibility, but no longer forced: transcribe_video/transcribe_window accept
+# ``device``/``compute_type`` (defaulting to "auto") and resolve them at call
+# time. Mac without CUDA resolves to cpu/int8 exactly as before.
+DEFAULT_DEVICE = "auto"
+DEFAULT_COMPUTE_TYPE = "auto"
+
+
+def _cuda_available() -> bool:
+    """True when an NVIDIA GPU usable by CTranslate2 is present.
+
+    Prefers ``nvidia-smi`` (no heavy import) and falls back to ``torch`` only
+    if it is already installed. Never imports torch just to probe.
+    """
+    if shutil.which("nvidia-smi"):
+        return True
+    try:
+        import torch  # noqa: F401  # lazy, may be absent on CPU-only boxes
+        return bool(torch.cuda.is_available())
+    except Exception:
+        return False
+
+
+def resolve_device(device: str | None = None,
+                   compute_type: str | None = None) -> tuple[str, str]:
+    """Resolve ``device``/``compute_type`` ("auto" or None -> concrete values).
+
+    - device "auto"/None -> "cuda" if an NVIDIA GPU is present, else "cpu".
+    - compute_type "auto"/None -> "int8_float16" on cuda (8GB-friendly), "int8"
+      on cpu (preserves the historical cpu/int8 output exactly).
+
+    Returns ``(device, compute_type)``. On a CUDA-free machine the result is
+    always ``("cpu", "int8")`` — identical to the pre-V5 hard-coded constants.
+    """
+    dev = (device or DEFAULT_DEVICE).lower()
+    if dev == "auto":
+        dev = "cuda" if _cuda_available() else "cpu"
+    ct = (compute_type or DEFAULT_COMPUTE_TYPE).lower()
+    if ct == "auto":
+        ct = "int8_float16" if dev == "cuda" else "int8"
+    return dev, ct
 # V4 (quality pass): beam search instead of greedy. greedy (beam=1) is the
 # single biggest driver of repetition hallucinations ("movie is a movie") and
 # filler-word misreads ("I" for "uh"). beam=5 costs ~3-5x CPU time but is the
@@ -81,6 +125,8 @@ def transcribe_fingerprint(
     use_vad: bool = False,
     no_speech_threshold: float = NO_SPEECH_THRESHOLD,
     temperature: list[float] | None = None,
+    device: str | None = None,
+    compute_type: str | None = None,
 ) -> str:
     """Content hash of every parameter that changes transcription output.
 
@@ -92,13 +138,20 @@ def transcribe_fingerprint(
     The fingerprint now includes the VAD on/off flag, the no_speech gate and
     the temperature fallback, so any change to the recovery recipe forces a
     clean re-transcription instead of reusing a stale chunk cache.
+
+    V5 (ADR-014): the RESOLVED device/compute_type are part of the fingerprint,
+    so a cpu/int8 cache is never reused for a cuda/int8_float16 run (or vice
+    versa). On a CUDA-free machine the resolved values are always cpu/int8, so
+    historical fingerprints are unchanged.
     """
+    dev, ct = resolve_device(device, compute_type)
     payload = {
         "model": model_name,
         "beam": BEAM_SIZE,
         "best_of": BEST_OF,
         "lang": lang,
-        "compute": COMPUTE_TYPE,
+        "device": dev,
+        "compute": ct,
         "chunk": chunk,
         "vad_filter": use_vad,
         "vad": vad if (use_vad and vad is not None) else None,
@@ -156,6 +209,8 @@ def transcribe_video(
     use_vad: bool = False,
     no_speech_threshold: float = NO_SPEECH_THRESHOLD,
     temperature: list[float] | None = None,
+    device: str | None = None,
+    compute_type: str | None = None,
     progress=print,
 ) -> str:
     """Transcribe `input_path` into `{outdir}/{base}.segments_en.json`.
@@ -163,6 +218,9 @@ def transcribe_video(
     V2: ``base`` defaults to the input filename stem; ``lang`` defaults to None
     (Whisper auto-detect). Resumable: any chunk whose chunk_N.json already
     exists is reused, not re-run.
+
+    V5 (ADR-014): ``device``/``compute_type`` default to "auto", resolved via
+    :func:`resolve_device` (CUDA when available, else the historical cpu/int8).
 
     Returns:
         Path to the merged segments JSON.
@@ -175,10 +233,12 @@ def transcribe_video(
     total = probe_duration(input_path)
     plan = plan_chunks(total, chunk)
     vad_params = build_vad_params(vad_threshold)
+    dev, ct = resolve_device(device, compute_type)
     fp = transcribe_fingerprint(model_name, chunk, lang, vad_params,
                                 use_vad=use_vad,
                                 no_speech_threshold=no_speech_threshold,
-                                temperature=temperature)
+                                temperature=temperature,
+                                device=dev, compute_type=ct)
 
     model: WhisperModel | None = None
     chunk_lists: list[list[dict[str, Any]]] = []
@@ -192,8 +252,8 @@ def transcribe_video(
             continue
 
         if model is None:  # defer model load until we actually need it (resume-friendly)
-            progress(f"[load] {model_name} device={DEVICE} compute={COMPUTE_TYPE} threads={threads}")
-            model = WhisperModel(model_name, device=DEVICE, compute_type=COMPUTE_TYPE, cpu_threads=threads)
+            progress(f"[load] {model_name} device={dev} compute={ct} threads={threads}")
+            model = WhisperModel(model_name, device=dev, compute_type=ct, cpu_threads=threads)
 
         wav = os.path.join(outdir, f"{base}.{fp}.chunk_{ci}.wav")
         extract_chunk(input_path, wav, cstart, cdur)
@@ -243,6 +303,8 @@ def transcribe_window(
     threads: int | None = None,
     no_speech_threshold: float = NO_SPEECH_THRESHOLD,
     temperature: list[float] | None = None,
+    device: str | None = None,
+    compute_type: str | None = None,
 ) -> list[dict[str, Any]]:
     """Transcribe a single [start, end) window with a forced ``lang``.
 
@@ -256,12 +318,13 @@ def transcribe_window(
 
     threads = threads or os.cpu_count()
     vad_params = build_vad_params(None)
+    dev, ct = resolve_device(device, compute_type)
     dur = max(0.1, end - start)
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
         wav = tf.name
     try:
         extract_chunk(input_path, wav, start, dur)
-        model = WhisperModel(model_name, device=DEVICE, compute_type=COMPUTE_TYPE,
+        model = WhisperModel(model_name, device=dev, compute_type=ct,
                              cpu_threads=threads)
         segs, _info = model.transcribe(
             wav, language=lang, task="transcribe",
