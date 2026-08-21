@@ -29,5 +29,8 @@ stable-ts 的 `split_by_length` / `split_by_gap` 本质是基于 `words` 的切�
 - API 差异 → 无（沿用 V2 同一后端）。
 
 ## 关联
-- 测试：`tests/test_transcribe_contract.py`（`test_transcribe_stores_words`，用 FakeModel 模拟 `.words`）。
+- 测试：`tests/test_transcribe_contract.py`（`test_transcribe_stores_words`，用 FakeModel 模拟 `.words`；`test_transcribe_carries_confidence_fields` 验证置信度字段）。
 - 下游：Spec 13（split 消费 words）、Spec 15（generate 消费 words）。
+
+## 词级时间戳作为幻觉指纹（ADR-020）
+词级时间戳不只是断行/静音修复的数据基础——它还是**幻觉的探测器**。当 faster-whisper 在无声学支撑的词上做 DTW 对齐时，会把该词压到相邻锚点上：要么零时长（`start==end`），要么把回声段的**整个窗口嵌套进前驱段**（回声词借用前驱音频）。后者正是「尾部回音」幻觉的确定性指纹：`merge.py` 的第四信号 `_is_time_nested` 据此把窗口被邻居包含且含零时长词的段判为回音（可区分正常相邻段的边界模糊）。`_seg_to_dict` 同时携带 `avg_logprob`/`no_speech_prob`/`compression_ratio` 供第五信号使用。详见 ADR-020。

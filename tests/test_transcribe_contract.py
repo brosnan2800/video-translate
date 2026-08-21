@@ -164,6 +164,52 @@ def test_transcribe_stores_words(tmp_path, monkeypatch):
     ]
 
 
+def test_transcribe_carries_confidence_fields(tmp_path, monkeypatch):
+    """V5 / ADR-020: transcribe must carry Whisper's per-segment confidence
+    fields (avg_logprob / no_speech_prob / compression_ratio) into the emitted
+    segments so the hallucination filter can use them without re-decoding."""
+    import json as _json
+    import sys
+
+    monkeypatch.setattr(T, "probe_duration", lambda p: 10.0)
+    monkeypatch.setattr(T, "extract_chunk", lambda *a, **k: None)
+
+    class FakeWord:
+        def __init__(self, word, start, end):
+            self.word = word
+            self.start = start
+            self.end = end
+
+    class FakeSeg:
+        def __init__(self):
+            self.text = "Hello world"
+            self.start = 1.0
+            self.end = 2.0
+            self.words = [FakeWord("Hello", 1.05, 1.4), FakeWord("world", 1.5, 1.95)]
+            self.avg_logprob = -0.42
+            self.no_speech_prob = 0.03
+            self.compression_ratio = 1.1
+
+    class FakeModel:
+        def __init__(self, *a, **k):
+            pass
+
+        def transcribe(self, wav, language=None, **kw):
+            return [FakeSeg()], None
+
+    fake = type(sys)("faster_whisper")
+    fake.WhisperModel = FakeModel
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake)
+
+    out = T.transcribe_video("vid.mp4", str(tmp_path), base="x", lang=None,
+                             progress=lambda *_: None)
+    merged = _json.load(open(out, encoding="utf-8"))[0]
+    assert merged["avg_logprob"] == -0.42
+    assert merged["no_speech_prob"] == 0.03
+    assert merged["compression_ratio"] == 1.1
+
+
+
 def test_transcribe_resume_keeps_words(tmp_path, monkeypatch):
     """On full resume, pre-seeded chunk JSON with words must survive merge."""
     import json as _json
@@ -253,3 +299,87 @@ def test_transcribe_lang_en_passed_through(tmp_path, monkeypatch):
     T.transcribe_video("vid.mp4", str(tmp_path), base="x", lang="en",
                        progress=lambda *_: None)
     assert captured["language"] == "en"
+
+
+# --- ADR-015: adaptive per-chunk VAD ---
+
+
+def test_adaptive_vad_changes_fingerprint_only_when_on():
+    """adaptive_vad=True must be a distinct cache family; OFF keeps the
+    historical fingerprint unchanged (no golden regression)."""
+    off = T.transcribe_fingerprint("large-v3", 240.0, None, T.build_vad_params())
+    on = T.transcribe_fingerprint("large-v3", 240.0, None, T.build_vad_params(),
+                                  adaptive_vad=True)
+    assert off != on
+    # explicit False == omitted (historical fingerprint preserved)
+    assert T.transcribe_fingerprint("large-v3", 240.0, None, T.build_vad_params(),
+                                    adaptive_vad=False) == off
+
+
+def test_transcribe_video_adaptive_routes_per_chunk(monkeypatch, tmp_path):
+    """adaptive_vad=True: each chunk's VAD flag is decided by its local profile,
+    not the global use_vad. A silent profile chunk -> VAD on; a noisy chunk -> bare."""
+    import json as _json
+    import sys
+
+    captured = {"vad_flags": []}
+
+    monkeypatch.setattr(T, "probe_duration", lambda p: 10.0)
+
+    def _fake_extract(*a, **k):
+        return None
+
+    monkeypatch.setattr(T, "extract_chunk", _fake_extract)
+
+    # chunk profile: clean (has silence) -> route_vad_chunk True
+    from video_translate.audio_profile import AudioProfile
+    monkeypatch.setattr(T, "analyze_audio", lambda wav: AudioProfile(
+        mean_vol=-16.0, max_vol=0.0, silence_intervals=[(0.0, 2.0)], ok=True))
+
+    class FakeModel:
+        def __init__(self, *a, **k):
+            pass
+
+        def transcribe(self, wav, language=None, **kw):
+            captured["vad_flags"].append(kw.get("vad_filter"))
+            return [], None
+
+    fake = type(sys)("faster_whisper")
+    fake.WhisperModel = FakeModel
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake)
+
+    T.transcribe_video("vid.mp4", str(tmp_path), base="x", lang="en",
+                       use_vad=False, adaptive_vad=True,
+                       progress=lambda *_: None)
+    # single 10s chunk -> one decode, VAD on (clean profile)
+    assert captured["vad_flags"] == [True]
+
+
+def test_transcribe_video_adaptive_bare_on_noise(monkeypatch, tmp_path):
+    """A continuous-noise chunk routes to bare (VAD off) even in adaptive mode."""
+    import sys
+
+    captured = {"vad_flags": []}
+
+    monkeypatch.setattr(T, "probe_duration", lambda p: 10.0)
+    monkeypatch.setattr(T, "extract_chunk", lambda *a, **k: None)
+    from video_translate.audio_profile import AudioProfile
+    monkeypatch.setattr(T, "analyze_audio", lambda wav: AudioProfile(
+        mean_vol=-16.0, max_vol=-3.0, silence_intervals=[], ok=True))
+
+    class FakeModel:
+        def __init__(self, *a, **k):
+            pass
+
+        def transcribe(self, wav, language=None, **kw):
+            captured["vad_flags"].append(kw.get("vad_filter"))
+            return [], None
+
+    fake = type(sys)("faster_whisper")
+    fake.WhisperModel = FakeModel
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake)
+
+    T.transcribe_video("vid.mp4", str(tmp_path), base="x", lang="en",
+                       use_vad=False, adaptive_vad=True,
+                       progress=lambda *_: None)
+    assert captured["vad_flags"] == [False]

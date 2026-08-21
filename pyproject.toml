@@ -13,6 +13,13 @@ authors = [{ name = "yanglei" }]
 dependencies = [
     "faster-whisper==1.2.1",
     "deep-translator==1.9.1",
+    # T2: vocal/accompaniment separation preprocessing (Demucs).
+    # Now a CORE dependency so `pip install -e .` always provisions it into the
+    # active environment (no extra `.[audio]` step required). CUDA vs CPU torch
+    # wheel is selected per-platform via [tool.uv.sources] below.
+    "demucs>=4.0.1",
+    "torch>=2.5.1",
+    "torchaudio>=2.5.1",
 ]
 
 [project.optional-dependencies]
@@ -20,6 +27,27 @@ dev = ["pytest>=8.0"]
 
 [project.scripts]
 video-translate = "video_translate.cli:main"
+
+# Per-platform torch wheel selection (mirrors pyvideotrans's uv approach):
+# Windows/Linux pull the CUDA build, macOS pulls the CPU build. The CUDA index
+# points at the Tsinghua mirror so `uv sync` / `pip install` works in CN without
+# a proxy — no agent/human needs to pick a mirror at install time. CPU wheel stays
+# on the official index (small, and the mirror's cpu path is occasionally incomplete).
+# Requires `uv` for the sources routing (pip ignores [tool.uv.*] but the
+# PIP_EXTRA_INDEX_URL in TOOLCHAIN.md provides the same CN fallback for pip).
+[tool.uv.index]
+pytorch-cu124 = { url = "https://mirrors.tuna.tsinghua.edu.cn/pytorch-wheels/cu124" }
+pytorch-cpu = { url = "https://download.pytorch.org/whl/cpu" }
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu124", marker = "sys_platform == 'win32' or sys_platform == 'linux'" },
+    { index = "pytorch-cpu",   marker = "sys_platform == 'darwin'" },
+]
+torchaudio = [
+    { index = "pytorch-cu124", marker = "sys_platform == 'win32' or sys_platform == 'linux'" },
+    { index = "pytorch-cpu",   marker = "sys_platform == 'darwin'" },
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

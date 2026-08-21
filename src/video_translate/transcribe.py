@@ -26,6 +26,7 @@ from typing import Any
 
 from .ffmpeg_utils import extract_chunk, probe_duration
 from .io_utils import load_json, load_json_default, save_json
+from .audio_profile import analyze_audio, route_vad_chunk
 
 # Default device/compute_type — kept as module-level defaults for backward
 # compatibility, but no longer forced: transcribe_video/transcribe_window accept
@@ -126,7 +127,15 @@ def transcribe_fingerprint(
     no_speech_threshold: float = NO_SPEECH_THRESHOLD,
     temperature: list[float] | None = None,
     device: str | None = None,
+    adaptive_vad: bool = False,
     compute_type: str | None = None,
+    # T2: vocal separation dims (ADR-017 / Spec 19).
+    # Only appended to the hash payload when separate_vocals=True, so the
+    # default-OFF path keeps byte-for-byte parity with historical hashes.
+    separate_vocals: bool = False,
+    vocal_sep_backend: str = "demucs",
+    vocal_sep_model: str = "htdemucs",
+    vocal_sep_input_hash: str | None = None,
 ) -> str:
     """Content hash of every parameter that changes transcription output.
 
@@ -161,6 +170,13 @@ def transcribe_fingerprint(
         "temp": temperature or TEMPERATURE_FALLBACK,
         "word_ts": True,
     }
+    if adaptive_vad:  # ADR-015: only present when on, so OFF keeps the historical hash
+        payload["adaptive"] = True
+    if separate_vocals:  # ADR-017 / T2: only present when on — default hash unchanged
+        payload["vsep"] = True
+        payload["vsep_backend"] = vocal_sep_backend
+        payload["vsep_model"] = vocal_sep_model
+        payload["vsep_fp"] = vocal_sep_input_hash  # None-safe — json.dumps handles it
     blob = json.dumps(payload, sort_keys=True).encode()
     return hashlib.sha1(blob).hexdigest()[:8]
 
@@ -211,6 +227,18 @@ def transcribe_video(
     temperature: list[float] | None = None,
     device: str | None = None,
     compute_type: str | None = None,
+    adaptive_vad: bool = False,
+    # T2 (ADR-017): vocal-separated audio source. None → use original input_path.
+    # When separate_vocals flow runs, the CLI orchestrates vocal_sep FIRST
+    # (releasing GPU memory before Whisper load — 8GB safe), then passes the
+    # resulting vocals.wav here as audio_source.
+    audio_source: str | None = None,
+    # T2 fingerprint extras (must match how CLI built audio_source).
+    # Pass None/False when audio_source is None → fingerprint stays historical.
+    separate_vocals: bool = False,
+    vocal_sep_backend: str = "demucs",
+    vocal_sep_model: str = "htdemucs",
+    vocal_sep_input_hash: str | None = None,
     progress=print,
 ) -> str:
     """Transcribe `input_path` into `{outdir}/{base}.segments_en.json`.
@@ -234,11 +262,38 @@ def transcribe_video(
     plan = plan_chunks(total, chunk)
     vad_params = build_vad_params(vad_threshold)
     dev, ct = resolve_device(device, compute_type)
-    fp = transcribe_fingerprint(model_name, chunk, lang, vad_params,
-                                use_vad=use_vad,
-                                no_speech_threshold=no_speech_threshold,
-                                temperature=temperature,
-                                device=dev, compute_type=ct)
+    # T2: duration/invariant assert — audio_source (if provided) MUST match
+    # the input timeline. If this drifts, every cue timestamp is globally
+    # offset (ADR-017 §2 acoustic-truth guard).
+    if audio_source is not None:
+        try:
+            src_dur = probe_duration(audio_source)
+            if abs(src_dur - total) >= 0.05:
+                raise RuntimeError(
+                    f"[vsep] audio_source duration ({src_dur:.3f}s) != "
+                    f"input video ({total:.3f}s). Refusing to run — timestamps "
+                    f"would be globally offset."
+                )
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            raise RuntimeError(f"[vsep] failed to probe audio_source duration: {exc}")
+    # Resolve chunk extraction source (original input, or vocals.wav):
+    _extract_src: str = audio_source if audio_source else input_path
+    fp = transcribe_fingerprint(
+        model_name, chunk, lang, vad_params,
+        use_vad=use_vad,
+        no_speech_threshold=no_speech_threshold,
+        temperature=temperature,
+        adaptive_vad=adaptive_vad,
+        device=dev, compute_type=ct,
+        # T2 dims — only change the hash when separate_vocals is True
+        # (byte-for-byte parity with historical hashes when False).
+        separate_vocals=separate_vocals,
+        vocal_sep_backend=vocal_sep_backend,
+        vocal_sep_model=vocal_sep_model,
+        vocal_sep_input_hash=vocal_sep_input_hash,
+    )
 
     model: WhisperModel | None = None
     chunk_lists: list[list[dict[str, Any]]] = []
@@ -256,29 +311,27 @@ def transcribe_video(
             model = WhisperModel(model_name, device=dev, compute_type=ct, cpu_threads=threads)
 
         wav = os.path.join(outdir, f"{base}.{fp}.chunk_{ci}.wav")
-        extract_chunk(input_path, wav, cstart, cdur)
+        extract_chunk(_extract_src, wav, cstart, cdur)
+        chunk_vad = use_vad
+        if adaptive_vad:  # ADR-015: route VAD per chunk from its local profile
+            try:
+                cprof = analyze_audio(wav)
+                chunk_vad = route_vad_chunk(cprof, cdur)
+            except Exception:  # noqa: BLE001 - profiling failure -> safe bare default
+                chunk_vad = False
         segs, _info = model.transcribe(
             wav, language=lang, task="transcribe",
             beam_size=BEAM_SIZE, best_of=BEST_OF,
             condition_on_previous_text=CONDITION_ON_PREVIOUS_TEXT,
             repetition_penalty=REPETITION_PENALTY,
-            vad_filter=use_vad,
-            **(dict(vad_parameters=vad_params) if use_vad else {}),
+            vad_filter=chunk_vad,
+            **(dict(vad_parameters=vad_params) if chunk_vad else {}),
             no_speech_threshold=no_speech_threshold,
             temperature=temperature or TEMPERATURE_FALLBACK,
             word_timestamps=True,   # V3: word-level timestamps for split + silence
         )
         chunk_segs = [
-            {
-                "start": round(s.start + cstart, 2),
-                "end": round(s.end + cstart, 2),
-                "text": s.text.strip(),
-                "words": [
-                    {"word": w.word, "start": round(w.start + cstart, 2),
-                     "end": round(w.end + cstart, 2)}
-                    for w in (s.words or [])
-                ],
-            }
+            _seg_to_dict(s, cstart)
             for s in segs
         ]
         save_json(cjson, chunk_segs, indent=0)
@@ -294,6 +347,29 @@ def transcribe_video(
     return out
 
 
+def _seg_to_dict(s, offset: float) -> dict[str, Any]:
+    """Build a serializable segment dict from a faster-whisper Segment.
+
+    Carries acoustic-confidence fields (V5: ADR-020) so the hallucination
+    filter in merge.py can use them as a fifth signal without re-decoding.
+    """
+    seg: dict[str, Any] = {
+        "start": round(s.start + offset, 2),
+        "end": round(s.end + offset, 2),
+        "text": s.text.strip(),
+        "words": [
+            {"word": w.word, "start": round(w.start + offset, 2),
+             "end": round(w.end + offset, 2)}
+            for w in (s.words or [])
+        ],
+    }
+    for fld in ("avg_logprob", "no_speech_prob", "compression_ratio"):
+        v = getattr(s, fld, None)
+        if v is not None:
+            seg[fld] = v
+    return seg
+
+
 def transcribe_window(
     input_path: str, start: float, end: float,
     *,
@@ -305,6 +381,9 @@ def transcribe_window(
     temperature: list[float] | None = None,
     device: str | None = None,
     compute_type: str | None = None,
+    # T2 (ADR-017): optional alternate audio source (vocals.wav after sep).
+    # MUST be duration-matched to input_path (guard in caller / CLI).
+    audio_source: str | None = None,
 ) -> list[dict[str, Any]]:
     """Transcribe a single [start, end) window with a forced ``lang``.
 
@@ -320,10 +399,11 @@ def transcribe_window(
     vad_params = build_vad_params(None)
     dev, ct = resolve_device(device, compute_type)
     dur = max(0.1, end - start)
+    _extract_src: str = audio_source if audio_source else input_path
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
         wav = tf.name
     try:
-        extract_chunk(input_path, wav, start, dur)
+        extract_chunk(_extract_src, wav, start, dur)
         model = WhisperModel(model_name, device=dev, compute_type=ct,
                              cpu_threads=threads)
         segs, _info = model.transcribe(
@@ -337,20 +417,7 @@ def transcribe_window(
             temperature=temperature or TEMPERATURE_FALLBACK,
             word_timestamps=True,
         )
-        out = []
-        for s in segs:
-            words = [
-                {"word": w.word,
-                 "start": round(w.start + start, 2),
-                 "end": round(w.end + start, 2)}
-                for w in (s.words or [])
-            ]
-            out.append({
-                "start": round(s.start + start, 2),
-                "end": round(s.end + start, 2),
-                "text": s.text.strip(),
-                "words": words,
-            })
+        out = [_seg_to_dict(s, start) for s in segs]
         return out
     finally:
         if os.path.exists(wav):

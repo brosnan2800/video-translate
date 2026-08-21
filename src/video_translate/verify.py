@@ -17,6 +17,7 @@ with synthetic silence intervals + cue sequences.
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 # Issue types
@@ -25,6 +26,7 @@ CROSS_SILENCE = "cross-silence"
 FIRST_CUE_EARLY = "first-cue-early"
 TAIL_STRIPPED = "tail-stripped"
 MIN_DUR_STRIPPED = "min-dur-stripped"
+UNCOVERED_AUDIO = "uncovered-audio"
 
 _EPS = 1e-3
 
@@ -111,6 +113,84 @@ def verify_acoustic(segments: list[dict[str, Any]],
     return issues
 
 
+def _merge_intervals(intervals: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Union-merge a list of [start, end) intervals (sorted, deduped)."""
+    if not intervals:
+        return []
+    ordered = sorted(intervals)
+    merged: list[list[float]] = [[float(ordered[0][0]), float(ordered[0][1])]]
+    for (s, e) in ordered[1:]:
+        s, e = float(s), float(e)
+        if s <= merged[-1][1] + _EPS:
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e])
+    return [(s, e) for s, e in merged]
+
+
+def find_uncovered_speech(
+    segments: list[dict[str, Any]],
+    silence_intervals: list[tuple[float, float]],
+    duration: float,
+    min_dur: float = 2.0,
+) -> list[tuple[float, float]]:
+    """Return timeline stretches with audio present but NO cue (ADR-016 / T2b).
+
+    A missing segment leaves no cue, so the existing acoustic lane (which only
+    inspects cues against silence) never flags it. This detection pass works the
+    other way: compute the complement of all cue coverage, then subtract the
+    detected silence — what remains is "audio present but unsubtitled".
+
+    Args:
+        segments: cue list (each with ``start``/``end``).
+        silence_intervals: (start, end) silence intervals from silencedetect.
+        duration: media duration in seconds.
+        min_dur: only flag uncovered-audio stretches at least this long.
+
+    Returns a list of ``(start, end)`` uncovered-audio windows. Pure (no I/O).
+    """
+    if duration is None or duration <= 0:
+        return []
+    coverage = [
+        (float(s["start"]), float(s["end"]))
+        for s in segments
+        if s.get("start") is not None and s.get("end") is not None
+    ]
+    merged = _merge_intervals(coverage)
+    # 1) complement of coverage over [0, duration] -> uncovered stretches
+    uncovered: list[tuple[float, float]] = []
+    cursor = 0.0
+    for (s, e) in merged:
+        if s > cursor + _EPS:
+            uncovered.append((cursor, s))
+        cursor = max(cursor, e)
+    if cursor < duration - _EPS:
+        uncovered.append((cursor, duration))
+    # 2) subtract silence -> keep only "audio present" sub-stretches
+    out: list[tuple[float, float]] = []
+    for (g0, g1) in uncovered:
+        pieces: list[tuple[float, float]] = [(g0, g1)]
+        for (s0, s1) in silence_intervals:
+            s0 = max(float(s0), g0)
+            s1 = min(float(s1), g1)
+            if s1 <= s0:
+                continue
+            carved: list[tuple[float, float]] = []
+            for (p0, p1) in pieces:
+                if s0 >= p1 or s1 <= p0:
+                    carved.append((p0, p1))
+                else:
+                    if p0 < s0:
+                        carved.append((p0, s0))
+                    if s1 < p1:
+                        carved.append((s1, p1))
+            pieces = carved
+        for (p0, p1) in pieces:
+            if (p1 - p0) >= min_dur:
+                out.append((round(p0, 2), round(p1, 2)))
+    return out
+
+
 def verify_presentation(opts: dict[str, float],
                         first_start: float | None,
                         silences: list[tuple[float, float]],
@@ -130,20 +210,37 @@ def verify_presentation(opts: dict[str, float],
     return issues
 
 
+def find_untranslated_latin_words(zh_text: str) -> list[str]:
+    """Return lower-case latin tokens left untranslated inside a zh subtitle.
+
+    A leftover *lower-case* latin word is almost always a missed translation
+    (e.g. ``"rivalry"`` kept as-is). Upper-case tokens (``OK``/``AI``) and
+    title-case tokens (``Ken``/``Barbenheimer`` — proper nouns legitimately kept)
+    are NOT flagged. This is a deterministic content-layer check that catches the
+    "中英混杂" class the semantic reread may glance over. Pure (no I/O); may emit
+    false positives on borrowed words (``app``/``rap``/``pop``) — verify only
+    flags, the agent confirms.
+    """
+    tokens = re.findall(r"[A-Za-z][A-Za-z']*", zh_text or "")
+    return [t for t in tokens if len(t) > 1 and not t.isupper() and not t[0].isupper()]
+
+
 def build_semantic_reread_task(
     segments: list[dict[str, Any]],
     zh: dict[int, str],
     *,
-    window: int = 2,
+    window: int = 3,
 ) -> dict[str, Any]:
     """Build an agent-side semantic reread task (ADR-005: CLI never calls an LLM).
 
     The task lists every segment's English source + its Chinese translation plus
-    a small neighbour context window, so the *calling agent* (which has LLM
-    access) can reread each pair and flag omissions / additions / mistranslations
-    — the third content-layer check (`validate_zh` covers coverage,
-    `verify_align` covers index drift; this covers fidelity). Returns a dict ready
-    to be serialised to ``<base>.semantic_reread_task.json``.
+    a neighbour context window (English AND Chinese neighbours), so the *calling
+    agent* (which has LLM access) can reread each pair in context and flag
+    omissions / additions / mistranslations / cross-sentence inconsistency
+    (referents, tone, terminology) — the third content-layer check
+    (`validate_zh` covers coverage, `verify_align` covers index drift; this covers
+    fidelity). Returns a dict ready to be serialised to
+    ``<base>.semantic_reread_task.json``.
     """
     pairs: list[dict[str, Any]] = []
     n = len(segments)
@@ -153,22 +250,33 @@ def build_semantic_reread_task(
         cn = (zh.get(idx) or "").strip()
         if not en and not cn:
             continue
-        context_before = [ (segments[j].get("text") or "").strip()
-                           for j in range(max(0, i - window), i) ]
-        context_after = [ (segments[j].get("text") or "").strip()
-                          for j in range(i + 1, min(n, i + 1 + window)) ]
+        before = range(max(0, i - window), i)
+        after = range(i + 1, min(n, i + 1 + window))
+        context_before = [(segments[j].get("text") or "").strip() for j in before]
+        context_after = [(segments[j].get("text") or "").strip() for j in after]
+        # 中文邻居译文：判断"这句中文对不对"常需看相邻句的中文是否连贯
+        # （指代一致、术语统一、语气连贯），故把 zh 邻居一并带上。
+        zh_before = [(zh.get(j) or "").strip() for j in before]
+        zh_after = [(zh.get(j) or "").strip() for j in after]
         pairs.append({
             "index": idx,
             "en": en,
             "zh": cn,
             "context_before": context_before,
             "context_after": context_after,
+            "context_before_zh": zh_before,
+            "context_after_zh": zh_after,
         })
     return {
         "task": "semantic-reread",
-        "persona": "You are a rigorous translator. Re-read each (en, zh) pair and "
-                   "flag any omission, addition, or mistranslation. Output only the "
-                   "indices that are wrong and why.",
+        "persona": "You are a rigorous translator. Re-read each (en, zh) pair "
+                   "WITH its context_before/after (English) and "
+                   "context_before_zh/after_zh (Chinese) and flag any omission, "
+                   "addition, mistranslation, or cross-sentence inconsistency "
+                   "(referents, tone, terminology). Output only the indices that "
+                   "are wrong and why.",
         "pairs": pairs,
-        "output_schema": {"<index>: <'ok' | 'omit' | 'add' | 'wrong': reason>": "..."},
+        "output_schema": {
+            "<index>: <'ok' | 'omit' | 'add' | 'wrong' | 'untranslated': reason>": "..."
+        },
     }

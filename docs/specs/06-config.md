@@ -1,14 +1,20 @@
-# Spec 06 — Config, setup & doctor
+# Spec 06 — Config, toolchain, setup & doctor
 
-Module: `config.py` (+ `setup`/`doctor` in `cli.py`).
+Module: `config.py` + `toolchain.py` (+ `setup`/`doctor` in `cli.py`).
 
 ## Resolution priority (highest wins)
 ```
-CLI args  >  environment variables  >  .video-translate.toml  >  built-in defaults
+CLI args  >  runtime os.environ  >  .env.local  >  .env.<platform> (.env.win/.env.mac/.env.linux)  >  .env  >  .video-translate.toml  >  built-in defaults
 ```
 Only **project-level** config is supported (no user-level layer), matching the
 user's decision. `resolve_config()` records the winning source per key in
 `Config._sources` for debuggability.
+
+## Toolchain auto-injection (.env support)
+- `VT_FFMPEG_DIR`: Directory containing `ffmpeg`/`ffprobe` binaries. Automatically prepended to `PATH`.
+- `VT_CUDA_DIR`: Directory containing CUDA runtime DLLs (e.g. `cublas64_12.dll`). Automatically prepended to `PATH` and added to `os.add_dll_directory` on Windows.
+- `VT_DEVICE`: `auto` (resolves to `cuda` if NVIDIA GPU + libraries present, else `cpu`).
+- `VT_COMPUTE_TYPE`: `auto` (resolves to `int8_float16` on cuda, `int8` on cpu).
 
 ## Config fields & defaults
 | Field             | Default                     | Env var             | TOML section.key    |
@@ -20,6 +26,8 @@ user's decision. `resolve_config()` records the winning source per key in
 | `src`             | `en`                        | `VT_SRC`            | `[translate] src`   |
 | `tgt`             | `zh-CN`                     | `VT_TGT`            | `[translate] tgt`   |
 | `hf_cache_dir`    | `~/.cache/huggingface`      | `HF_HOME`           | `[hf] cache_dir`    |
+| `device`          | `auto`                      | `VT_DEVICE`         | — (CLI `--device`)  |
+| `compute_type`    | `auto`                      | `VT_COMPUTE_TYPE`   | — (CLI `--compute-type`) |
 | `engine`          | `agent`                     | `VT_ENGINE`         | — (CLI `--engine`)  |
 | `persona`         | (信达雅+口语感 default)      | `VT_PERSONA`        | `[llm] persona`     |
 | `merge_enabled`   | `True`                      | —                   | `[merge] merge_enabled` |

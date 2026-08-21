@@ -30,6 +30,33 @@
 - **Hallucination filter (V4):** `drop_hallucination_segments()` uses two-signal
   detection (word-collapse ≥50% **and** shared 3-gram with neighbour). Safe to
   leave on; part of the default merge pipeline.
+
+## V5 additions (CUDA/Win, tail-echo hallucination guard — ADR-020)
+
+### V5 — tail-echo hallucination guard (ADR-020)
+The V4 dual-signal (collapse ≥50% + 3-gram) has a blind spot on **tail-echo**
+hallucinations: a phantom segment that re-emits the tail of the previous real
+sentence (e.g. real `give me a yogurt either way.` followed by phantom
+`I'm not hungry either way.`). faster-whisper's DTW collapses the phantom tokens
+onto the neighbour's word boundaries — partly as zero-duration, partly by
+*re-using* the neighbour's timestamps (so "either way" overlaps verbatim). That
+dilution leaves both V4 signals just short (collapse 40% < 50%; shared n-gram 2
+words < 3). Observed 6 such segments in one sitcom episode.
+
+Two new **independent** signals added (merged OR with the existing three):
+- **4th signal (deterministic):** a segment whose words overlap a neighbour's
+  word intervals ≥50% **and** contain ≥1 zero-duration word is an audio-sharing
+  echo — the geometric fingerprint of DTW collapse. No probability threshold, so
+  it cannot false-positive on genuine overlapping talk (no zero-duration words).
+- **5th signal (Whisper confidence):** low segment `avg_logprob` (gated by
+  `no_speech_prob`) carried from `transcribe.py` via `_seg_to_dict` into the
+  emitted segments. `avg_logprob` is the reliable half; `no_speech_prob` alone is
+  unreliable on laughter/applause (energy present) so it only gates.
+
+`transcribe.py` now carries `avg_logprob` / `no_speech_prob` / `compression_ratio`
+from the faster-whisper `Segment` (omitted if absent → backwards compatible;
+cache fingerprint auto-invalidates via payload change). Both signals are covered
+by unit tests replaying the real sitcom samples.
 - **Cache fingerprint (V4):** chunk cache names now include a sha1 of **all
   recipe params** (`{base}.{fp}.chunk_N.json`). Changing any transcribe param
   auto-invalidates old caches — no need to manually `make clean`.

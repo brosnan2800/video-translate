@@ -2,3 +2,11 @@
 # faster-whisper transcription is non-deterministic across versions, so pin exactly.
 faster-whisper==1.2.1
 deep-translator==1.9.1
+
+# T2 vocal/accompaniment separation (Demucs) — now a CORE dependency so the
+# default `pip install -e .` / `pip install -r requirements.txt` provisions it.
+# torch/torchaudio are pinned to match demucs; the CUDA vs CPU wheel is chosen
+# per-platform by pyproject [tool.uv.sources] when installed via `uv`.
+demucs>=4.0.1
+torch>=2.5.1
+torchaudio>=2.5.1

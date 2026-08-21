@@ -17,6 +17,8 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
+from .toolchain import init_toolchain
+
 try:  # Python 3.11+
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover
@@ -57,6 +59,9 @@ class Config:
     # V6 (B3) fields
     source: str | None = None       # free-text provenance/背景 hint for the translator
     full_transcript: bool = True    # ship whole transcript in the agent task file
+    # T2 (ADR-017 / Spec 19): vocal separation preprocessing
+    separate_vocals: bool = False   # --separate-vocals / VT_SEPARATE_VOCALS
+    demucs_model: str = "htdemucs"  # --demucs-model / VT_DEMUCS_MODEL
     _sources: dict[str, str] = field(default_factory=dict, repr=False)
 
 
@@ -84,7 +89,7 @@ def load_toml(path: str) -> dict[str, Any]:
 
 _FLOAT_ENV = {"chunk", "merge_max_dur", "merge_max_gap"}
 _INT_ENV = {"merge_max_chars"}
-_BOOL_ENV = {"merge_enabled", "full_transcript"}
+_BOOL_ENV = {"merge_enabled", "full_transcript", "separate_vocals"}
 
 
 def _coerce_env(attr: str, raw: str) -> Any:
@@ -103,9 +108,11 @@ def resolve_config(
     cwd: str | None = None,
     env: dict[str, str] | None = None,
 ) -> Config:
-    """Resolve a Config from defaults <- toml <- env <- CLI overrides."""
+    """Resolve a Config from defaults <- toml <- env (.env / os.environ) <- CLI overrides."""
     cwd = cwd or os.getcwd()
-    env = env if env is not None else dict(os.environ)
+    if env is None:
+        init_toolchain(cwd)
+        env = dict(os.environ)
     cfg = Config()
 
     # 1. TOML (project-level)
@@ -125,6 +132,8 @@ def resolve_config(
         "merge_max_dur": "VT_MERGE_MAX_DUR", "merge_max_gap": "VT_MERGE_MAX_GAP",
         "merge_max_chars": "VT_MERGE_MAX_CHARS", "glossary": "VT_GLOSSARY",
         "source": "VT_SOURCE", "full_transcript": "VT_FULL_TRANSCRIPT",
+        "separate_vocals": "VT_SEPARATE_VOCALS",
+        "demucs_model": "VT_DEMUCS_MODEL",
     }
     for attr, envkey in env_map.items():
         if envkey in env and env[envkey]:

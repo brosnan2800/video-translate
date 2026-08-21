@@ -61,6 +61,28 @@ _TOKEN_RE = re.compile(r"[a-z0-9']+")
 # share an n-gram with, so signals 1+2 never fire. The independent silencedetect
 # reference is the only thing that catches it. Silence == no speech, so dropping
 # is safe; it only triggers when `silence_intervals` is supplied.
+#
+# ADR-020 (V5) adds a FOURTH and FIFTH signal to catch the "tail-echo" failure
+# mode the dual signal (signals 1+2) misses:
+#   Observed in the wild (sitcom, laughter/applause bed): whisper re-emits the tail
+#   of the PREVIOUS real sentence as a new segment, e.g. real "give me a yogurt
+#   either way." followed by phantom "I'm not hungry either way." The DTW aligner
+#   COLLAPSES the phantom tokens onto the neighbor's word boundaries — partly as
+#   zero-duration (start==end) BUT partly by RE-USING the neighbor's timestamps
+#   (the "either way" tail overlaps verbatim). That dilution means:
+#     - collapse ratio < 50% (some tokens DID get a real, borrowed timestamp)
+#     - shared n-gram < 3 words ("either way" is only 2 tokens)
+#   so signals 1+2 both fall just short. The two new signals:
+#   4. audio-sharing echo (DETERMINISTIC): the phantom segment's words overlap a
+#      neighbor's word intervals heavily (>=50%) AND it contains >=1 zero-duration
+#      word. This is the geometric fingerprint of DTW collapse onto a neighbor.
+#      No probability threshold, so it cannot false-positive on genuine
+#      overlapping talk (those have no zero-duration words).
+#   5. low acoustic confidence: whisper's own per-segment avg_logprob is low
+#      (gated by no_speech_prob). Fields are carried from transcribe.py (ADR-020).
+#      avg_logprob is the reliable half — laughter/applause has energy so
+#      no_speech_prob alone is unreliable; we only drop when avg_logprob is low
+#      AND (no_speech_prob is missing OR high enough).
 
 
 def _tokens(text: str) -> list[str]:
@@ -95,6 +117,52 @@ def _collapse_ratio(seg: dict[str, Any]) -> float:
     return zero / len(words)
 
 
+def _is_time_nested(seg: dict[str, Any], neighbor: dict[str, Any], eps: float = 0.1) -> bool:
+    """V5 / ADR-020 fourth signal (deterministic echo fingerprint).
+
+    A tail-echo hallucination's tokens are DTW-aligned onto the *real* neighbor
+    segment's audio, so the echo's whole time window is physically **contained
+    within** the neighbor's window (it "rides on" the real speech). Genuine
+    adjacent cues never nest — at most their boundaries blur by a few hundred ms,
+    but the later cue still starts *after* the earlier one ends.
+
+    This containment test is far more robust than a per-word overlap ratio, which
+    false-fires on ordinary boundary blur (e.g. cue A ends at 136.74, cue B starts
+    at 136.92, and B's first word interval crosses into B's *next* neighbor whose
+    "like" anchor spans B's start).
+    """
+    ss, se = float(seg.get("start", 0.0)), float(seg.get("end", 0.0))
+    ns, ne = float(neighbor.get("start", 0.0)), float(neighbor.get("end", 0.0))
+    return ss >= ns - eps and se <= ne + eps
+
+
+def _has_zero_dur(seg: dict[str, Any]) -> bool:
+    return any(w.get("start", 0) >= w.get("end", 0) for w in (seg.get("words") or []))
+
+
+def _low_confidence(seg: dict[str, Any],
+                    avg_logprob_thr: float,
+                    no_speech_thr: float) -> bool:
+    """V5 / ADR-020 fifth signal: a Whisper segment emitted with a low acoustic
+    confidence is a likely hallucination.
+
+    Uses faster-whisper's own per-segment confidence fields (carried by
+    transcribe.py). avg_logprob is the more reliable of the two — for
+    tail-echo hallucinations the model re-emits text with little acoustic
+    backing, so its token log-probs sag well below genuine speech. no_speech_prob
+    alone is unreliable on laughter/applause (energy present, low no-speech), so
+    it is gated behind a *low* avg_logprob to avoid false positives.
+    """
+    alp = seg.get("avg_logprob")
+    nsp = seg.get("no_speech_prob")
+    if alp is None:
+        return False
+    if alp < avg_logprob_thr:
+        if nsp is None or nsp >= no_speech_thr:
+            return True
+    return False
+
+
 def _in_silence_window(start: float, end: float,
                        silences: list[tuple[float, float]],
                        eps: float = 1e-3) -> bool:
@@ -112,6 +180,10 @@ def drop_hallucination_segments(
     collapse_ratio: float = 0.5,
     ngram: int = 3,
     silence_intervals: list[tuple[float, float]] | None = None,
+    # V5 / ADR-020 new signals:
+    nested_eps: float = 0.1,
+    avg_logprob_thr: float = -1.0,
+    no_speech_thr: float = 0.6,
     progress=print,
 ) -> list[dict[str, Any]]:
     """Drop hallucination segments (see module comment above). Pure filter:
@@ -122,6 +194,17 @@ def drop_hallucination_segments(
     sits inside a detected silence interval is dropped as an isolated-silence
     hallucination (no acoustic backing), independently of the collapse/repeat
     dual signal.
+
+    V5 / ADR-020: adds two more signals to catch tail-echo hallucinations that
+    the dual-signal misses (the echo's tokens get DTW-aligned onto the neighbor's
+    word boundaries, so neither the collapse ratio nor the shared n-gram clears
+    the original thresholds):
+      * Fourth signal (time-nested echo): the segment's window is *contained
+        within* a neighbor's window AND it contains at least one zero-duration
+        word — the deterministic fingerprint of an audio-sharing echo. Genuine
+        adjacent cues never nest (they only blur at the boundary).
+      * Fifth signal (low confidence): Whisper's own avg_logprob is low, gated by
+        no_speech_prob, using confidence fields carried from transcribe.py.
     """
     kept: list[dict[str, Any]] = []
     n = len(segs)
@@ -139,6 +222,28 @@ def drop_hallucination_segments(
                          f"{(s.get('text') or '')!r} "
                          f"[collapsed {len(words)}w + repeated n-gram]")
                 dropped = True
+        # Fourth signal: time-nested audio-sharing tail-echo (deterministic).
+        if not dropped:
+            prev = segs[i - 1] if i > 0 else None
+            nxt = segs[i + 1] if i + 1 < n else None
+            for nb in (prev, nxt):
+                if nb is None:
+                    continue
+                if _has_zero_dur(s) and _is_time_nested(s, nb, nested_eps):
+                    progress(f"[hallucination] drop seg#{i} "
+                             f"({s.get('start')}-{(s.get('end'))}): "
+                             f"{(s.get('text') or '')!r} "
+                             f"[time-nested echo — window rides on neighbor audio]")
+                    dropped = True
+                    break
+        # Fifth signal: low Whisper acoustic confidence.
+        if not dropped and _low_confidence(s, avg_logprob_thr, no_speech_thr):
+            progress(f"[hallucination] drop seg#{i} "
+                     f"({s.get('start')}-{(s.get('end'))}): "
+                     f"{(s.get('text') or '')!r} "
+                     f"[low acoustic confidence avg_logprob="
+                     f"{s.get('avg_logprob')}]")
+            dropped = True
         if not dropped and silence_intervals:
             st = float(s.get("start", 0.0))
             en = float(s.get("end", 0.0))

@@ -3,6 +3,11 @@ videos/
 outputs/
 .cache/
 
+# Whisper model weights — downloaded from HF Hub at runtime (--model large-v3),
+# or dropped into <repo>/models/<name> as optional local override. Regenerable,
+# never tracked. See cli.py _model_cached / _setup.
+models/
+
 # Python
 __pycache__/
 *.pyc
@@ -14,8 +19,15 @@ venv/
 build/
 dist/
 
-# Local project config (may contain machine-specific proxy/paths)
+# Local project config & environment (may contain machine-specific proxy/paths)
 .video-translate.toml
+.env
+.env.win
+.env.mac
+.env.linux
+.env.local
+.env.*.local
+*.local.env
 
 # OS
 .DS_Store
