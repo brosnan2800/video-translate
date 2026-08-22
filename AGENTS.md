@@ -33,6 +33,8 @@ Read order: this file → [`TOOLCHAIN.md`](TOOLCHAIN.md) for environment setup �
 | **CUDA wheel 装成 CPU 版** | 用 `pip install`（不带 `--index-url`）装 `torch`/`torchaudio`，或以为 `[tool.uv.sources]` 对 pip 生效 | 无代理时 pip 回退 PyPI 默认 `+cpu` wheel，`torch.cuda.is_available()`=False，GPU 加速失效 | **CUDA 版必须走镜像索引**：`uv sync`（认 `[tool.uv.sources]`，自动按平台选 CUDA/CPU wheel）或 `pip install torch --index-url https://mirrors.tuna.tsinghua.edu.cn/pytorch-wheels/cu124/`。绝不裸 `pip install torch`。详见 [TOOLCHAIN.md](TOOLCHAIN.md) §依赖与 wheel 镜像。 |
 | **镜像源靠 Agent 临选** | Agent/人工每次安装时现场拼 `--extra-index-url` 或挑代理 | 换人或换机就装不动、或装错源，不可复现 | **镜像源固化进 `pyproject` 的 `[tool.uv.index]`**（cu124→清华镜像）+ `PIP_EXTRA_INDEX_URL` 进 [TOOLCHAIN.md](TOOLCHAIN.md)；安装一律程序决定，不靠临场决策。 |
 | **尾部回音幻觉** | 在笑声/欢呼/掌声等"有能量无语义"窗口后，看到新段复述上一句尾部（如真句 `give me a yogurt either way.` 后冒出 `I'm not hungry either way.`）时，手工删段或重算时间戳 | 手工删段破坏 index 对齐、重算时间戳破坏声学层；且下次重跑又复现 | 这是 Whisper 自回归固有缺陷（ADR-020）。**不要手工改**，靠 `drop_hallucination_segments` 自动拦截：段内词与前驱**逐字共享时间戳且含零时长词**（第四信号）即判回音；转写层已携带 `avg_logprob` 供第五信号。两信号已在单测覆盖，全片重跑自动生效。 |
+| **补洞恢复段幻觉** | `fill_gaps` 漏音补洞恢复出的 `_recovered` 段（如 `Don't worry.`/`I'm a clown.`/`Hi, son.`/`Now what?`/`This is bad.`）与邻居段**时间窗口重叠**（骑在已确认音频上）或**语速物理不可能**（3 词塞进 0.16s），却因只过了文本相似度检查而溜进字幕 | 转写层 `drop_hallucination_segments` 只作用于 Whisper 原产段、在 fill_gaps **之前**运行，补洞恢复段完全绕过了它；手工改会破坏断点续跑 | `fill_gaps` 已内置 `_is_recovered_hallucination` 守卫（ADR-020 补遗/ADR-021）：恢复段与现有段重叠 >0.12s、或语速 >8wps、或 `avg_logprob`<-1.0 即丢弃；collapse 替换路径关闭重叠信号以免误杀真替换。已单测固化，**全片重跑自动生效，不要手工改**。 |
+| **断句切点** | 看到句尾词被掐到下一条字幕（`my sister` ‖ `deidre`、`we don't` ‖ `know`）时，手工在剪映里挪词或改文本 | 破坏 index 对齐与声学时间戳；下次重跑复现 | 42 字符剪映上限必须切，但 V8 已让切点**智能回退**（ADR-022）：优先标点边界→次选 >0.3s 词间气口→贪心兜底；句首连接词孤儿（`because`）自动并右。无标点+零间隙的密集语流物理无解，等 whisperX 对齐后气口浮现。重跑自动生效。 |
 
 ---
 
@@ -44,7 +46,7 @@ Read order: this file → [`TOOLCHAIN.md`](TOOLCHAIN.md) for environment setup �
 |---|---|---|---|
 | **声学层**（时间轴压在真语音） | VAD 路由 | 依据 `doctor --video` 音频画像**自动路由**，禁止盲猜 | ADR-011 / ADR-012 |
 | **声学层** | 漂移与漏检 | 对照 `silencedetect` 独立参照，探测静音跨越与 `uncovered-audio` (≥2s 无 cue 语音窗) | ADR-012 / ADR-016 |
-| **声学层** | 幻觉拦截 | `drop_hallucination_segments` 五信号：word 塌缩≥50%+邻居3-gram 重复 / 整段落静音窗 / **尾部回音（窗口被邻居时间窗包含且含零时长词，确定性）/ Whisper 低 `avg_logprob`** | ADR-012 / ADR-020 |
+| **声学层** | 幻觉拦截 | 转写层 `drop_hallucination_segments` 五信号：word 塌缩≥50%+邻居3-gram 重复 / 整段落静音窗 / **尾部回音（窗口被邻居时间窗包含且含零时长词，确定性）/ Whisper 低 `avg_logprob`**；**补洞恢复段**另有 `_is_recovered_hallucination` 守卫（重叠>0.12s / 语速>8wps / 低置信度）兜住绕回 fill_gaps 的回音 | ADR-012 / ADR-020 / ADR-021 |
 | **内容层**（zh 忠实于 en） | 覆盖与对齐 | `validate_zh`（覆盖率）→ `verify_align`（Pearson 索引对齐）→ 中英混杂词检测 → **语义回读（默认开启）** | Spec 17 / Spec 18 |
 | **表现层**（出入字时机） | 显示窗口 | 保持 `tail 0.3 / min-dur 1.0` 默认值；防剪映缓存碰撞自动 `_vN` 递增 | Spec 04 / ADR-012 |
 
@@ -60,12 +62,20 @@ Read order: this file → [`TOOLCHAIN.md`](TOOLCHAIN.md) for environment setup �
 ## 3. 标准执行状态机 (Standard Execution Flow)
 
 ### Phase 0: 探测与确认 (Preflight)
+
+> **环境必须一步到位，禁止自由发挥配环境。** 绝不允许 Agent 自行把 FFmpeg / 模型 / 工具链散落缓存到各处。所有环境就绪动作统一走确定入口：
+> ```bash
+> make setup        # 一键装齐：依赖 + 预拉 large-v3 模型（约 3GB）
+> make doctor       # 校验：FFmpeg / CUDA·CPU / 模型缓存 全绿才继续
+> ```
+> 若 `make setup` 因网络/代理失败，参考 [`TOOLCHAIN.md`](TOOLCHAIN.md) 配置代理与镜像，再重跑，**不要**手动到处下载或改路径。
+
 1. **定位视频**：优先查找 `videos/` 目录；若为空或多文件，与用户确认目标视频。
-2. **环境自检**：
+2. **环境自检（先 `make setup` 再 `make doctor`）**：
    ```bash
-   video-translate doctor
+   make doctor
    ```
-   检查 FFmpeg、CUDA / CPU 设备、模型缓存是否就绪（未就绪参考 [`TOOLCHAIN.md`](TOOLCHAIN.md) 配置 `.env`）。
+   检查 FFmpeg、CUDA / CPU 设备、模型缓存是否就绪。模型显示 `[MISS]` 时先跑 `make setup`（或 `video-translate setup`）预拉，**不要**去改 `.env` 假设那是模型配置。
 3. **音频画像、VAD 与人声分离确认**：
    ```bash
    video-translate doctor --video "videos/<video.mp4>"

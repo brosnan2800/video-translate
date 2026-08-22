@@ -89,6 +89,93 @@ def _ratio(a: str, b: str) -> float:
     return difflib.SequenceMatcher(None, a.lower(), b.lower()).ratio()
 
 
+def _overlap_with_any(cand: dict[str, Any],
+                       segments: list[dict[str, Any]]) -> float:
+    """Absolute time (seconds) that `cand`'s window overlaps any segment in
+    `segments`. Zero when isolated (the expected case for genuine recovery
+    spliced into a real hole)."""
+    cs, ce = float(cand["start"]), float(cand["end"])
+    if ce <= cs:
+        return 0.0
+    best = 0.0
+    for seg in segments:
+        ss, se = float(seg["start"]), float(seg["end"])
+        ov = min(ce, se) - max(cs, ss)
+        if ov > best:
+            best = ov
+    return best
+
+
+def _recovered_wps(cand: dict[str, Any]) -> float:
+    """speaking rate of a recovered segment: words / duration (words/sec)."""
+    words = cand.get("words") or []
+    dur = float(cand["end"]) - float(cand["start"])
+    if dur <= 0.01 or not words:
+        return 0.0
+    return len(words) / dur
+
+
+def _is_recovered_hallucination(
+    cand: dict[str, Any],
+    segments: list[dict[str, Any]],
+    *,
+    overlap_eps: float = 0.12,
+    max_wps: float = 8.0,
+    min_words: int = 2,
+    max_words_for_overlap: int = 4,
+    avg_logprob_thr: float = -1.0,
+    no_speech_thr: float = 0.6,
+    check_overlap: bool = True,
+) -> bool:
+    """Hallucination guard for fill_gaps RECOVERED segments (ADR-020 addendum).
+
+    Recovered segments are force-decoded to fill time holes. They ONLY pass the
+    text-similarity ``_is_echo`` check today; timestamp geometry is ignored, so
+    "audio-sharing" phantoms (whisper re-emitting a line that rides on the
+    already-confirmed neighbour audio) slip into the timeline. jimmy.mp4 showed
+    7 such cases (``Don't worry.``, ``I'm fucking fired!``, ``Субтитры...``,
+    ``I'm a clown.``, ``Hi, son.``, ``Now what?``, ``This is bad.``).
+
+    A recovered segment's job is to fill a hole (the gap between existing
+    segments). If its window overlaps an existing segment's window, it is
+    decoding the already-confirmed audio — an audio-sharing echo (signal A).
+    BUT genuine adjacent cues have fuzzy boundaries (a few hundred ms) without
+    nesting — e.g. ``anxious. There's a difference.`` overlaps the prior
+    ``...you get anxi[ous]`` by 0.20s yet is real speech. So signal A only
+    fires for SHORT recovered segments (<= max_words_for_overlap words): a long
+    recovered line is a real sentence regardless of a small boundary overlap.
+
+    Signals (any hit => hallucination), all conservative to avoid dropping real
+    recovered speech:
+      A. words <= max_words_for_overlap AND overlaps any existing segment by >
+         overlap_eps  (0.12s; short phantoms overlap >=0.16s, real long lines
+         exempt)
+      B. words >= min_words AND speaking rate (wps) > max_wps  (physically
+         impossible rate, e.g. 3 words in 0.16s = 18.8 wps)
+      C. Whisper confidence: avg_logprob < thr AND (no_speech_prob missing or
+         >= no_speech_thr) — catches misheard phantoms that have no geometric
+         fingerprint (e.g. music heard as "Thank you."), using fields carried
+         from the faster-whisper Segment.
+
+    `check_overlap` is set False on the collapse-replacement path, where the
+    recovered window is *expected* to overlap the replaced segment — disabling
+    signal A there prevents dropping genuinely recovered replacement speech.
+    """
+    nw = len(cand.get("words") or [])
+    if (check_overlap and nw < max_words_for_overlap
+            and _overlap_with_any(cand, segments) > overlap_eps):
+        return True
+    if (cand.get("words") and nw >= min_words
+            and _recovered_wps(cand) > max_wps):
+        return True
+    alp = cand.get("avg_logprob")
+    if alp is not None and alp < avg_logprob_thr:
+        nsp = cand.get("no_speech_prob")
+        if nsp is None or nsp >= no_speech_thr:
+            return True
+    return False
+
+
 def _is_echo(text: str, segments: list[dict[str, Any]]) -> bool:
     """True if `text` is a leak of an already-present segment (not new speech).
 
@@ -336,8 +423,12 @@ def fill_gaps(
                          cpu_threads=threads)
 
     def _decode_once(gs: float, ge: float, pad: float,
-                     dedupe_pool: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Force-decode [gs-pad, ge+pad]; return non-echo segments (absolute times)."""
+                     dedupe_pool: list[dict[str, Any]],
+                     *,
+                     check_overlap: bool = True) -> list[dict[str, Any]]:
+        """Force-decode [gs-pad, ge+pad]; return non-echo, non-hallucination
+        segments (absolute times).
+        """
         ss = max(0.0, gs - pad)
         ee = min(total, ge + pad) if total else ge + pad
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
@@ -364,24 +455,38 @@ def fill_gaps(
                     continue
                 if _is_echo(text, dedupe_pool):
                     continue  # leaked neighbour line, not new speech
-                out.append({
-                    "start": round(s.start + ss, 2),
-                    "end": round(s.end + ss, 2),
+                cand = {
+                    "start": round(float(s.start) + ss, 2),
+                    "end": round(float(s.end) + ss, 2),
                     "text": text,
                     "words": [
-                        {"word": w.word, "start": round(w.start + ss, 2),
-                         "end": round(w.end + ss, 2)}
+                        {"word": w.word, "start": round(float(w.start) + ss, 2),
+                         "end": round(float(w.end) + ss, 2)}
                         for w in (s.words or [])
                     ],
                     "_recovered": True,
-                })
+                }
+                # ADR-020 addendum: carry Whisper confidence fields so the guard's
+                # signal C works without re-decoding (mirrors transcribe._seg_to_dict).
+                for fld in ("avg_logprob", "no_speech_prob", "compression_ratio"):
+                    v = getattr(s, fld, None)
+                    if v is not None:
+                        cand[fld] = v
+                # ADR-020 addendum: drop audio-sharing / impossible-rate / low-cfg
+                # phantoms that slipped past the text-only _is_echo check.
+                if _is_recovered_hallucination(cand, dedupe_pool,
+                                               check_overlap=check_overlap):
+                    continue
+                out.append(cand)
             return out
         finally:
             if os.path.exists(wav):
                 os.remove(wav)
 
     def _probe(gs: float, ge: float,
-               dedupe_pool: list[dict[str, Any]]) -> list[dict[str, Any]]:
+               dedupe_pool: list[dict[str, Any]],
+               *,
+               check_overlap: bool = True) -> list[dict[str, Any]]:
         """Decode a window robustly, working around whisper's prefix collapse.
 
         Whisper is acutely sensitive to what sits at the *start* of the decode
@@ -402,7 +507,8 @@ def fill_gaps(
         best: list[dict[str, Any]] = []
         best_cov = -1.0
         for pad in pads:
-            cand = _decode_once(gs, ge, pad, dedupe_pool)
+            cand = _decode_once(gs, ge, pad, dedupe_pool,
+                                check_overlap=check_overlap)
             cov = sum(float(c["end"]) - float(c["start"]) for c in cand)
             if cov > best_cov:
                 best, best_cov = cand, cov
@@ -460,7 +566,10 @@ def fill_gaps(
         seg = segments[idx]
         gs, ge = float(seg["start"]), float(seg["end"])
         pool = [s for j, s in enumerate(segments) if j != idx]
-        recovered = _probe(gs, ge, pool)
+        # ADR-020 addendum: collapse replacement windows intentionally overlap
+        # the replaced segment, so disable overlap signal A here (the replacement
+        # speech must not be mis-dropped); B (rate) and C (confidence) still apply.
+        recovered = _probe(gs, ge, pool, check_overlap=False)
         orig_len = len((seg.get("text") or "").strip())
         new_len = sum(len(r["text"]) for r in recovered)
         if recovered and (len(recovered) >= 2 or new_len > orig_len * 1.6):

@@ -27,6 +27,15 @@ DEFAULT_SPLIT_GAP = 1.0    # seconds, intra-segment silence that triggers a spli
 # are also tiny (few words), get rejoined into their left neighbor.
 DEFAULT_MIN_CUE_DUR = 1.0  # seconds
 DEFAULT_SHORT_CUE_WORDS = 3
+# V8 (ADR-022): smart break point — an inter-word pause must exceed this to be
+# considered a speaker's breath worth cutting at (sub-gap; the >1s ones were
+# already split by _split_by_gap before _split_by_length ever runs).
+DEFAULT_SMART_PAUSE = 0.3  # seconds
+# V8 (ADR-022): leading-orphan rejoin — a <=2-word fragment with no sentence
+# punctuation, sitting this close to its right neighbour, is a leading
+# connective ("because", "So,") that belongs to the NEXT line, not a standalone
+# cue. Gaps beyond this mean the fragment is genuinely independent.
+DEFAULT_LEADING_ORPHAN_GAP = 1.5  # seconds
 # V6 (B4): a run of at most this many words, separated from the rest of its own
 # sentence by at least DEFAULT_DRIFT_GAP seconds, is treated as word-timestamp
 # drift rather than a real pause. See snap_drifted_words.
@@ -361,21 +370,85 @@ def _split_by_gap(words: list[dict[str, Any]], max_gap: float = DEFAULT_SPLIT_GA
 
 def _split_by_length(words: list[dict[str, Any]], max_chars: int = DEFAULT_MAX_CHARS):
     """Break a word list into groups whose joined length <= max_chars, cutting
-    only at word boundaries (never inside a word)."""
+    only at word boundaries (never inside a word).
+
+    V8 (ADR-022): smart break point. When the greedy window overflows, the cut
+    is RELOCATED backwards inside the window to a linguistically safer spot
+    instead of dropping wherever the cap happens to land:
+      1. the LATEST punctuation boundary (`,;:.!?` — "…months, | we don't…",
+         never "we don't | know"); requires front >= 2 words
+      2. else the largest inter-word pause > DEFAULT_SMART_PAUSE (speaker's
+         natural breath — the window's own >1s silences were already split off
+         by _split_by_gap, so this catches the 0.3-1.0s sub-pauses)
+      3. else the greedy edge (legacy behaviour)
+    Relocation only ever moves the cut EARLIER, so no group can exceed
+    max_chars (the tail must still absorb the overflowing word).
+    """
     groups: list[list[dict[str, Any]]] = []
     cur: list[dict[str, Any]] = []
     cur_len = 0
     for w in words:
         wl = len((w.get("word") or "").strip())
         if cur and cur_len + wl > max_chars:
-            groups.append(cur)
-            cur = []
-            cur_len = 0
+            cut = _smart_break_index(cur, wl, max_chars)
+            if cut is not None:
+                groups.append(cur[:cut])
+                cur = cur[cut:]
+                cur_len = sum(len((x.get("word") or "").strip()) for x in cur)
+            else:
+                groups.append(cur)
+                cur = []
+                cur_len = 0
         cur.append(w)
         cur_len += wl
     if cur:
         groups.append(cur)
     return groups
+
+
+def _smart_break_index(
+    cur: list[dict[str, Any]],
+    wl_next: int,
+    max_chars: int,
+    *,
+    min_front: int = 2,
+    pause_thr: float = DEFAULT_SMART_PAUSE,
+) -> int | None:
+    """Better break index inside `cur` than the greedy edge len(cur), or None.
+
+    Triggered when cur + the overflowing word would exceed max_chars. Scans
+    candidates i (min_front <= i < len(cur)) where the tail cur[i:] can still
+    absorb the overflowing word (word-char sum <= max_chars). Prefers the
+    LATEST punctuation boundary (longest front group, least visual change),
+    then the LARGEST inter-word pause above `pause_thr`.
+    """
+    n = len(cur)
+    if n < min_front + 1:
+        return None
+    tail_lens = [0] * (n + 1)
+    for i in range(n - 1, -1, -1):
+        tail_lens[i] = tail_lens[i + 1] + len((cur[i].get("word") or "").strip())
+    # 1) latest punctuation boundary (front group ends on ,;:.!?)
+    for i in range(n - 1, min_front - 1, -1):
+        if tail_lens[i] + wl_next > max_chars:
+            continue
+        wprev = (cur[i - 1].get("word") or "").strip()
+        if wprev and wprev[-1] in ",;:.!?":
+            return i
+    # 2) largest inter-word pause (word i-1 | word i gap) above threshold
+    best_i = None
+    best_pause = pause_thr  # must strictly exceed the threshold
+    for i in range(min_front, n):
+        if tail_lens[i] + wl_next > max_chars:
+            continue
+        try:
+            pause = float(cur[i]["start"]) - float(cur[i - 1]["end"])
+        except (KeyError, TypeError, ValueError):
+            pause = 0.0
+        if pause > best_pause:
+            best_pause = pause
+            best_i = i
+    return best_i
 
 
 # --------------------- V6 (B4): word-timestamp drift snap ---------------------
@@ -551,6 +624,62 @@ def merge_short_cues(
     return out
 
 
+def rejoin_leading_orphans(
+    segs: list[dict[str, Any]],
+    *,
+    max_words: int = 2,
+    max_gap: float = DEFAULT_LEADING_ORPHAN_GAP,
+    max_dur: float = DEFAULT_MAX_DUR,
+) -> list[dict[str, Any]]:
+    """V8 (ADR-022): merge LEADING connective orphans into their RIGHT neighbour.
+
+    WHY: _split_by_gap faithfully preserves >1s pauses, but a pause that lands
+    right after a leading connective produces an orphan cue like "because"
+    (jimmy 116.33: 1.35s pause, then "you do take…"). V4's merge_short_cues
+    only rejoins into the LEFT neighbour and misses these — the fragment is a
+    dangling modifier whose sentence lives on the RIGHT.
+
+    Rejoin when ALL hold:
+      1. fragment is <= max_words words
+      2. fragment does NOT end with sentence punctuation [.!?] (a comma tail
+         like "So," is still an unfinished line — it merges)
+      3. right neighbour exists and is close (gap < max_gap — beyond that the
+         fragment is genuinely standalone; jimmy's "But I" sits 1.89s away and
+         stays put)
+      4. joined span stays <= max_dur
+
+    Pure: returns a new list; input is not mutated. Boundaries come only from
+    inputs (first start / last end), words are concatenated — the acoustic
+    invariant is preserved (the pause simply lives inside the joined window).
+    """
+    out: list[dict[str, Any]] = []
+    i = 0
+    while i < len(segs):
+        s = segs[i]
+        nxt = segs[i + 1] if i + 1 < len(segs) else None
+        nwords = len(s.get("words") or [])
+        ends_sent = _SENT_END.search((s.get("text") or "").strip()) is not None
+        if (nxt is not None and 0 < nwords <= max_words and not ends_sent
+                and nxt["start"] - s["end"] < max_gap
+                and nxt["end"] - s["start"] <= max_dur):
+            left_words = s.get("words") or []
+            nxt_words = nxt.get("words") or []
+            merged: dict[str, Any] = {
+                "start": s["start"],
+                "end": nxt["end"],
+                "text": ((s.get("text") or "").strip() + " "
+                         + (nxt.get("text") or "").strip()).strip(),
+            }
+            if left_words or nxt_words:
+                merged["words"] = left_words + nxt_words
+            out.append(merged)
+            i += 2
+        else:
+            out.append(dict(s))
+            i += 1
+    return out
+
+
 def apply_merge(
     segments_path: str,
     *,
@@ -565,6 +694,7 @@ def apply_merge(
     snap_drift: bool = True,
     drift_gap: float = DEFAULT_DRIFT_GAP,
     rejoin_short: bool = True,
+    rejoin_leading: bool = True,
     silence_intervals: list[tuple[float, float]] | None = None,
     progress=print,
 ) -> str:
@@ -607,5 +737,7 @@ def apply_merge(
         )
     if rejoin_short:
         merged = merge_short_cues(merged, max_dur=max_dur)
+    if rejoin_leading:
+        merged = rejoin_leading_orphans(merged, max_dur=max_dur)
     save_json(segments_path, merged, indent=0)
     return segments_path

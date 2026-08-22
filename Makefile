@@ -1,13 +1,14 @@
-.PHONY: help venv install install-dev test test-all lint doctor clean
+.PHONY: help venv install install-dev setup test test-all lint doctor clean
 
-PY := .venv/bin/python
-PIP := .venv/bin/pip
+PY := python
+PIP := python -m pip
 
 help:
 	@echo "Targets:"
 	@echo "  venv         Create .venv (Python 3.13)"
 	@echo "  install      Install runtime deps into .venv"
 	@echo "  install-dev  Install runtime + dev deps into .venv"
+	@echo "  setup        ONE-SHOT: install deps + pre-download Whisper model (recommended first step)"
 	@echo "  test         Run unit + contract tests (skips @slow)"
 	@echo "  test-all     Run ALL tests including @slow e2e"
 	@echo "  doctor       Run environment self-check"
@@ -24,6 +25,10 @@ install: venv
 install-dev: venv
 	$(PIP) install -r requirements-dev.txt
 	$(PIP) install -e .
+
+# One-shot bootstrap: deps + model weights. Deterministic, no scattered caches.
+setup: install
+	$(PY) -m video_translate.cli setup
 
 test:
 	$(PY) -m pytest -q

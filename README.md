@@ -21,28 +21,28 @@
 
 ```mermaid
 flowchart TD
-    Video[输入视频/音频] --> Doctor[0. doctor 环境自检 & 音频画像推荐 VAD]
-    Doctor --> Run[1. video-translate run <video>]
-    
-    subgraph Acoustic [声学阶段 (本地 CLI)]
-        Run --> Transcribe[faster-whisper 转写 (分块可续跑 chunk_N.json)]
-        Transcribe --> Merge[断句合并 / 幻觉过滤 / 漂移吸附]
+    Video[输入视频或音频] --> Doctor[0. doctor 环境自检与音频画像推荐 VAD]
+    Doctor --> Run[1. video-translate run 视频]
+
+    subgraph Acoustic [声学阶段本地 CLI]
+        Run --> Transcribe[faster-whisper 转写分块可续跑]
+        Transcribe --> Merge[断句合并 幻觉过滤 漂移吸附 智能切点回退 V8]
         Merge --> FillGaps[fill_gaps 漏音补洞自检]
         FillGaps --> TaskOut[输出 translate_task.json]
     end
 
-    TaskOut --> Exit6[CLI 退出码 6: EXIT_AWAITING_AGENT 挂起]
+    TaskOut --> Exit6[CLI 退出码 6 挂起等待 Agent]
 
-    subgraph AgentBrain [内容翻译阶段 (Agent / 人)]
-        Exit6 --> AgentRead[Agent 阅读全局剧本 + 上下文 + 角色设定]
+    subgraph AgentBrain [内容翻译阶段 Agent 或人]
+        Exit6 --> AgentRead[Agent 阅读全局剧本与上下文与角色设定]
         AgentRead --> AgentTranslate[Agent 翻译生成 zh_segments.json]
     end
 
-    subgraph Presentation [表现 & 交付阶段 (本地 CLI)]
+    subgraph Presentation [表现与交付阶段本地 CLI]
         AgentTranslate --> Generate[2. video-translate generate]
-        Generate --> AlignCheck[自动校验 zh/en 索引对齐 Pearson 相关性]
-        Generate --> Render[输出带 offset/tail 保护的双语 SRT / TXT]
-        Render --> VersionDir[落地为防剪映缓存失效的子目录 <base>_vN/]
+        Generate --> AlignCheck[自动校验 zh/en 索引对齐]
+        Generate --> Render[输出带 offset/tail 保护的双语 SRT 与 TXT]
+        Render --> VersionDir[落地防剪映缓存失效子目录 base_vN]
         VersionDir --> Verify[3. video-translate verify 门禁校验]
     end
 ```
@@ -51,22 +51,24 @@ flowchart TD
 
 ## ⚡ 极速上手 (Quick Start)
 
-### 1. 安装项目与依赖
+### 0. 先决条件 (Prerequisites)
+- **Python >= 3.10**
+- **FFmpeg / ffprobe**：必须预先装好并可在 PATH 中使用。未安装请先装：
+  - Windows：`winget install Gyan.FFmpeg` 或 `choco install ffmpeg`
+  - macOS：`brew install ffmpeg`
+  - Linux：`sudo apt install ffmpeg`
+- Whisper 模型权重（约 3GB）会在下一步**自动下载**，无需手动获取。
+
+### 1. 一键安装（依赖 + 模型）
 ```bash
-# 激活 Python 虚拟环境 (Python >= 3.10)
-python -m venv .venv
-
-# Windows 激活:
-.venv\Scripts\Activate.ps1
-# macOS/Linux 激活:
-source .venv/bin/activate
-
-# 安装依赖与当前包（可编辑模式）
-pip install -e .
+make setup
 ```
+该命令一次性完成：创建虚拟环境、安装全部依赖、并**自动预拉 `large-v3` 模型权重**到 HF 缓存目录。无需手动配置模型路径。
 
-### 2. 配置本地工具链（FFmpeg / CUDA）
-根据操作系统复制对应的环境模板（详细说明见 [TOOLCHAIN.md](TOOLCHAIN.md)）：
+> 若你的网络需要代理/镜像，请先参考 [TOOLCHAIN.md](TOOLCHAIN.md) 配置代理环境变量，再重跑 `make setup`。
+
+### 2. 配置本地工具链（FFmpeg / CUDA，可选）
+若 FFmpeg / CUDA 不在系统 PATH 中，根据操作系统复制对应的环境模板（详细说明见 [TOOLCHAIN.md](TOOLCHAIN.md)）：
 ```bash
 # Windows
 copy .env.win.example .env.win
@@ -83,9 +85,9 @@ VT_CUDA_DIR=F:\win-pyvideotrans-v3.92\_internal\torch\lib
 
 ### 3. 环境自检 (Doctor)
 ```bash
-video-translate doctor
+make doctor
 ```
-确保 `ffmpeg`、`ffprobe` 和模型缓存处于 `[OK]` 状态。
+确保 `ffmpeg`、`ffprobe` 和模型缓存处于 `[OK]` 状态。若模型显示 `[MISS]`，重跑 `make setup` 即可（不要手动改 `.env` 假设那是模型配置）。
 
 ### 4. 运行完整管线
 
