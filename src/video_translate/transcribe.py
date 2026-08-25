@@ -35,6 +35,29 @@ from .audio_profile import analyze_audio, route_vad_chunk
 DEFAULT_DEVICE = "auto"
 DEFAULT_COMPUTE_TYPE = "auto"
 
+# Project-local model dir: <repo_root>/models/<name>. Lets users drop a model
+# in-repo (e.g. from a mirror) and bypass HF Hub / the C:\ users cache entirely.
+# transcribe.py lives at <repo>/src/video_translate/transcribe.py → repo root
+# is three dirs up.
+_REPO_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
+_LOCAL_MODEL_DIR = os.path.join(_REPO_ROOT, "models")
+
+
+def _resolve_model_path(model_name: str) -> str:
+    """Return a local in-repo model dir if it holds model.bin, else pass through.
+
+    This lets ``model_name="large-v3"`` resolve to ``<repo>/models/large-v3``
+    (which contains model.bin) instead of forcing an HF Hub download / C:\\ cache
+    lookup. Faster-whisper's WhisperModel accepts either a repo-id or a local dir.
+    """
+    if os.path.sep not in model_name and not os.path.isabs(model_name):
+        cand = os.path.join(_LOCAL_MODEL_DIR, model_name)
+        if os.path.isfile(os.path.join(cand, "model.bin")):
+            return cand
+    return model_name
+
 
 def _cuda_available() -> bool:
     """True when an NVIDIA GPU usable by CTranslate2 is present.
@@ -308,7 +331,8 @@ def transcribe_video(
 
         if model is None:  # defer model load until we actually need it (resume-friendly)
             progress(f"[load] {model_name} device={dev} compute={ct} threads={threads}")
-            model = WhisperModel(model_name, device=dev, compute_type=ct, cpu_threads=threads)
+            model = WhisperModel(_resolve_model_path(model_name), device=dev,
+                                 compute_type=ct, cpu_threads=threads)
 
         wav = os.path.join(outdir, f"{base}.{fp}.chunk_{ci}.wav")
         extract_chunk(_extract_src, wav, cstart, cdur)
@@ -404,8 +428,8 @@ def transcribe_window(
         wav = tf.name
     try:
         extract_chunk(_extract_src, wav, start, dur)
-        model = WhisperModel(model_name, device=dev, compute_type=ct,
-                             cpu_threads=threads)
+        model = WhisperModel(_resolve_model_path(model_name), device=dev,
+                             compute_type=ct, cpu_threads=threads)
         segs, _info = model.transcribe(
             wav, language=lang, task="transcribe",
             beam_size=BEAM_SIZE, best_of=BEST_OF,

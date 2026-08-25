@@ -8,6 +8,10 @@ outputs/
 # never tracked. See cli.py _model_cached / _setup.
 models/
 
+# Portable FFmpeg — auto-downloaded by `video-translate setup --ffmpeg` into
+# tools/ffmpeg (regenerable, never tracked). See toolchain.py ensure_ffmpeg.
+tools/
+
 # Python
 __pycache__/
 *.pyc
@@ -37,3 +41,6 @@ docs/golden/
 
 # WorkBuddy private data (memory / skills) — never track
 .workbuddy/
+
+# CodeBuddy project data (session/agent state) — never track
+.codebuddy/

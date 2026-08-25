@@ -113,3 +113,110 @@ def test_init_toolchain_injects_ffmpeg_and_cuda(tmp_path, monkeypatch):
     assert str(ffmpeg_dir.resolve()) in os.environ["PATH"]
     assert str(cuda_dir.resolve()) in os.environ["PATH"]
     assert status.device == "cpu"
+
+
+def test_ensure_ffmpeg_zip_download_and_idempotent(tmp_path, monkeypatch):
+    """ensure_ffmpeg downloads a zip, extracts ffmpeg/ffprobe into bin/, is idempotent."""
+    import io
+    import zipfile
+
+    from video_translate.toolchain import ensure_ffmpeg
+
+    monkeypatch.chdir(tmp_path)
+    # Build a fake gyan-style zip: ffmpeg-XXXX/bin/{ffmpeg.exe, ffprobe.exe}
+    fake_zip = tmp_path / "fake.zip"
+    with zipfile.ZipFile(fake_zip, "w") as zf:
+        zf.writestr("ffmpeg-essentials_build/bin/ffmpeg.exe", "PE")
+        zf.writestr("ffmpeg-essentials_build/bin/ffprobe.exe", "PE")
+    fake_zip_bytes = fake_zip.read_bytes()
+
+    def fake_urlretrieve(url, filename=None):
+        out = filename or str(tmp_path / "dl")
+        Path(out).write_bytes(fake_zip_bytes)
+        return out, None
+
+    monkeypatch.setattr(
+        "video_translate.toolchain.urllib.request.urlretrieve", fake_urlretrieve
+    )
+
+    bin_dir = ensure_ffmpeg(dest=tmp_path / "tools" / "ffmpeg", proxy=None)
+    assert bin_dir is not None
+    assert Path(bin_dir, "ffmpeg.exe").is_file()
+    assert Path(bin_dir, "ffprobe.exe").is_file()
+    # Second call must be idempotent (no re-download, no crash).
+    bin_dir2 = ensure_ffmpeg(dest=tmp_path / "tools" / "ffmpeg", proxy=None)
+    assert bin_dir2 == bin_dir
+    # .env.local should record VT_FFMPEG_DIR
+    env_local = tmp_path / ".env.local"
+    assert env_local.exists()
+    assert "VT_FFMPEG_DIR=" in env_local.read_text(encoding="utf-8")
+
+
+def test_ensure_ffmpeg_unsupported_platform(monkeypatch):
+    from video_translate.toolchain import ensure_ffmpeg
+
+    monkeypatch.setattr("video_translate.toolchain.sys.platform", "freebsd")
+    assert ensure_ffmpeg(dest="tools/ffmpeg") is None
+
+
+def test_resolve_cuda_dir_venv_torch_first(monkeypatch, tmp_path):
+    """E4: with no explicit override, venv torch/lib is auto-detected as source."""
+    import importlib
+
+    from video_translate import toolchain
+
+    torch_lib = tmp_path / "lib"
+    torch_lib.mkdir()
+
+    class _FakeSpec:
+        submodule_search_locations = [str(tmp_path)]
+
+    monkeypatch.setattr(
+        importlib.util, "find_spec",
+        lambda name: _FakeSpec() if name == "torch" else None,
+    )
+    # Ensure no env override is present
+    for k in ("VT_CUDA_DIR", "VT_TORCH_LIB_DIR", "CUDA_PATH"):
+        monkeypatch.delenv(k, raising=False)
+
+    cuda_dir, source = toolchain._resolve_cuda_dir({})
+    assert source == "venv-torch"
+    assert cuda_dir == str(torch_lib)
+
+
+def test_resolve_cuda_dir_explicit_override_wins(monkeypatch, tmp_path):
+    """E4: an explicit VT_CUDA_DIR on disk overrides venv torch detection."""
+    import importlib
+
+    from video_translate import toolchain
+
+    explicit = tmp_path / "explicit_cuda"
+    explicit.mkdir()
+
+    class _FakeSpec:
+        submodule_search_locations = [str(tmp_path / "venv_torch")]
+
+    monkeypatch.setattr(
+        importlib.util, "find_spec",
+        lambda name: _FakeSpec() if name == "torch" else None,
+    )
+    monkeypatch.setenv("VT_CUDA_DIR", str(explicit))
+
+    cuda_dir, source = toolchain._resolve_cuda_dir({})
+    assert source == "env"
+    assert cuda_dir == str(explicit)
+
+
+def test_resolve_cuda_dir_none_without_torch_or_env(monkeypatch):
+    """E4: no torch, no env -> CPU fallback (None, no source)."""
+    import importlib
+
+    from video_translate import toolchain
+
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+    for k in ("VT_CUDA_DIR", "VT_TORCH_LIB_DIR", "CUDA_PATH"):
+        monkeypatch.delenv(k, raising=False)
+
+    cuda_dir, source = toolchain._resolve_cuda_dir({})
+    assert cuda_dir is None
+    assert source is None

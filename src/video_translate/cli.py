@@ -56,15 +56,26 @@ def _hf_cache_dir() -> str:
     return os.environ.get("HF_HOME", DEFAULT_HF_CACHE)
 
 
-def _model_cached(model_name: str = "large-v3") -> bool:
+# Milestone 3 / E3: a complete large-v3 model.bin is ~3.09 GB. A model.bin
+# smaller than this lower bound is a truncated/corrupt download and must be
+# treated as NOT cached so setup self-heals and the run aborts with a clear fix.
+_MODEL_MIN_BYTES = 2 * 1024 ** 3  # 2 GiB
+
+
+def _model_cached(model_name: str = "large-v3", *, min_bytes: int | None = None) -> bool:
     """Is a faster-whisper model present (in-repo OR HF cache), file-complete?
 
-    Checks for model.bin so an incomplete snapshot (dir present but model.bin
-    missing) is NOT falsely reported as cached.
+    Checks for model.bin AND that it meets ``min_bytes`` (E3: a truncated
+    download smaller than the bound is NOT falsely reported as cached).
+    When ``min_bytes`` is None, the module-level ``_MODEL_MIN_BYTES`` is used
+    (read at call time, so tests can monkeypatch it down without 3 GB stubs).
     """
+    if min_bytes is None:
+        min_bytes = _MODEL_MIN_BYTES
     # 1) in-repo local model dir
     cand = os.path.join(_LOCAL_MODEL_DIR, model_name)
-    if os.path.isfile(os.path.join(cand, "model.bin")):
+    mbin = os.path.join(cand, "model.bin")
+    if os.path.isfile(mbin) and os.path.getsize(mbin) >= min_bytes:
         return True
     # 2) HF hub snapshot with model.bin present
     hub = os.path.join(_hf_cache_dir(), "hub")
@@ -77,9 +88,35 @@ def _model_cached(model_name: str = "large-v3") -> bool:
             if not os.path.isdir(snap_root):
                 continue
             for snap in os.listdir(snap_root):
-                if os.path.isfile(os.path.join(snap_root, snap, "model.bin")):
+                mbin = os.path.join(snap_root, snap, "model.bin")
+                if os.path.isfile(mbin) and os.path.getsize(mbin) >= min_bytes:
                     return True
     return False
+
+
+def _find_incomplete_model_bins(model_name: str = "large-v3") -> list[str]:
+    """Return paths of model.bin that EXIST but are below ``_MODEL_MIN_BYTES``.
+
+    Used by setup self-heal (E3): a truncated model.bin is deleted before a
+    fresh download so the run never loads a corrupt snapshot.
+    """
+    found: list[str] = []
+    cand = os.path.join(_LOCAL_MODEL_DIR, model_name, "model.bin")
+    if os.path.isfile(cand) and os.path.getsize(cand) < _MODEL_MIN_BYTES:
+        found.append(cand)
+    hub = os.path.join(_hf_cache_dir(), "hub")
+    if os.path.isdir(hub):
+        needle = model_name.replace("/", "--").lower()
+        for d in os.listdir(hub):
+            if needle in d.lower():
+                snap_root = os.path.join(hub, d, "snapshots")
+                if not os.path.isdir(snap_root):
+                    continue
+                for snap in os.listdir(snap_root):
+                    mbin = os.path.join(snap_root, snap, "model.bin")
+                    if os.path.isfile(mbin) and os.path.getsize(mbin) < _MODEL_MIN_BYTES:
+                        found.append(mbin)
+    return found
 
 
 # Project-local model dir: <repo_root>/models/<name>. Lets users drop a model
@@ -174,10 +211,13 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         ("large-v3 model cached (reuse, no re-download)", _model_cached("large-v3")),
     ]
     failed = False
+    ffmpeg_missing = False
     for name, ok in checks:
         print(f"  [{'OK ' if ok else 'MISS'}] {name}")
         if not ok:
             failed = True
+            if name in ("ffmpeg", "ffprobe"):
+                ffmpeg_missing = True
 
     cfg = resolve_config(cwd=os.getcwd())
     from .transcribe import resolve_device
@@ -186,6 +226,13 @@ def cmd_doctor(args: argparse.Namespace) -> int:
           f"CUDA {'yes' if _cuda_available() else 'no'})")
     print(f"  compute_type  : {ct} (configured '{cfg.compute_type}')")
     print(f"  NVIDIA CUDA   : {'yes' if _cuda_available() else 'no (CPU-only path)'}")
+    try:
+        from .toolchain import get_toolchain_status
+        _tc = get_toolchain_status()
+        if _tc.cuda_dir:
+            print(f"  cuda dir      : {_tc.cuda_dir}  (source: {_tc.cuda_source or 'unknown'})")
+    except Exception:  # noqa: BLE001
+        pass
 
     try:
         import faster_whisper  # noqa: F401
@@ -268,31 +315,82 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         except Exception as e:  # noqa: BLE001
             print(f"\n  audio profile : unavailable ({e}); default bare run")
 
+    # Show the resolved FFmpeg bin dir (helps diagnose "ffmpeg MISS" cases) and,
+    # when it is missing, point the user/Agent at the deterministic fix.
+    ffmpeg_dir = os.environ.get("VT_FFMPEG_DIR")
+    if ffmpeg_dir:
+        print(f"\n  ffmpeg dir    : {ffmpeg_dir}")
+    if ffmpeg_missing:
+        print("\n  [FIX] ffmpeg/ffprobe missing. Run the deterministic auto-download:")
+        print("        video-translate setup --ffmpeg")
+        print("        (downloads a portable build into tools/ffmpeg, no manual install)")
+    if not _model_cached("large-v3"):
+        print("\n  [FIX] large-v3 model missing. Run:")
+        print("        make setup     # or: video-translate setup")
+
     if strict and failed:
         return EXIT_DOCTOR_FAIL
     return EXIT_OK
 
 
 def cmd_setup(args: argparse.Namespace) -> int:
-    """Ensure the HF model is present; download it if missing (reuse if present)."""
-    model = args.model
-    if _model_cached(model):
-        print(f"[setup] {model} already cached in {_hf_cache_dir()} — reusing, no download.")
-        return EXIT_OK
-    print(f"[setup] {model} not found; downloading into {_hf_cache_dir()} (~3GB for large-v3)...")
+    """Ensure the HF model (and optionally portable FFmpeg) is present.
+
+    With ``--ffmpeg`` it downloads a portable FFmpeg into ``tools/ffmpeg`` via
+    ``ensure_ffmpeg`` (idempotent). The model download only runs when
+    ``--no-model`` is not set.
+    """
     proxy = _resolve_proxy(args)
     try:
         setup_http_proxy(proxy)
     except ValueError as e:
         print(f"[error] {e}", file=sys.stderr)
         return EXIT_PROXY
+
+    if getattr(args, "ffmpeg", False):
+        from .toolchain import ensure_ffmpeg
+        print("[setup] --ffmpeg requested: ensuring portable FFmpeg...")
+        bin_dir = ensure_ffmpeg(proxy=proxy)
+        if bin_dir is None:
+            print("[error] ffmpeg auto-download failed (see messages above).",
+                  file=sys.stderr)
+            return EXIT_MISSING_DEP
+        # Make the freshly-downloaded ffmpeg available for the rest of this run.
+        os.environ["PATH"] = str(bin_dir) + os.pathsep + os.environ.get("PATH", "")
+        os.environ["VT_FFMPEG_DIR"] = str(bin_dir)
+
+    if getattr(args, "no_model", False):
+        print("[setup] --no-model set; skipping model download.")
+        return EXIT_OK
+
+    model = args.model
+    if _model_cached(model):
+        print(f"[setup] {model} already present in {_LOCAL_MODEL_DIR} / HF cache "
+              f"— reusing, no download.")
+        return EXIT_OK
+    # E3: self-heal truncated downloads before fetching a fresh copy.
+    incomplete = _find_incomplete_model_bins(model)
+    if incomplete:
+        print(f"[setup] found {len(incomplete)} incomplete/corrupt model.bin — removing "
+              f"before re-download:")
+        for p in incomplete:
+            try:
+                os.remove(p)
+                print(f"        removed {p}")
+            except OSError as e:
+                print(f"[warn] could not remove {p}: {e}", file=sys.stderr)
+    print(f"[setup] {model} not found; downloading into {_LOCAL_MODEL_DIR} "
+          f"(~3GB for large-v3, stays in-repo, no C:\\ users cache)...")
     try:
         from faster_whisper import WhisperModel
         from .transcribe import resolve_device
         dev, ct = resolve_device(getattr(args, "device", None),
                                  getattr(args, "compute_type", None))
-        WhisperModel(model, device=dev, compute_type=ct)  # triggers download
-        print(f"[setup] {model} ready.")
+        # Download into the project-local models/ dir so the weight never lands
+        # in the user's HF cache (C:\Users\...\AppData) — drop-in ready, portable.
+        WhisperModel(model, device=dev, compute_type=ct,
+                     download_root=os.path.join(_LOCAL_MODEL_DIR, model))
+        print(f"[setup] {model} ready at {os.path.join(_LOCAL_MODEL_DIR, model)}.")
         return EXIT_OK
     except Exception as e:  # noqa: BLE001
         print(f"[error] model download failed: {e}", file=sys.stderr)
@@ -466,6 +564,15 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                 save_json(segs_path, recovered, indent=0)
         return EXIT_OK
     except Exception as e:  # noqa: BLE001
+        msg = str(e).lower()
+        # E3: a corrupt/truncated model snapshot can pass the existence check but
+        # fail at load time. Surface a deterministic fix and bail with EXIT_MISSING_DEP
+        # rather than a raw traceback.
+        if "model" in msg and ("load" in msg or "corrupt" in msg or "not a zip" in msg
+                               or "unexpected" in msg or "checksum" in msg):
+            print("[error] model load failed (cache may be corrupt).", file=sys.stderr)
+            print("        fix: video-translate setup   # re-downloads large-v3", file=sys.stderr)
+            return EXIT_MISSING_DEP
         print(f"[error] transcription failed: {e}", file=sys.stderr)
         return EXIT_RUNTIME
 
@@ -1187,6 +1294,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--compute-type", default=None,
                    choices=["auto", "float16", "int8", "int8_float16"],
                    help="quantization (default auto)")
+    s.add_argument("--ffmpeg", action="store_true",
+                   help="also download a portable FFmpeg into tools/ffmpeg (idempotent)")
+    s.add_argument("--no-model", action="store_true",
+                   help="skip model download (e.g. when only fetching FFmpeg)")
     s.add_argument("--proxy", default=None)
     s.add_argument("--no-proxy", action="store_true")
     s.set_defaults(func=cmd_setup)

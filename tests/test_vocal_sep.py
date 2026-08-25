@@ -240,6 +240,35 @@ class TestTranscribeFingerprintIncludesSeparateVocals:
 # ---------------------------------------------------------------------------
 
 
+class TestDemucsCacheIsProjectLocal:
+    """Project tooling rule: model weights must NOT land in C:\\ users cache.
+
+    Demucs downloads via torch.hub, which honors TORCH_HOME. We bind it to
+    <repo>/models/torch so htdemucs never hits C:\\Users\\...\\.cache\\torch.
+    """
+
+    def test_demucs_cache_dir_is_inside_repo(self):
+        from video_translate import vocal_sep
+
+        cache = vocal_sep.demucs_cache_dir()
+        repo_root = os.path.dirname(
+            os.path.dirname(os.path.dirname(vocal_sep.__file__))
+        )
+        assert cache.startswith(repo_root), (
+            f"Demucs cache {cache!r} must live inside the repo, not the "
+            f"system user dir (rule: no C:\\ artifacts)."
+        )
+        assert "models" in cache.replace("\\", "/").split("/")
+
+    def test_bind_sets_torch_home_to_project_local(self, monkeypatch):
+        from video_translate import vocal_sep
+
+        monkeypatch.delenv("TORCH_HOME", raising=False)
+        vocal_sep._bind_demucs_cache()
+        assert os.environ["TORCH_HOME"] == vocal_sep.demucs_cache_dir()
+        assert os.path.isdir(os.environ["TORCH_HOME"])
+
+
 @pytest.mark.slow
 class TestSeparateVocalsIntegration:
     """End-to-end demucs calls; disabled by default (pytest -m slow)."""

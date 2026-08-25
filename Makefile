@@ -6,9 +6,9 @@ PIP := python -m pip
 help:
 	@echo "Targets:"
 	@echo "  venv         Create .venv (Python 3.13)"
-	@echo "  install      Install runtime deps into .venv"
-	@echo "  install-dev  Install runtime + dev deps into .venv"
-	@echo "  setup        ONE-SHOT: install deps + pre-download Whisper model (recommended first step)"
+	@echo "  install      Install runtime deps into .venv (pip fallback)"
+	@echo "  install-dev  Install runtime + dev deps into .venv (pip fallback)"
+	@echo "  setup        ONE-SHOT (recommended): uv sync deps + pre-download Whisper model"
 	@echo "  test         Run unit + contract tests (skips @slow)"
 	@echo "  test-all     Run ALL tests including @slow e2e"
 	@echo "  doctor       Run environment self-check"
@@ -18,6 +18,7 @@ venv:
 	python3 -m venv .venv
 	$(PIP) install --upgrade pip
 
+# pip fallback path (only if `uv` is unavailable). NOT the canonical path.
 install: venv
 	$(PIP) install -r requirements.txt
 	$(PIP) install -e .
@@ -26,8 +27,17 @@ install-dev: venv
 	$(PIP) install -r requirements-dev.txt
 	$(PIP) install -e .
 
-# One-shot bootstrap: deps + model weights. Deterministic, no scattered caches.
-setup: install
+# Canonical one-shot bootstrap: uv sync (reproducible via uv.lock) + model
+# weights. Falls back to pip only if uv is not installed. Deterministic, no
+# scattered caches.
+setup:
+	@if command -v uv >/dev/null 2>&1; then \
+		echo "[setup] uv detected — using uv sync (reproducible, uv.lock pinned)"; \
+		uv sync --extra dev || uv sync; \
+	else \
+		echo "[setup] uv not found — falling back to pip (see TOOLCHAIN.md §3.1)"; \
+		$(MAKE) install; \
+	fi
 	$(PY) -m video_translate.cli setup
 
 test:

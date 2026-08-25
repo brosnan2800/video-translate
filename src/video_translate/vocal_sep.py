@@ -31,6 +31,33 @@ from .ffmpeg_utils import probe_duration
 _DEMUCS_AVAILABLE_CACHE: bool | None = None
 
 
+# Project-local cache for the Demucs vocal-separation model (htdemucs, ~400 MB+).
+# Demucs downloads its weights via torch.hub, which honors TORCH_HOME. We point
+# TORCH_HOME at <repo>/models/torch so the weight NEVER lands in the user's
+# C:\Users\...\ cache (project tooling rule: no artifacts in the system drive's
+# user dir). See TOOLCHAIN.md §4.
+_REPO_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
+_LOCAL_MODEL_DIR = os.path.join(_REPO_ROOT, "models")
+_DEMUCS_CACHE_DIR = os.path.join(_LOCAL_MODEL_DIR, "torch")
+
+
+def demucs_cache_dir() -> str:
+    """Directory where the Demucs model is stored (project-local, not C:\\)."""
+    return _DEMUCS_CACHE_DIR
+
+
+def _bind_demucs_cache() -> None:
+    """Point torch.hub (used by Demucs) at the project-local cache dir.
+
+    Sets TORCH_HOME for the current process only — the htdemucs weights then
+    download into <repo>/models/torch instead of C:\\Users\\...\\.cache\\torch.
+    """
+    os.environ["TORCH_HOME"] = _DEMUCS_CACHE_DIR
+    os.makedirs(_DEMUCS_CACHE_DIR, exist_ok=True)
+
+
 def demucs_available() -> bool:
     """Lazy probe for the demucs package. Result is cached.
 
@@ -248,6 +275,10 @@ def separate_vocals(
 
     if not demucs_available():
         return None  # graceful fallback (Spec 19 invariant #5)
+
+    # Bind Demucs' torch.hub model download to the project-local cache so the
+    # htdemucs weights land in <repo>/models/torch, never C:\Users\...\.cache.
+    _bind_demucs_cache()
 
     dev = device if device and device != "auto" else _auto_device()
     progress(f"[vsep] separating vocals with {backend}/{model_name} ({dev}) …")

@@ -53,17 +53,15 @@ flowchart TD
 
 ### 0. 先决条件 (Prerequisites)
 - **Python >= 3.10**
-- **FFmpeg / ffprobe**：必须预先装好并可在 PATH 中使用。未安装请先装：
-  - Windows：`winget install Gyan.FFmpeg` 或 `choco install ffmpeg`
-  - macOS：`brew install ffmpeg`
-  - Linux：`sudo apt install ffmpeg`
+- **推荐安装 [uv](https://docs.astral.sh/uv/)**：`make setup` 默认走 `uv sync`（由 `uv.lock` 固化依赖版本，跨机器可复现）。未装 uv 时自动回退到 `pip install -e .`。
+- **FFmpeg / ffprobe**：`make setup` 之后若 `doctor` 报 ffmpeg 缺失，运行 `video-translate setup --ffmpeg` 即可**自动下载便携版**到 `tools/`（无需手动安装）。
 - Whisper 模型权重（约 3GB）会在下一步**自动下载**，无需手动获取。
 
 ### 1. 一键安装（依赖 + 模型）
 ```bash
 make setup
 ```
-该命令一次性完成：创建虚拟环境、安装全部依赖、并**自动预拉 `large-v3` 模型权重**到 HF 缓存目录。无需手动配置模型路径。
+该命令一次性完成：通过 `uv sync`（或 pip 回退）安装全部依赖、并**自动预拉 `large-v3` 模型权重**到项目根 `models/large-v3/`（零 C 盘，随项目拷贝）。无需手动配置模型路径。
 
 > 若你的网络需要代理/镜像，请先参考 [TOOLCHAIN.md](TOOLCHAIN.md) 配置代理环境变量，再重跑 `make setup`。
 
@@ -77,10 +75,10 @@ cp .env.mac.example .env.mac
 # Linux
 cp .env.linux.example .env.linux
 ```
-在 `.env.win` 中配置你本地的工具路径（若系统 PATH 中已有则无需填写）：
+在 `.env.win` 中配置你本地的工具路径（**通常留空即可**——CUDA 由 venv 内 torch 自动探测、FFmpeg 可由 `video-translate setup --ffmpeg` 自动下载；仅覆盖时填写）：
 ```dotenv
-VT_FFMPEG_DIR=F:\win-pyvideotrans-v3.92\ffmpeg
-VT_CUDA_DIR=F:\win-pyvideotrans-v3.92\_internal\torch\lib
+VT_FFMPEG_DIR=
+VT_CUDA_DIR=
 ```
 
 ### 3. 环境自检 (Doctor)

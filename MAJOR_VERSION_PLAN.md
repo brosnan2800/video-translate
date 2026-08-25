@@ -214,7 +214,7 @@ flowchart TD
 | R2 | **CUDA wheel 只走镜像索引，绝不裸装**：`uv sync` 认 `[tool.uv.sources]`；pip 必须显式 `--index-url` 清华 cu124 | 裸 `pip install torch` 装成 `+cpu` | `uv sync` / `pip install --index-url …/pytorch-wheels/cu124/` |
 | R3 | **`uv.lock` 是依赖唯一事实来源**：任何 `pyproject` 依赖变更，必须在同一 commit 内重跑 `uv lock` 提交（E1 落地后生效） | 改了 pyproject 不更新 lockfile，换机版本飘移 | pyproject + uv.lock 成对变更 |
 | R4 | **外部二进制（ffmpeg 等）不手动安装、不进 git**：统一由 `setup --ffmpeg` 自动下载到 `tools/`（gitignore），路径写 `.env.local` 登记 | Agent 全盘搜 ffmpeg.exe 写回协议；把 ffmpeg.exe 提交进仓库 | `video-translate setup --ffmpeg` 一步到位 |
-| R5 | **模型权重不进 git，跨项目共享 HF cache**：默认 `~/.cache/huggingface`（`HF_HOME` 可覆盖）；`models/<name>/` 仅作离线 drop-in 可选项；缓存必须过完整性校验（E3） | 每项目塞一份 3GB 权重；残缺 model.bin 静默使用 | `make setup` 拉共享缓存 + 自愈校验 |
+| R5 | **模型权重不进 git，项目本地优先（零 C 盘）**：默认落项目根 `models/<name>/`（含 `model.bin`），随项目拷贝、不读写系统用户目录；仅当项目根 `models/` 缺失时才回退 `HF_HOME`（默认 `~/.cache/huggingface` 仍可用作覆盖）；缓存必须过完整性校验（E3，下限 2GiB 自愈） | 每项目塞一份 3GB 权重进 git；把模型缓存散落 C 盘用户目录；残缺 model.bin 静默使用 | `make setup` 拉模型到 `<repo>/models/` + 完整性自愈校验 |
 | R6 | **新依赖准入检查清单**（合并前逐项确认）：① 跨平台？（Mac/CPU 降级路径）② 影响转写产物→是否需进 chunk 缓存指纹？③ GPU 显存预算（8GB 红线，单一大模型串行）④ 是否有纯标准库/既有依赖的等价实现？⑤ lockfile 同步 | 引入 pyannote 但不检查 Mac 降级，Mac 用户 pip 装不上 | 每项检查写入对应任务 Spec |
 | R7 | **镜像/代理固化在配置，不靠临场决策**：PyPI/PyTorch 镜像进 `[tool.uv.index]` / `PIP_EXTRA_INDEX_URL`；HF 镜像进 `HF_ENDPOINT`；安装时任何 Agent/人工不得现场拼源 | 每次安装现场挑镜像，换机不可复现 | TOOLCHAIN.md §1.2 环境变量段 |
 

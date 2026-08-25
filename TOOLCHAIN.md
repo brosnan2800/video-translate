@@ -2,6 +2,7 @@
 
 > 本文件是本项目关于**外部工具链（FFmpeg/FFprobe）、GPU/CUDA 运行时、Whisper 模型资产及环境配置（.env）**的唯一权威指引。
 > 项目代码已支持**自动探测与环境注入**，通过 `.env` 系列配置文件实现跨平台与宿主环境解耦。
+> **依赖管理 / 外部二进制 / 模型缓存 / CUDA 解析的「操作入口 + E1–E4 落地对照 + 新增工具标准套路」见 [`docs/TOOLING.md`](docs/TOOLING.md)**（里程碑 3 环境确定性工程专册）。
 
 ---
 
@@ -13,7 +14,7 @@
 
 | 层 | 机制 | 谁判断 |
 |---|---|---|
-| **① 依赖 wheel 层** | `pyproject` 的 `[tool.uv.sources]` 平台 marker：Windows/Linux → CUDA(cu124) wheel（清华镜像）；macOS → CPU wheel（官方源）。`uv.lock` 为**全平台统一 lockfile**（内含各平台版本+hash），`uv sync` 按当前机器自动取 | uv / pip（按 marker） |
+| **① 依赖 wheel 层** | `pyproject` 的 `[[tool.uv.sources]]` 平台 marker：Windows/Linux → CUDA(cu124) wheel（官方 PyTorch 索引）；macOS → CPU wheel（官方源）。`uv.lock` 为**全平台统一 lockfile**（内含各平台版本+hash），`uv sync` 按当前机器自动取 | uv / pip（按 marker） |
 | **② 环境变量层** | `.env`（全平台基础）→ `.env.win` / `.env.mac` / `.env.linux`（按 `sys.platform` 自动选）→ `.env.local`（单机覆盖） | `toolchain.py::get_platform_env_filename()` |
 | **③ 运行设备层** | `VT_DEVICE=auto` → 有 NVIDIA 则 `cuda+int8_float16`，否则 `cpu+int8` 平滑降级（ADR-014）；8GB 显存机器强制 demucs→释放→Whisper 串行 | `transcribe.py::resolve_device()` |
 
@@ -46,7 +47,7 @@ gitignore  ：.venv/            ← 环境（可随时删掉重建，make setup 
 
 ```
 ① 先决条件：Python ≥ 3.10（唯一人工步骤；ffmpeg 待 E2 落地后可 setup --ffmpeg 自动）
-② git clone && make setup      # 依赖（按平台自动）+ 模型（共享 HF cache，E3 后带自愈）
+② git clone && make setup      # uv sync 依赖（uv.lock 固化，按平台自动选源）+ 模型（项目根 models/，零 C 盘，E3 后带自愈）
 ③ cp .env.<platform>.example .env.<platform>  # 填本机差异项（E4 后 CUDA 通常免填）
 ④ make doctor                  # 全绿才算就绪
 ⑤ Agent 按 AGENTS.md 状态机开工（run → exit 6 → 翻译 → generate → verify）
@@ -79,10 +80,10 @@ CLI 参数 / 系统运行时 os.environ  >  .env.local (本地私有)  >  .env.<
 - `VT_MODEL`：默认 Whisper 模型名称或本地模型目录路径（默认 `large-v3`）。
 - `HF_HOME`：HuggingFace 模型缓存目录（默认 `~/.cache/huggingface`）。
 - `HF_ENDPOINT`：HuggingFace 镜像源（如 `https://hf-mirror.com`）。
-- `PIP_EXTRA_INDEX_URL`：PyTorch wheel 国内镜像（CN 无代理安装用）。CUDA 12.4 例：
-  `https://mirrors.tuna.tsinghua.edu.cn/pytorch-wheels/cu124/`。
-  **已固化进 `pyproject.toml` 的 `[tool.uv.index]`**（Windows/Linux 自动走清华镜像），
-  用 `uv sync` 时无需手动设；用 `pip` 时才需设此环境变量兜底。
+- `PIP_EXTRA_INDEX_URL`：PyTorch wheel 镜像（`uv sync` 已通过 `pyproject.toml` 的
+  `[[tool.uv.index]]` + `[[tool.uv.sources]]` 按平台自动选源，无需手动设；仅当用 `pip`
+  兜底安装时才需设此环境变量，CUDA 12.4 例：
+  `https://download.pytorch.org/whl/cu124/`）。
 - `VT_DEVICE`：计算设备（`auto` / `cuda` / `cpu`）。
 - `VT_COMPUTE_TYPE`：量化类型（`auto` / `int8_float16` / `int8` / `float16`）。
 - `VT_ENGINE`：翻译引擎（默认 `agent`，可选 `google`）。
@@ -96,28 +97,62 @@ CLI 参数 / 系统运行时 os.environ  >  .env.local (本地私有)  >  .env.<
 
 ### 2.1 FFmpeg / FFprobe（音视频处理核心）
 - **作用**：音频抽流（16kHz 单声道 WAV）、音量与静音画像（`volumedetect`、`silencedetect`）、时长探测。
-- **探测与处理顺序**（先 Pass、再读配置、后全盘搜、真缺失才提示）：
-  1. **(1) 探测系统环境**：若 `ffmpeg -version` 可直接运行，则直接使用。
-  2. **(2) 自动读取 .env 配置**：若未在系统 PATH，读取 `.env` / `.env.win` 中的 `VT_FFMPEG_DIR`，程序自动注入运行时 PATH。
-  3. **(3) 本地搜寻登记**：若上述路径不存在，Agent 或用户可在常见盘（C:/D:/E:/F:）全盘搜索 `ffmpeg.exe`，找到后写入 `.env.win`（或相应平台文件），以后长期生效。
-  4. **(4) 确认缺失后提示**：若全盘皆无，方判定为缺失，提示用户安装（`winget install Gyan.FFmpeg` 或 `brew install ffmpeg` 或手动下载解压）。
+- **确定性获取（首选，Milestone 3 / E2）**：`doctor` 报 ffmpeg 缺失时，**不要**全盘搜或手动安装，直接跑：
+  ```bash
+  video-translate setup --ffmpeg
+  ```
+  它会按当前平台下载便携版（Windows gyan.dev zip / Linux johnvansickle 静态 tar.xz / macOS evermeet zip）解压到 `tools/ffmpeg/bin`，并写入 `.env.local`（`gitignore`，单机私有）。全程幂等，重跑不重复下载。
+- **探测顺序**（两步，无"全盘搜"自由发挥）：
+  1. **系统 PATH**：`ffmpeg -version` 可直接运行即用。
+  2. **`VT_FFMPEG_DIR` 配置**：否则读取 `.env` / `.env.<platform>` / `.env.local` 中的 `VT_FFMPEG_DIR`，程序自动注入运行时 PATH。该变量可由 `setup --ffmpeg` 自动写入 `.env.local`。
+- 两步皆无 → 判为缺失，`doctor` 打印 `[FIX] video-translate setup --ffmpeg`，**禁止** Agent 自行全盘搜索或散落安装。
 
 ### 2.2 CUDA 运行时库（GPU 推理加速）
 - **作用**：faster-whisper 基于 CTranslate2 后端，在 NVIDIA GPU 下可实现 5-10x 实时加速。
 - **动态库依赖**：需要 `cublas64_12.dll`、`cublasLt64_12.dll`、`cudart64_12.dll`、`cudnn64_9.dll` 等。
+- **解析顺序（Milestone 3 / E4，确定性，不散落缓存）**：
+  1. **① venv torch/lib（自动探测）**：`init_toolchain` 通过 `import torch` 定位当前 venv 内
+     随装的 `torch/lib` 目录，**默认即生效，无需任何 `.env` 配置**。`doctor` 会标注来源
+     `venv-torch`。
+  2. **② 显式覆盖 `VT_CUDA_DIR` / `VT_TORCH_LIB_DIR`**：仍最高优先，磁盘上存在才取用，适合指向
+     系统 CUDA Toolkit 或绿色版运行库。来源标注 `env`。
+  3. **③ `CUDA_PATH`**：系统 CUDA Toolkit 环境变量。来源标注 `system`。
+  4. **④ 无**：CPU 自动降级（`--device cpu --compute-type int8`）。
 - **配置方式**：
-  - 若系统安装了标准 CUDA Toolkit，会自动识别。
-  - 若使用绿色版/打包的 CUDA 运行库（如 Python torch\lib 目录），在 `.env.win` 中指定 `VT_CUDA_DIR`（例如 `VT_CUDA_DIR=F:\win-pyvideotrans-v3.92\_internal\torch\lib`）。
+  - 绝大多数情况**什么都不用配**：本 venv 的 torch 自带 CUDA 运行库，`doctor` 显示来源 `venv-torch`。
+  - 仅在需覆盖时，在 `.env.win` 指定 `VT_CUDA_DIR`（例：`VT_CUDA_DIR=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\bin`）。
 - **CPU 自动回退机制**：
   - 当 `VT_DEVICE=auto` 时，系统先探测 CUDA。若无 GPU 或 CUDA 依赖库缺失/加载失败，系统会自动降级为 `--device cpu --compute-type int8` 运行，不会直接崩溃中断。
 
 ### 2.3 Whisper 模型（large-v3，约 3GB）
-- **本地优先原则**：
-  - 程序启动时，优先检测项目根目录 `models/large-v3/`（需含 `model.bin`）。若存在，直接离线加载，完全不依赖网络。
-  - 其次检测系统共享缓存 `~/.cache/huggingface/hub/`。
+- **本地优先原则（默认零 C 盘缓存）**：
+  - 程序启动 / 下载时，优先使用项目根目录 `models/large-v3/`（需含 `model.bin`）。若存在，
+    **直接离线加载，完全不依赖网络，也不读写 `C:\Users\...\AppData`**。
+  - `video-translate setup` 默认把模型下载到项目根 `models/large-v3/`（而非系统 HF 缓存目录），
+    所以**模型始终留在仓库内、可随项目拷贝、不污染用户目录**。
+  - 仅当项目根 `models/` 缺失且未设置 `HF_HOME` 时，才会回退到系统共享缓存
+    `~/.cache/huggingface/hub/`。
+- **想彻底不碰 C 盘用户目录**：只要把完整模型包（含 `model.bin` 等）放到 `<repo>/models/large-v3/`，
+  程序即离线加载；或设 `HF_HOME=D:\hf_cache` 把任何回退缓存也挪到非系统盘。
+- **完整性校验 + 自愈（Milestone 3 / E3）**：
+  - 判定"已缓存"不仅看 `model.bin` 是否存在，还要看其大小 ≥ 2 GiB 下限。一个被截断的
+    `model.bin`（如中断下载只下了几百 MB）**不再被误判为已缓存**。
+  - `video-translate setup` 在下载前会自动删除所有"存在但小于下限"的 `model.bin`（本地 `models/`
+    与 HF 共享 cache 均扫），随后重新拉取完整权重到 `models/`，实现自愈。
+  - 若转写阶段加载失败（缓存损坏），`run` 捕获后以退出码 `EXIT_MISSING_DEP(3)` 退出并打印：
+    `fix: video-translate setup`，不会抛出裸 traceback。
 - **网络镜像与离线下载**：
   - 如需在线拉取，在 `.env` 中设置 `HF_ENDPOINT=https://hf-mirror.com`，然后执行 `video-translate setup`。
-  - 无网络环境下，用户可从镜像源下载完整模型包并解压至项目根 `models/large-v3/`。
+  - 无网络环境下，用户可从镜像源下载完整模型包并解压至项目根 `models/large-v3/`（必须含完整 `model.bin`）。
+
+### 2.4 Demucs 语音分离模型（htdemucs，约 400MB+，可选 T2 预处理）
+- **作用**：人声/伴奏分离（T2 层）。模型由 demucs 经 `torch.hub` 下载，默认会落到
+  `C:\Users\<user>\.cache\torch\hub\checkpoints\`（系统盘）——**本项目已改为项目本地优先**。
+- **项目本地优先（Milestone 3 后规范，零 C 盘）**：
+  - `vocal_sep.py` 在调用 demucs 前，把 `TORCH_HOME` 绑定到 `<repo>/models/torch`，
+    因此 htdemucs 权重**下载并缓存到 `<repo>/models/torch/`，完全不进 C 盘用户目录**。
+  - 该行为对所有调用 `separate_vocals` 的路径自动生效，无需用户配置。
+- **仅当显式设了 `TORCH_HOME` 指向别处**才会改变落点；默认即项目内，符合 §6 规范。
 
 ---
 
@@ -133,10 +168,11 @@ CLI 参数 / 系统运行时 os.environ  >  .env.local (本地私有)  >  .env.<
    # Linux:
    cp .env.linux.example .env.linux
    ```
-2. 在 `.env.win`（或对应文件）中填入你机器上的实际路径：
+2. 在 `.env.win`（或对应文件）中按需填入实际路径。多数情况**留空即可**——torch 自带 CUDA 运行库会被自动探测，FFmpeg 可用 `video-translate setup --ffmpeg` 拉取。仅在覆盖时填：
    ```dotenv
-   VT_FFMPEG_DIR=F:\win-pyvideotrans-v3.92\ffmpeg
-   VT_CUDA_DIR=F:\win-pyvideotrans-v3.92\_internal\torch\lib
+   # 留空 = 自动探测 venv torch/lib（GPU）或 CPU 降级
+   VT_FFMPEG_DIR=
+   VT_CUDA_DIR=
    ```
 3. 运行环境自检：
    ```bash
@@ -177,62 +213,48 @@ video-translate verify --segments videos/example.segments_en.json --zh videos/ex
 
 ---
 
-## 1. FFmpeg / FFprobe（可执行工具）
+## 附录 A. 本机工具链实况（以 `video-translate doctor` 输出为准）
 
-| 工具 | 路径 | 说明 |
-|---|---|---|
-| ffmpeg | `F:\win-pyvideotrans-v3.92\ffmpeg\ffmpeg.exe` | 转码、loudnorm、silencedetect、抽流 |
-| ffprobe | `F:\win-pyvideotrans-v3.92\ffmpeg\ffprobe.exe` | 探针：时长、音轨语言、volumedetect 音量画像、silencedetect 静音窗 |
-| rubberband.exe | `F:\win-pyvideotrans-v3.92\ffmpeg\rubberband.exe` | 变调/变速（可选） |
-| rubberband-r3.exe | `F:\win-pyvideotrans-v3.92\ffmpeg\rubberband-r3.exe` | rubberband 的 r3 变体 |
-| sndfile.dll | `F:\win-pyvideotrans-v3.92\ffmpeg\sndfile.dll` | libsndfile，rubberband 依赖 |
+> 本节是**本机历史实况快照**，仅供排障参考。E2/E4 落地后，PATH 注入由
+> `init_toolchain` 在程序启动时**自动完成，无需手动执行**。新机器不要照抄本节
+> 路径，统一走 `make setup` + `video-translate setup --ffmpeg`（见
+> [docs/TOOLING.md](docs/TOOLING.md)）。
 
-**重要**：默认 `where ffmpeg` / `where ffprobe` 为空（不在 PATH）。任何依赖
-ffmpeg 的命令前，必须先注入：
+### A.1 FFmpeg / FFprobe
 
-```powershell
-$env:PATH = "F:\win-pyvideotrans-v3.92\ffmpeg;" + $env:PATH
-```
+| 工具 | 作用 |
+|---|---|
+| ffmpeg | 转码、loudnorm、silencedetect、抽流 |
+| ffprobe | 探针：时长、音轨语言、volumedetect 音量画像、silencedetect 静音窗 |
 
-验证：
-
-```powershell
-ffmpeg -version    # 应输出 ffmpeg version ...
-ffprobe -version   # 应输出 ffprobe version ...
-```
-
-> `where ffmpeg` 为空 ≠ 没装。找不到时先读本文件登记路径注入 PATH，还不存在才
-> 在常见盘（C:/D:/E:/F:）全盘搜 `ffmpeg.exe`，找到则补回本文件，下次直接复用。
+- 启动时由 `init_toolchain` 按「① 系统 PATH → ② `.env` 登记 `VT_FFMPEG_DIR`」顺序**自动注入**。
+- 新机器 ffmpeg 缺失：`video-translate setup --ffmpeg` 自动下载便携版到 `tools/ffmpeg/` 并写 `.env.local`（E2）。
+- `where ffmpeg` 为空 ≠ 没装；验证以 `video-translate doctor` 显示 ffmpeg/ffprobe `[OK]` 为准。
 
 ---
 
-## 2. CUDA 运行时库（GPU 推理必加的库目录）
+### A.2 CUDA 运行时库
 
 本项目用 CTranslate2 后端跑 faster-whisper，`device=auto` 在本机（RTX 3070 Ti,
-CUDA 12.x）会命中 GPU。**但 cuBLAS/cuDNN 库不在系统 PATH、也不在 venv 里**——
-它们随工具链打包在：
+CUDA 12.x）会命中 GPU。**E4 后 CUDA 库目录解析顺序（自动，无需手动注入 PATH）**：
 
-| 库目录 | 路径 | 说明 |
-|---|---|---|
-| CUDA 12 libs | `F:\win-pyvideotrans-v3.92\_internal\torch\lib` | 含 `cublas64_12.dll` / `cublasLt64_12.dll` / `cudart64_12.dll` / `cudnn64_9.dll` 等，CTranslate2 GPU 推理必需 |
+1. **venv 内 `torch/lib`** —— `uv sync` 装的 cu124 wheel 自带完整 CUDA 运行时
+   （cublas/cudnn），自动探测，`doctor` 标注 `venv-torch`；
+2. **`VT_CUDA_DIR` / `VT_TORCH_LIB_DIR`** —— 显式覆盖（最高优先级，仅 venv 内
+   缺 DLL 的特殊场合手填）；
+3. 都没有 → **静默 CPU 降级**（`--device cpu --compute-type int8`），不崩溃。
 
-**漏加这个目录会报 `Could not load library cublas64_12.dll`**（曾经栽过的坑）。
-开 GPU 推理时，PATH 必须**同时**含 FFmpeg 目录与 torch\lib：
-
-```powershell
-$env:PATH = "F:\win-pyvideotrans-v3.92\ffmpeg;F:\win-pyvideotrans-v3.92\_internal\torch\lib;" + $env:PATH
-```
+**曾经栽过的坑**（历史）：E4 之前借外部项目 `torch\lib` 目录，PATH 漏加会报
+`Could not load library cublas64_12.dll`。E4 已根治——CUDA 运行时随 venv 内
+torch wheel 一起安装，`make setup` 后即就位。
 
 验证 GPU 可用：
 
 ```powershell
+video-translate doctor     # CUDA source: venv-torch / env / none
 .venv\Scripts\python -c "from ctranslate2 import get_cuda_device_count; print(get_cuda_device_count())"
 # 应输出 CUDA devices: 1
 ```
-
-> 系统**未安装** CUDA Toolkit（`C:\Program Files\NVIDIA GPU Computing Toolkit`
-> 不存在），所有 CUDA 运行时都来自上面的打包目录，必须注入 PATH。
-> GPU 不可用时再退回 `--device cpu --compute-type int8`（慢）。
 
 ---
 
@@ -274,22 +296,22 @@ cd f:\workbuddy\github\video-translate
 - ❌ 不要放进 `[project.optional-dependencies]` 的 extra（如旧 `[audio]`），否则
   默认 `pip install -e .` 不装它。
 - ✅ 直接写在 `dependencies = [...]` 里；`requirements.txt` 同步保留（去掉 OPTIONAL 注释）。
-- 安装只跑一条命令：`pip install -e .` 或 `uv sync`，**不依赖任何额外动作**。
+- 安装只跑一条命令：`make setup`（默认 `uv sync`，uv 不可用时回退 `pip install -e .`），**不依赖任何额外动作**。
 
 ### 规则 2：CUDA wheel 必须走镜像索引，绝不裸装
-- ✅ **首选 `uv sync`**：认 `pyproject` 的 `[tool.uv.sources]`，按平台 marker 自动
-  选 wheel（Windows/Linux→清华 `cu124`，macOS→官方 `cpu`）。
-- ✅ **用 pip 时**必须显式指定索引（pip 不读 `[tool.uv.*]`）：
+- ✅ **首选 `make setup` / `uv sync`**：认 `pyproject` 的 `[[tool.uv.sources]]`，按平台 marker 自动
+  选 wheel（Windows/Linux→官方 `cu124`，macOS→官方 `cpu`）。
+- ✅ **用 pip 兜底时**必须显式指定索引（pip 不读 `[tool.uv.*]`）：
   ```powershell
-  $env:PIP_EXTRA_INDEX_URL = "https://mirrors.tuna.tsinghua.edu.cn/pytorch-wheels/cu124/"
+  $env:PIP_EXTRA_INDEX_URL = "https://download.pytorch.org/whl/cu124/"
   pip install -e .
   # 或重装 torch/torchaudio 时强制走 CUDA 源：
-  pip install torch torchaudio --index-url https://mirrors.tuna.tsinghua.edu.cn/pytorch-wheels/cu124/
+  pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124/
   ```
 - ❌ 禁止裸 `pip install torch`（无代理时回退 PyPI 默认 `+cpu` wheel，GPU 失效）。
 
 ### 规则 3：镜像源固化进项目配置，不靠 Agent 临选
-- CUDA 索引已写入 `pyproject` 的 `[tool.uv.index]`（cu124→清华镜像），`uv sync` 自动生效。
+- CUDA 索引已写入 `pyproject` 的 `[[tool.uv.index]]`（cu124→官方 PyTorch 索引），`uv sync` 自动生效。
 - `PIP_EXTRA_INDEX_URL` 作为 pip 用户的兜底，写在此文件 §镜像环境变量段。
 - 安装一律"程序/配置决定"，任何 Agent/人工都不应在安装时现场拼镜像或挑代理。
 
@@ -305,26 +327,25 @@ python -c "import torch, demucs; print(torch.__version__, torch.cuda.is_availabl
 ## 4. 典型命令模板（已注入 PATH 后）
 
 ```powershell
-# 1) 注入 ffmpeg + CUDA 库到 PATH（GPU 推理必须两块都加）
-$env:PATH = "F:\win-pyvideotrans-v3.92\ffmpeg;F:\win-pyvideotrans-v3.92\_internal\torch\lib;" + $env:PATH
-
-# 2) 进入项目并激活 venv
+# 1) 进入项目并激活 venv（依赖 + 模型 + ffmpeg 已由 make setup 一键到位，无需手工拼 PATH）
 cd f:\workbuddy\github\video-translate
 . .venv\Scripts\Activate.ps1
+# 若 ffmpeg 缺失，按需拉取便携版（落 <repo>/tools/ffmpeg，不进系统盘）：
+#   video-translate setup --ffmpeg
 
-# 3) 自检环境
+# 2) 自检环境（ffmpeg/CUDA/模型全绿才开工）
 video-translate doctor
 
-# 4) 跑管线（agent 引擎，默认）
+# 3) 跑管线（agent 引擎，默认）
 video-translate run "videos\emily-blunt.mp4"
 
-# 5) 生成字幕
+# 4) 生成字幕
 video-translate generate `
     --segments videos\emily-blunt.segments_en.json `
     --zh videos\emily-blunt.zh_segments.json `
     --outdir videos\emily-blunt --base emily-blunt
 
-# 6) 三 lane 自检门
+# 5) 三 lane 自检门
 video-translate verify `
     --segments videos\emily-blunt.segments_en.json `
     --zh videos\emily-blunt.zh_segments.json `
@@ -339,5 +360,56 @@ video-translate verify `
   Windows 下为 `.venv\Scripts\video-translate.exe`（等价）。
 - `doctor` 会报告 ffmpeg/ffprobe、HF 模型缓存、依赖、音频画像与 VAD 路由建议，
   开工前必须先跑（AGENTS.md 铁律）。
-- 模型（large-v3）缓存在共享 `~\.cache\huggingface`，约 3GB，已下载则无需重下；
-  也可放项目根 `models/large-v3/`（见 AGENTS.md 资产拖欠清单）。
+- 模型（large-v3）**默认落项目根 `models/large-v3/`**（零 C 盘，见 §6 规范）；
+  仅当项目根缺失且未设 `HF_HOME` 时才回退 `~\.cache\huggingface`（见 §2.3）。
+
+---
+
+## 6. 工具与依赖管理规范（零 C 盘 / 项目本地优先）
+
+> **这是本项目的硬性管理规范**，被 AGENTS.md §1 红线引用。以后**新增任何工具、
+> 依赖或模型**，都必须遵循本节，不得把产物落到系统盘用户目录
+> （`C:\Users\<user>\.cache`、`C:\Users\<user>\AppData`、`C:\Users\<user>\torch` 等）。
+
+### 6.1 总原则
+1. **一切可再生的重量级产物（模型权重、下载的工具链、第三方缓存）都落在仓库目录内**，
+   通过 `.gitignore` 排除，可随项目拷贝、不污染系统、不依赖某台机器的用户目录。
+2. **落点统一约定**（空环境首次 `make setup` 后的最终状态，Windows）：
+
+   | 组件 | 落点 | 说明 |
+   |---|---|---|
+   | Python 依赖 | `<repo>/.venv/` | `uv sync` 创建，gitignore |
+   | Whisper 模型 large-v3 | `<repo>/models/large-v3/` | 本地优先，`setup` 下载到此；gitignore |
+   | Demucs 语音分离模型 htdemucs | `<repo>/models/torch/` | 经 `TORCH_HOME` 绑定到项目内（torch.hub 缓存）；gitignore |
+   | FFmpeg 便携版 | `<repo>/tools/ffmpeg/bin/` | `setup --ffmpeg` 下载；gitignore |
+   | CUDA 运行库 | venv 内 `torch/lib` 或 `VT_CUDA_DIR` 指向的系统目录 | 随 `uv sync` 装 torch 一并就绪，不单独下载 |
+   | 中间产物（vocals/demucs_out/转写 json/字幕） | `--outdir` 指定目录 | 默认视频同级 |
+
+3. **回退规则**：仅当项目内路径缺失且未设 `HF_HOME`/`TORCH_HOME` 等环境变量时，
+   才允许回退到系统用户目录；但**默认配置与 `setup` 流程必须把它们引回项目内**。
+
+### 6.2 新增工具/依赖的标准套路
+- **Python 依赖**：写进 `pyproject` 顶层 `dependencies`（见 §3.1），`make setup` 一条命令装齐，
+  随 venv 落在 `<repo>/.venv/`，不进系统 Python（避免 demucs 飘到系统 Python 的历史问题）。
+- **需下载的模型/权重**：
+  - 优先支持「项目根 `models/<name>/` 本地 drop-in」+「`setup` 下载到项目内」双路径（参照
+    Whisper 的 `_resolve_model_path` / `_LOCAL_MODEL_DIR` 写法）。
+  - 若底层库走 `torch.hub` / `HF Hub`，在调用前**绑定 `TORCH_HOME` / `HF_HOME` 到
+    `<repo>/models/...`**（参照 `vocal_sep.py::_bind_demucs_cache`），而非依赖默认 C 盘路径。
+  - 下载逻辑必须**幂等**、**走代理**，残缺时自愈（见 §2.3 E3 规则）。
+- **需下载的工具（如 FFmpeg）**：实现 `ensure_*` 函数，按平台选源、解压到 `<repo>/tools/...`、
+  写入 `.env.local`（gitignore），`doctor` 在缺失时提示确定性修复命令（见 §2.1 E2 规则）。
+- **禁止**：裸 `pip install <heavy>` 装到系统 Python；让 Agent 现场全盘搜索或散落安装；
+  把模型/缓存写到 `C:\Users\...`。
+
+### 6.3 验证（新增后必查）
+```powershell
+# 1) 确认没有产物落到 C 盘用户目录
+#    Whisper: 应在 <repo>/models/large-v3/
+#    Demucs : 应在 <repo>/models/torch/（TORCH_HOME 指向它）
+Get-ChildItem "C:\Users\$env:USERNAME\.cache" -ErrorAction SilentlyContinue
+Get-ChildItem "C:\Users\$env:USERNAME\.torch" -ErrorAction SilentlyContinue
+# 2) doctor 全绿
+video-translate doctor
+# 3) 跑一条最短链路，确认产物落在 --outdir 而非系统盘
+```

@@ -9,13 +9,19 @@ Toolchain setup priority:
 """
 from __future__ import annotations
 
+import io
 import os
 import re
 import shutil
 import sys
+import tarfile
+import urllib.request
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from .proxy import detect_proxy, setup_http_proxy
 
 # Match ${VAR} or $VAR for simple variable expansion
 _VAR_EXPAND_RE = re.compile(r"\$(?:\{([A-Za-z0-9_]+)\}|([A-Za-z0-9_]+))")
@@ -136,6 +142,7 @@ class ToolchainStatus:
     ffmpeg_path: str | None = None
     ffprobe_path: str | None = None
     cuda_dir: str | None = None
+    cuda_source: str | None = None  # E4: "venv-torch" | "env" | "system" | None
     cuda_available: bool = False
     cuda_info: str = ""
     device: str = "cpu"
@@ -181,6 +188,41 @@ def _check_cuda_support() -> tuple[bool, str]:
     return False, "No NVIDIA GPU / CUDA runtime detected (CPU fallback)"
 
 
+def _resolve_cuda_dir(merged: dict[str, str]) -> tuple[str | None, str | None]:
+    """Resolve the CUDA / PyTorch lib directory (Milestone 3 / E4).
+
+    Order (deterministic, no scattered caches):
+      ① venv torch/lib  — auto-detect torch shipped inside this venv
+      ② VT_CUDA_DIR / VT_TORCH_LIB_DIR — explicit override (highest priority)
+      ③ CUDA_PATH — system CUDA toolkit
+
+    Returns (dir, source_label). source_label ∈ {"venv-torch", "env", "system"}
+    so doctor can show where the directory came from; ``None`` means CPU fallback.
+    """
+    # ② explicit override wins when actually present on disk.
+    for key, label in (("VT_CUDA_DIR", "env"), ("VT_TORCH_LIB_DIR", "env"),
+                       ("CUDA_PATH", "system")):
+        val = merged.get(key) or os.environ.get(key)
+        if val and os.path.isdir(val):
+            return val, label
+
+    # ① venv torch/lib — derived from the torch package installed in this venv.
+    try:
+        import importlib.util
+
+        spec = importlib.util.find_spec("torch")
+        if spec and spec.submodule_search_locations:
+            torch_root = Path(spec.submodule_search_locations[0])
+            cand = torch_root / "lib"
+            if cand.is_dir():
+                return str(cand), "venv-torch"
+    except Exception:  # noqa: BLE001
+        pass
+
+    # ③ system CUDA_PATH already covered in the loop above (returns "system").
+    return None, None
+
+
 def init_toolchain(
     root_dir: str | Path | None = None,
     *,
@@ -210,17 +252,16 @@ def init_toolchain(
     if ffmpeg_dir:
         prepend_to_path(ffmpeg_dir)
 
-    # 3. Inject CUDA / PyTorch DLL directory if specified
-    cuda_dir = (
-        merged.get("VT_CUDA_DIR")
-        or os.environ.get("VT_CUDA_DIR")
-        or merged.get("VT_TORCH_LIB_DIR")
-        or os.environ.get("VT_TORCH_LIB_DIR")
-        or merged.get("CUDA_PATH")
-        or os.environ.get("CUDA_PATH")
-    )
+    # 3. Resolve CUDA / PyTorch library directory.
+    # Milestone 3 / E4 resolution order (highest determinism, no scattered caches):
+    #   ① venv torch/lib  — auto-detect the torch install shipped with this venv
+    #   ② VT_CUDA_DIR / VT_TORCH_LIB_DIR — explicit override (still respected)
+    #   ③ CUDA_PATH — system CUDA toolkit
+    #   ④ none — CPU fallback
+    cuda_dir, cuda_source = _resolve_cuda_dir(merged)
     if cuda_dir and os.path.isdir(cuda_dir):
         status.cuda_dir = cuda_dir
+        status.cuda_source = cuda_source
         prepend_to_path(cuda_dir)
         # On Windows Python 3.8+, os.add_dll_directory is required for ctypes/C extensions
         if sys.platform == "win32" and hasattr(os, "add_dll_directory"):
@@ -261,3 +302,131 @@ def get_toolchain_status() -> ToolchainStatus:
     if _GLOBAL_TOOLCHAIN is None:
         return init_toolchain()
     return _GLOBAL_TOOLCHAIN
+
+
+# ---------------------------------------------------------------------------
+# Portable FFmpeg auto-download (Milestone 3, E2)
+# ---------------------------------------------------------------------------
+# Per-platform portable FFmpeg build. We never reuse a package across platforms
+# (Windows zip / Linux static tar.xz / macOS zip differ in layout and binaries).
+_FFMPEG_SOURCES: dict[str, dict[str, str]] = {
+    "win32": {
+        "url": "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
+        "kind": "zip",
+        "subdir": "ffmpeg-*-essentials_build/bin",
+    },
+    "linux": {
+        # John Van Sickle static build (self-contained, no system deps).
+        "url": "https://johnvansickle.com/ffmpeg/old-releases/ffmpeg-6.1.1-amd64-static.tar.xz",
+        "kind": "tar.xz",
+        "subdir": "ffmpeg-6.1.1-amd64-static",
+    },
+    "darwin": {
+        "url": "https://evermeet.cx/ffmpeg/getrelease/zip",
+        "kind": "zip",
+        "subdir": "",  # evermeet zip contains ffmpeg/ffprobe at top level
+    },
+}
+
+
+def _ffmpeg_dest_root(dest: str | Path) -> Path:
+    return Path(dest)
+
+
+def _find_exe_in(dir_path: Path, name: str) -> Path | None:
+    """Find ``name`` (optionally with .exe) within ``dir_path`` (recursive, shallow)."""
+    candidates = [name, f"{name}.exe"]
+    for cand in candidates:
+        direct = dir_path / cand
+        if direct.is_file():
+            return direct
+    # shallow recursive search (one level) to locate inside extracted subdir
+    for sub in sorted(dir_path.rglob(name)) + sorted(dir_path.rglob(f"{name}.exe")):
+        if sub.is_file():
+            return sub
+    return None
+
+
+def ensure_ffmpeg(dest: str | Path = "tools/ffmpeg", *, proxy: str | None = None) -> str | None:
+    """Download and extract a portable FFmpeg for the current platform.
+
+    Idempotent: if ``{dest}/bin/ffmpeg[.exe]`` already exists, returns its parent
+    dir without re-downloading. On success writes ``VT_FFMPEG_DIR`` into
+    ``.env.local`` (gitignored) so ``init_toolchain`` picks it up on next run.
+
+    Returns:
+        The bin directory containing ffmpeg/ffprobe, or ``None`` on failure.
+
+    Cross-platform note: only the current platform's source is ever used; the
+    other entries exist purely for documentation/clarity and are never fetched.
+    """
+    bin_dir = _ffmpeg_dest_root(dest) / "bin"
+    existing = _find_exe_in(bin_dir, "ffmpeg")
+    if existing is not None:
+        print(f"[ensure_ffmpeg] already present at {existing}; skipping download.")
+        return str(bin_dir)
+
+    plat = sys.platform
+    if plat not in _FFMPEG_SOURCES:
+        print(f"[ensure_ffmpeg] unsupported platform {plat!r}; please install ffmpeg manually.",
+              file=sys.stderr)
+        return None
+
+    src = _FFMPEG_SOURCES[plat]
+    print(f"[ensure_ffmpeg] downloading {src['url']} (platform={plat})...")
+    _ffmpeg_dest_root(dest).mkdir(parents=True, exist_ok=True)
+    try:
+        setup_http_proxy(proxy)
+        tmp_path, _hdr = urllib.request.urlretrieve(src["url"])  # nosec B310 (fixed allowlist)
+    except Exception as e:  # noqa: BLE001
+        print(f"[ensure_ffmpeg] download failed: {e}", file=sys.stderr)
+        return None
+
+    try:
+        extract_root = _ffmpeg_dest_root(dest)
+        if src["kind"] == "zip":
+            with zipfile.ZipFile(tmp_path) as zf:
+                zf.extractall(extract_root)
+        else:  # tar.xz
+            with tarfile.open(tmp_path, "r:xz") as tf:
+                tf.extractall(extract_root)
+    except Exception as e:  # noqa: BLE001
+        print(f"[ensure_ffmpeg] extract failed: {e}", file=sys.stderr)
+        return None
+    finally:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+
+    # Locate the bin dir inside the extracted tree.
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    sub = src.get("subdir", "")
+    if sub:
+        # subdir may contain a glob (e.g. "ffmpeg-*-essentials_build/bin").
+        matches = sorted(extract_root.glob(sub))
+        search_base = matches[0] if matches else extract_root
+    else:
+        search_base = extract_root
+    ffmpeg_exe = _find_exe_in(search_base, "ffmpeg")
+    ffprobe_exe = _find_exe_in(search_base, "ffprobe")
+    if ffmpeg_exe is None or ffprobe_exe is None:
+        print("[ensure_ffmpeg] ffmpeg/ffprobe not found in extracted archive.",
+              file=sys.stderr)
+        return None
+    # Move binaries up into {dest}/bin for a stable, known path.
+    shutil.move(str(ffmpeg_exe), str(bin_dir / ffmpeg_exe.name))
+    shutil.move(str(ffprobe_exe), str(bin_dir / ffprobe_exe.name))
+
+    # Persist VT_FFMPEG_DIR into .env.local (gitignored) so init_toolchain binds it.
+    try:
+        env_local = Path(".env.local")
+        lines = env_local.read_text(encoding="utf-8").splitlines() if env_local.exists() else []
+        kept = [ln for ln in lines if not ln.startswith("VT_FFMPEG_DIR=")]
+        kept.append(f"VT_FFMPEG_DIR={bin_dir.resolve()}")
+        env_local.write_text("\n".join(kept) + "\n", encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass  # non-fatal: caller can still export the path itself
+
+    print(f"[ensure_ffmpeg] ready at {bin_dir}")
+    return str(bin_dir)
