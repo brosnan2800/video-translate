@@ -2,7 +2,7 @@
 
 - **Status**: Accepted
 - **Date**: 2026-08-19
-- **关联**: ADR-001（CPU/int8 强制，本 ADR 撤销其硬编码部分）、ADR-013（WhisperX GPU 对齐，仍延后）、`MAJOR_VERSION_PLAN.md` T1
+- **关联**: ADR-001（CPU/int8 强制，本 ADR 撤销其硬编码部分）、ADR-013（WhisperX GPU 对齐，仍延后）、**ADR-026**（CUDA DLL 目录解析 venv torch/lib 优先，补充本 ADR 的 DLL 来源）、`MAJOR_VERSION_PLAN.md` T1
 
 ## 背景
 
