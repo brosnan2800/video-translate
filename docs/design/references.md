@@ -52,15 +52,31 @@
 
 **借了什么**
 
-- **词级对齐 + 42 字行宽**的启示：WhisperX 用 forced alignment 把单词对齐到
+- **词级对齐 + 42 字行宽的启示**：WhisperX 用 forced alignment 把单词对齐到
   精确时间戳，并据此控制字幕行宽。本项目"词级时间戳 + 剪映 42 字单行上限"的
   组合，思想同源。
 - "先成句、再断行"的优先级也受其"对齐后按词重组字幕"的思路影响。
+- **最重要的启发——"faster-whisper 词级时间戳不够可信"**：WhisperX 之所以
+  存在，正是因为裸 faster-whisper 的 `word_timestamps` 是 **DTW 后验估计**，
+  会漂移/塌陷。这直接引出本项目的声学层核心判断（ADR-012）：
 
-**没借什么 / 为什么**
+  > 词级时间戳 ≠ 声学事实。必须对照独立声学参照校验，而不是 whisper 自证。
 
-- WhisperX 需要额外的 alignment 模型（wav2vec2 等），依赖更重、且对中文支持
-  参差。本项目直接吃 faster-whisper 的 `word_timestamps`，不引入对齐模型。
+  由此落地了「**检测 + 路由**」（Mac 可行、零新依赖）：用 ffmpeg `silencedetect`
+  / `volumedetect` 做独立参照源（`audio_profile`），`doctor` 按音频画像自动路由
+  VAD，`verify` 三 lane 里的**声学 lane** 拿静音区间核对每个 cue——这是把
+  WhisperX「对齐要外部分参照」的哲学，用不引入重依赖的方式移植了进来。
+
+**没借什么 / 为什么（关键：是"延后"不是"永不"）**
+
+- **Mac 当前不引入 wav2vec2 alignment 模型**：依赖更重、要 py3.12+CUDA、且对
+  中文支持参差；Mac 锁 `faster-whisper==1.2.1` + CPU/int8 确定性（ADR-001），
+  零新依赖哲学要求保住 golden 回归。
+- **但真正的 WhisperX 强制对齐（~96% 精度）并未被永久拒绝——是 GPU 盒专用、
+  延后落地的路径**（ADR-013，T3）：`--align {none,whisperx}` 默认 `none`，
+  仅 `[windows]` extra，对齐只润词级/显示时间戳、不改段落语义；显式请求但库
+  不可用（典型 Mac）时告警并自动回退 `none`。参考关系从"借鉴思想"升级为
+  "**未来在 GPU 路径真正采用其算法**"。
 
 ---
 
@@ -104,7 +120,7 @@
 |------|------|------|--------|
 | faster-whisper | CTranslate2/int8 确定性、`word_timestamps`、VAD | 高级对齐封装、GPU 浮点 | 确定性 > 极限质量；原生已够 |
 | stable-ts | regroup 拆分思想（gap/length） | 依赖本身 | Spike 实测不兼容，自写最小实现 |
-| WhisperX | 词级对齐 + 42 字行宽思想 | alignment 模型 | 避免重依赖、中文支持参差 |
+| WhisperX | 词级对齐 + 42 字行宽 +「时间戳需外参照校验」哲学（ADR-012 声学 lane） | Mac 的 wav2vec2 alignment 模型；但算法本体留 GPU 盒 T3 落地 | 避免重依赖/中文参差；GPU 强制对齐（96%）延后，Mac 只检测+路由 |
 | deep-translator | Google 无头兜底 + 重试 | 主翻译路径 | 质量不如 LLM agent |
 | OpenMontage/agent 流 | agent 即引擎、EXIT 6 交还控制权 | 具体 agent 框架 | 轻契约、不绑死 LLM SDK |
 

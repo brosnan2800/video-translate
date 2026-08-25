@@ -2,7 +2,7 @@
 
 > 调研对象：[abus-aikorea/voice-pro](https://github.com/abus-aikorea/voice-pro)（12.6k Stars，v4.0，GPL-3.0）
 > 调研日期：2026-08-25
-> 结论速览：**技术底座高度重合，产品哲学完全不同。安装/环境工程值得我们抄，质量护栏体系是我们的护城河，Agent-as-Engine 是差异化优势。该项目已暂停维护，恰好验证了我们"重护栏轻堆功能"路线的正确性。**
+> 结论速览：**技术底座高度重合，产品哲学完全不同。质量护栏体系是我们的护城河，Agent-as-Engine 是差异化优势。Voice-Pro 的安装工程（uv.lock / 便携 ffmpeg / wheel 自带 CUDA / 模型自愈）四项 P0/P1 借鉴已全部落地为 E1–E4（见 [docs/TOOLING.md](TOOLING.md)）。该项目已暂停维护，恰好验证了我们"重护栏轻堆功能"路线的正确性。**
 
 ---
 
@@ -17,8 +17,8 @@
 | 人声分离 | Demucs | Demucs（ADR-017，**同款**） |
 | 质量护栏 | 无体系化门禁（能出结果即可） | 三 Lane 门禁：声学/内容/表现（Spec 18），幻觉拦截五信号（ADR-020），自适应 VAD（ADR-015），fill_gaps 补洞（ADR-016） |
 | 断点续跑 | 无显式设计 | chunk_N.json 分块缓存 + 指纹续跑 |
-| 安装 | uv + uv.lock 可复现；`start.bat` 自动下 Python 3.12 + 便携 ffmpeg；无需 CUDA Toolkit；删目录即卸载 | `make setup`（依赖+模型）；ffmpeg 走 `.env` 三步探测；CUDA 借 pyvideotrans 的 torch/lib DLL |
-| 模型管理 | 统一 `model/` 目录，卸载保留；下载自愈（中断/损坏自动修复）；首次约 10GB | 三级查找（`models/` drop-in → HF cache → 自动下载）；无完整性校验 |
+| 安装 | uv + uv.lock 可复现；`start.bat` 自动下 Python 3.12 + 便携 ffmpeg；无需 CUDA Toolkit；删目录即卸载 | `make setup`（E1 uv sync + 模型预拉）；ffmpeg 走 `setup --ffmpeg` 自动下载（E2）；CUDA 走 venv torch/lib 自动探测（E4）——四项 P0/P1 借鉴已全部落地 |
+| 模型管理 | 统一 `model/` 目录，卸载保留；下载自愈（中断/损坏自动修复）；首次约 10GB | 项目根 `models/` 本地优先（零 C 盘）+ 完整性校验与残缺自愈（E3）；卸载语义对齐 |
 | 离线能力 | 有限（翻译/Edge-TTS 在线） | 转写+翻译全离线（Agent 本地推理） |
 | 维护状态 | **已暂停**（团队转向 WeConnect） | 活跃开发中 |
 | 许可 | GPL-3.0 | MIT |
@@ -54,7 +54,7 @@ Voice-Pro 面向"能出结果"，没有声学门禁、没有幻觉拦截、没�
 
 **结论：护栏体系（ADR-011/012/015/016/020）不但是质量资产，也是本项目存在的理由。** 未来任何升级不得绕过护栏。
 
-### 3.3 安装工程：它们碾压我们（最值得抄的部分）
+### 3.3 安装工程：它们碾压我们（最值得抄的部分——现已全部落地）
 
 Voice-Pro v4.0 的安装体验是目前开源 AI 工具的最佳实践：
 
@@ -64,12 +64,12 @@ Voice-Pro v4.0 的安装体验是目前开源 AI 工具的最佳实践：
 4. **预编译 wheel 自带 CUDA 运行时**：Torch 2.8+cu128 wheel 内嵌 CUDA，明确宣布"不需要装 CUDA Toolkit 和 Visual Studio Build Tools"
 5. **故障排查哲学**：删 `installer_files` 重跑 `start.bat` = 几分钟内干净重装；`uninstall.bat` 保留 `model/` 和 `workspace/` 用户数据
 
-对照我们的现状：`pyproject` 已有 `[tool.uv.sources]` 镜像路由（方向一致），但 **没有提交 uv.lock**；ffmpeg 靠 `.env` 三步探测（含"全盘搜"这种不确定步骤）；CUDA DLL 借 pyvideotrans 包里的路径（依赖外部项目存在）。
+**落地状态（E1–E4，见 [docs/TOOLING.md](TOOLING.md)）**：P0/P1 四项已全部完成——提交 `uv.lock` + `make setup` 改 `uv sync`（E1）；`setup --ffmpeg` 自动下载便携版、消灭"全盘搜"（E2）；模型完整性校验 + 残缺自愈（E3）；CUDA 改 venv 内 torch/lib 自动探测，不再借 pyvideotrans（E4）。`update`/`uninstall` 语义（保留 `models/`+`videos/`）待 P2 跟进。
 
-### 3.4 模型管理：各有优劣
+### 3.4 模型管理：各有优劣（差异已收窄）
 
 - 它：统一 `model/` 目录（简单直观）+ **下载自愈**（中断/损坏自动修复）+ 卸载保留。缺点：每项目一份，3~10GB 重复占盘
-- 我们：三级查找（`models/` drop-in → `~/.cache/huggingface` 共享 → 下载）。优点：多项目共享一份权重。缺点：**无完整性校验**——`_model_cached` 只查 `model.bin` 存在性，损坏的半截文件会被误判为已缓存（voice-pro 的自愈机制正是解这个问题的）
+- 我们：**项目根 `models/` 本地优先（零 C 盘）**，随项目拷贝、避免多项目占用系统盘；E3 补齐了**完整性校验 + 残缺自愈**（`model.bin` ≥ 2GiB 下限，残缺自动删后重下），自愈能力已对齐 voice-pro；卸载保留 `models/`+`videos/` 语义待 P2。代价是每项目一份权重（与 voice-pro 相同的取舍，但避免了 C 盘膨胀这一换机痛点）
 
 ### 3.5 维护状态的反面教训
 
@@ -79,26 +79,22 @@ Voice-Pro 12.6k Stars 却因团队转向而停更——一站式堆功能（STT+
 
 ## 4. 值得借鉴的点（按优先级排序）
 
-### P0：提交 `uv.lock`，文档主推 `uv sync`
-- 现状：`pyproject.toml` 已配 `[tool.uv.index]`（清华 cu124 镜像）和 `[tool.uv.sources]`，但仓库无 lockfile，换机安装存在版本飘移风险
-- 动作：`uv lock` 生成并提交 `uv.lock`；`make setup` 内部改用 `uv sync`（保留 pip 兜底）；TOOLCHAIN.md §3.1 的安装口径统一为"uv 优先"
+### ✅ P0（已完成，E1）：提交 `uv.lock`，文档主推 `uv sync`
+- 落地：`uv.lock` 已提交；`Makefile setup` 主路径 `uv sync --extra dev`（pip 兜底）；`pyproject`→`uv.lock` 成对变更（R3）；TOOLCHAIN.md / docs/TOOLING.md 口径统一为"uv 优先"
 - 收益：环境 100% 可复现，彻底消灭"依赖装错环境/装成 CPU 版"两类红线事故
 
-### P0：ffmpeg 缺失时自动下载便携版（消灭"全盘搜"）
-- 现状：TOOLCHAIN.md §2.1 第 3 步"全盘搜 C:/D:/E:/F: 找 ffmpeg.exe 写回 .env"——不确定性最高、最容易被 Agent 搞出散落缓存的一步
-- 动作：`doctor` / `make setup` 检测到 ffmpeg 缺失时，提供 `video-translate setup --ffmpeg` 自动下载便携版到 `tools/ffmpeg/` 并写入 `.env.local` 的 `VT_FFMPEG_DIR`（github gyann/ffbinaries 均有静态构建，国内可走镜像）
-- 收益：三步探测收敛为两步（PATH → 自动下载），"全盘搜"降级为最后的人工兜底并从文档中移除
-- 注意：此改动动到 toolchain.py，需配单测（tests/test_toolchain.py 已有基础）
+### ✅ P0（已完成，E2）：ffmpeg 缺失时自动下载便携版（消灭"全盘搜"）
+- 落地：`toolchain.py` 的 `ensure_ffmpeg(dest="tools/ffmpeg")` 按平台选源（Win gyan.dev / Linux 静态 / macOS 镜像）+ 走代理；`cli.py` `setup --ffmpeg` 下载到 `tools/ffmpeg/` 并写 `.env.local` 的 `VT_FFMPEG_DIR`；"全盘搜"已从 TOOLCHAIN.md / AGENTS.md 删除
+- 收益：三步探测收敛为两步（PATH → 自动下载），首次 ffmpeg 缺失有确定性出路
+- 单测：`tests/test_toolchain.py`（下载 mock / 解压 / `.env.local` 写入 / 幂等）
 
-### P1：模型缓存完整性校验 + 自愈
-- 现状：`_model_cached` 只查 `model.bin` 存在；下载中断的残缺文件会被误判 OK，然后在 `run` 深处加载失败，报错对小白不友好
-- 动作：`_model_cached` 增加大小校验（对照 HF 元数据或至少 >2GB 下限）；`setup` 发现残缺时删除该 snapshot 重下；`run` 转写前若模型加载异常，给出"跑 `make setup` 修复"的明确指引
+### ✅ P1（已完成，E3）：模型缓存完整性校验 + 自愈
+- 落地：`_model_cached` 增加大小校验（`model.bin` ≥ 2GiB 下限）；`setup` 发现残缺自动删后重下（项目 `models/` 与 HF 共享 cache 均扫）；`run` 转写前加载异常包捕获，打印 `fix: video-translate setup` 并以 `EXIT_MISSING_DEP(3)` 退出
 - 收益：首次体验的两大崩溃点（下载断/加载崩）都有确定性出路
+- 单测：`tests/test_cli_model_cache.py`（假小尺寸 model.bin 验证检测/自愈）
 
-### P1：CUDA DLL 解析顺序：venv 内 torch/lib 优先
-- 现状：`.env.win` 硬编码 `VT_CUDA_DIR=F:\win-pyvideotrans-v3.92\_internal\torch\lib`（借外部项目的包）
-- 依据：voice-pro 证明 PyTorch cu1xx wheel 自带完整 CUDA 运行时（cublas/cudnn），我们的 venv 装了 `torchaudio>=2.5.1`（cu124），`.venv/Lib/site-packages/torch/lib` 里就有同一套 DLL
-- 动作：`toolchain.py` 的 CUDA 解析顺序改为 **venv `torch/lib`（自动探测）→ `VT_CUDA_DIR` 显式覆盖 → 无则 CPU 降级**；`.env.win.example` 里的示例路径同步更新
+### ✅ P1（已完成，E4）：CUDA DLL 解析顺序：venv 内 torch/lib 优先
+- 落地：`toolchain.py` 的 CUDA 解析顺序改为 **venv `torch/lib`（自动探测）→ `VT_CUDA_DIR` 显式覆盖（最高）→ 无则 CPU 降级**；`doctor` 标注来源 `venv-torch`/`env`/`none`；`.env.win.example` 示例路径已移除 pyvideotrans 硬编码
 - 收益：新机器不再依赖"恰好装过 pyvideotrans"，CUDA 随 `make setup` 一步到位
 
 ### P2：`update` / `uninstall` 脚本语义
@@ -117,27 +113,27 @@ Voice-Pro 12.6k Stars 却因团队转向而停更——一站式堆功能（STT+
 
 ## 5. 对当前已知问题的更优解映射
 
-| 现有问题 | 原方案 | 更优解（Voice-Pro 验证） |
+| 现有问题 | 原方案 | 更优解（Voice-Pro 验证）→ 落地状态 |
 |---|---|---|
-| 环境初始化"到处缓存"、Agent 自由发挥 | `make setup` + AGENTS.md Phase 0 硬约束 | 加上 **uv.lock 可复现**（P0）后闭环：入口唯一、结果确定、产物集中（.venv + HF cache + tools/） |
-| ffmpeg "全盘搜"不确定性 | 三步探测文档化 | **自动下载便携版**（P0），全盘搜退出文档 |
-| CUDA DLL 借 pyvideotrans 路径，新机不可复现 | `.env` 手填 `VT_CUDA_DIR` | **venv torch/lib 自动优先**（P1），wheel 自带 CUDA 运行时 |
-| 模型下载中断后残缺缓存误判 | 无处理 | **完整性校验 + 自愈重下**（P1） |
-| 首次 `run` 模型缺失时报错不友好 | 文档引导跑 setup | 加载异常时**定向提示修复命令**（P1，随自愈一起做） |
-| 多项目重复下载 3GB 模型 | HF cache 共享（已有） | **保持现状**——这一点我们比 voice-pro（每项目 `model/`）做得好，勿改 |
+| 环境初始化"到处缓存"、Agent 自由发挥 | `make setup` + AGENTS.md Phase 0 硬约束 | **uv.lock 可复现**（E1）+ ffmpeg 自动下载（E2）+ 模型本地落点（E3）→ **已闭环**：入口唯一、结果确定、产物集中（.venv + models/ + tools/） |
+| ffmpeg "全盘搜"不确定性 | 三步探测文档化 | **自动下载便携版**（E2）→ **已完成**，全盘搜退出文档 |
+| CUDA DLL 借 pyvideotrans 路径，新机不可复现 | `.env` 手填 `VT_CUDA_DIR` | **venv torch/lib 自动优先**（E4）→ **已完成**，wheel 自带 CUDA 运行时 |
+| 模型下载中断后残缺缓存误判 | 无处理 | **完整性校验 + 自愈重下**（E3）→ **已完成** |
+| 首次 `run` 模型缺失时报错不友好 | 文档引导跑 setup | 加载异常时**定向提示修复命令**（E3，随自愈一起做）→ **已完成** |
+| 多项目重复下载 3GB 模型 | HF cache 共享（已有） | **已重构为项目根 `models/` 本地优先（零 C 盘）**——随项目拷贝、避免占系统盘；代价是每项目一份权重，属取舍调整 |
 
 ---
 
 ## 6. 未来升级路线启发（排序）
 
-1. **环境确定性收口**（P0×2）：uv.lock + ffmpeg 自动下载 → 项目达到 voice-pro 级安装体验
-2. **缓存健壮性**（P1×2）：模型自愈 + CUDA 解析优化 → 新机首次成功率逼近 100%
+1. ✅ **环境确定性收口**（E1–E4 已全部落地）：uv.lock 可复现 + ffmpeg 自动下载 + 模型自愈 + CUDA venv 优先 → 已逼近 voice-pro 级安装体验
+2. **更新/卸载语义**（P2 待办）：Makefile 增 `update`（`uv sync` 按 lockfile 快速同步）与 `uninstall`（删 `.venv` 但保留 `models/`+`videos/`，对齐 voice-pro 保留用户数据）
 3. **主轴内增强**（保持克制）：转写质量（幻觉信号扩展、VAD 路由细化）、翻译质量（回读闭环加深）——这是护城河，不是功能堆砌
 4. **远期可选**：yt-dlp 入口（P3）、GUI 薄壳（独立项目）
-5. **红线重申**：任何升级不得绕过三 Lane 门禁；依赖必须进 `pyproject` 顶层（AGENTS.md §1 既有红线）
+5. **红线重申**：任何升级不得绕过三 Lane 门禁；依赖必须进 `pyproject` 顶层 + `uv.lock` 成对提交（AGENTS.md §1 + R3）
 
 ---
 
 ## 7. 结论
 
-Voice-Pro 与我们共享同一套技术底座，却在两个维度上走向反面：**它赢在安装工程（我们该抄），输在质量体系（我们的护城河）**；它的停更则警示了功能堆砌路线的维护成本。本项目下一阶段的升级优先级已因此清晰：**先把环境确定性做到 voice-pro 水平（P0/P1 共四项），再继续深耕字幕质量主轴**。
+Voice-Pro 与我们共享同一套技术底座，却在两个维度上走向反面：**它赢在安装工程，输在质量体系（我们的护城河）**；它的停更则警示了功能堆砌路线的维护成本。本项目已把环境确定性做到 voice-pro 水平——P0/P1 四项借鉴全部落地为 **E1–E4**（uv.lock 可复现 / ffmpeg 自动下载 / 模型自愈 / CUDA venv 优先），并收敛为工具与依赖管理专册 [docs/TOOLING.md](TOOLING.md)。下一阶段优先级清晰：**补齐 P2 更新/卸载语义后，专注深耕字幕质量主轴（三 Lane 门禁与 Agent-as-Engine）**。
