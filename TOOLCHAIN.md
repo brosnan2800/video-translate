@@ -5,6 +5,56 @@
 
 ---
 
+## 0. 环境模型总览（平台区分 × 开发/生产区分 × 目录四分离）
+
+> 新读者（人类或 Agent）必读：本节回答三个高频问题——「不同操作系统怎么区分？」「开发环境和生产环境怎么区分？」「代码/环境/配置/数据各放哪？」。细节散落在 §1-§5 与 `pyproject.toml`，此处是唯一总览。
+
+### 0.1 平台差异：三层全自动，零人为决策
+
+| 层 | 机制 | 谁判断 |
+|---|---|---|
+| **① 依赖 wheel 层** | `pyproject` 的 `[tool.uv.sources]` 平台 marker：Windows/Linux → CUDA(cu124) wheel（清华镜像）；macOS → CPU wheel（官方源）。`uv.lock` 为**全平台统一 lockfile**（内含各平台版本+hash），`uv sync` 按当前机器自动取 | uv / pip（按 marker） |
+| **② 环境变量层** | `.env`（全平台基础）→ `.env.win` / `.env.mac` / `.env.linux`（按 `sys.platform` 自动选）→ `.env.local`（单机覆盖） | `toolchain.py::get_platform_env_filename()` |
+| **③ 运行设备层** | `VT_DEVICE=auto` → 有 NVIDIA 则 `cuda+int8_float16`，否则 `cpu+int8` 平滑降级（ADR-014）；8GB 显存机器强制 demucs→释放→Whisper 串行 | `transcribe.py::resolve_device()` |
+
+平台差异被隔离在 gitignore 的本地 `.env.<platform>` 里；代码与 lockfile 保持全平台统一，**任何 Agent/人工不得临场拼平台分支**（R7）。
+
+### 0.2 开发环境 vs 生产环境
+
+本项目是 CLI + Agent 协议工具，区分在两个维度：
+
+**依赖维度**（判定标准：用户跑 `video-translate run` 会 import 到的 = 生产必装）：
+
+| | 位置 | 安装 | 谁需要 |
+|---|---|---|---|
+| 运行时（生产） | `pyproject` 顶层 `[project.dependencies]` | `make setup` / `uv sync` / `pip install -e .` | 所有用户 |
+| 开发依赖 | `[project.optional-dependencies].dev`（pytest 等） | `make install-dev` / `pip install -e ".[dev]"` | 贡献者/跑测试 |
+
+**形态维度**：当前「源码即产品」——用户是 Agent + 开发者，同一台机器同一 `.venv`，dev 与 prod 靠下面的目录隔离而非独立部署；传统打包分发（PyInstaller 单 exe，见 `MAJOR_VERSION_PLAN.md` §5）为远期规划，启动前无需强分离。
+
+### 0.3 目录四分离（环境可重建，数据永不误删）
+
+```
+git 跟踪   ：src/ tests/ docs/ pyproject.toml uv.lock   ← 代码与锁定（可 Review）
+gitignore  ：.venv/            ← 环境（可随时删掉重建，make setup 几分钟）
+             .env*             ← 机器配置（本机私有）
+             videos/ outputs/  ← 用户数据（永不被安装/卸载/清理触碰）
+             models/ tools/    ← 大资产（模型权重/便携 ffmpeg，可再生）
+```
+
+### 0.4 新机器标准工作流
+
+```
+① 先决条件：Python ≥ 3.10（唯一人工步骤；ffmpeg 待 E2 落地后可 setup --ffmpeg 自动）
+② git clone && make setup      # 依赖（按平台自动）+ 模型（共享 HF cache，E3 后带自愈）
+③ cp .env.<platform>.example .env.<platform>  # 填本机差异项（E4 后 CUDA 通常免填）
+④ make doctor                  # 全绿才算就绪
+⑤ Agent 按 AGENTS.md 状态机开工（run → exit 6 → 翻译 → generate → verify）
+故障恢复：删 .venv 重跑 make setup（数据无损）
+```
+
+---
+
 ## 1. 核心架构与环境配置机制
 
 为了实现跨系统（Windows / macOS / Linux）通用性并避免 Agent / 人工每次手动输入环境变量，本项目采用分层的 `.env` 自动加载机制。
@@ -217,6 +267,8 @@ cd f:\workbuddy\github\video-translate
 > `torch` / `torchvision` / `torchaudio` / `whisperx` / `pyannote` / `demucs`
 > 这类重型 CUDA 包），**必须**按以下固定套路，避免重蹈「demucs 飘到系统 Python /
 > 装成 CPU 版 / 没走镜像」的覆辙。
+> **完整规则（R1-R7）固化于 [MAJOR_VERSION_PLAN.md](MAJOR_VERSION_PLAN.md) §3.2**，
+> 本节为其在安装操作层面的落地说明；两处修订须同步。
 
 ### 规则 1：依赖写进 `pyproject` 顶层 `dependencies`，不准藏 extra
 - ❌ 不要放进 `[project.optional-dependencies]` 的 extra（如旧 `[audio]`），否则

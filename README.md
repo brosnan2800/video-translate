@@ -166,7 +166,9 @@ CLI 参数 > 系统环境变量 / .env.local > .env.<platform> > .env > .video-t
 
 - 🤖 **[AGENTS.md](AGENTS.md)**：AI Agent 执行协议、避坑防呆红线速查与确定性状态机。
 - 🛠️ **[TOOLCHAIN.md](TOOLCHAIN.md)**：工具链引导、CUDA 配置、模型离线下载与环境隔离。
+- 🗺️ **[MAJOR_VERSION_PLAN.md](MAJOR_VERSION_PLAN.md)**：V5 任务路线图（E 系列环境确定性工程 + T 系列），含 §3.2 依赖与外部工具管理规则（R1-R7）。
 - 📜 **[docs/HISTORY.md](docs/HISTORY.md)**：完整的版本演进史、实战案例与踩坑复盘（V3–V14）。
+- 🔍 **[docs/RESEARCH-voice-pro.md](docs/RESEARCH-voice-pro.md)**：Voice-Pro 对标研究（E 系列与依赖规则的论证来源）。
 - 📐 **[docs/specs/](docs/specs/) & [docs/adr/](docs/adr/)**：系统设计规格 (SDD) 与架构决策记录 (ADR)。
 
 ---
