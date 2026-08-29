@@ -36,6 +36,8 @@
 2. **跨平台兼容与优雅降级**：所有 GPU/Windows 专享特性（WhisperX、Demucs 人声分离、CUDA 加速）均为增量可选，在 Mac / CPU 环境下必须**自动平滑降级**或告警回退，绝不破坏基础流水线运行。
 3. **分块断点续跑与缓存指纹防护**：任何影响转写产物的参数（模型、VAD、对齐后端、人声分离）必须纳入 chunk 缓存指纹（sha1），绝不误用脏缓存。
 4. **SDD + TDD 先行**：每项新特性先定 Spec/ADR，测试覆盖（`pytest` 全绿 + 关键 golden 保护），文档随代码同步提交。
+5. **VAD 决策继承主线「自动路由」，不得回退为手动固定开/关**：底层默认 `use_vad=False`（裸跑，ADR-011），但 `doctor --video` 按音频画像自动路由 VAD（ADR-012 `recommend_vad`：低电平 → `--vad --vad-threshold 0.1`、正常电平 → `--vad` 锚静音、画像不可用 / 音乐重 → `bare`）。Windows 版必须沿用这套路由，不得把 VAD 改回写死的默认开。
+6. **Mac 路径依赖冻结 + golden 回归口径**：不升级 Mac 路径的 `faster-whisper`（锁 `1.2.1`）；golden fixtures 已停止仓库跟踪，回归改为本地手动确认（`docs/golden/` 缺失时相关用例自动 skip，不构成失败）。
 
 ---
 
