@@ -16,6 +16,11 @@ output must be byte-for-byte identical to `docs/golden/apollo_story.*`.**
 | `.en.srt`       | English-only cues                                 |
 | `.txt`          | Flat review file (`[t0 -> t1]` + 中文/英文 lines) |
 
+**Style suffix (T3 / ADR-027 / Spec 21)**: when `--style <name>` is passed, the output
+stem becomes `<base>.<style>` (e.g. `clip.literal.bilingual.srt`). The default (no
+`--style`) keeps the legacy `<base>.bilingual.srt` names byte-for-byte unchanged.
+`generate_opts.json` records the `style` field.
+
 ## Algorithm (`build_outputs(segments, zh) -> {suffix: content}`)
 1. Enumerate segments 1-based (`i` from 1).
 2. `en_t = (segment.text or "").strip()`; `cn = (zh.get(i-1) or "").strip()`.

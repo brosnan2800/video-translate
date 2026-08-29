@@ -29,14 +29,15 @@ ADR-020 在 `merge.py` 的 `drop_hallucination_segments` 新增第四（时间�
 
 在 `fill_gaps.py` 新增模块级函数 `_is_recovered_hallucination`，并在 `_decode_once` 内、紧接 `_is_echo` 之后调用（不替换 `_is_echo`，叠加为更严格的第二道关）。恢复段 dict 同时携带 `avg_logprob`/`no_speech_prob`/`compression_ratio`（仿 `transcribe.py` 的 `_seg_to_dict`，由 faster-whisper Segment 自带，向后兼容：缺则省略）。
 
-三类信号（任一命中即丢弃，全保守防误杀真实补洞语音）：
+四类信号（任一命中即丢弃，全保守防误杀真实补洞语音）：
 
 1. **信号 A（重叠，核心）**：恢复段**词数 < `max_words_for_overlap`（默认 4）**且与任一现有段窗口重叠 > `overlap_eps`（默认 0.12s）→ 判为骑在已确认音频上的回音。
    - 依据：fill_gaps 的职责是填洞（洞即「现有段之间的空白」），短恢复段窗口与现有段重叠 = 解码到了已确认音频。jimmy 数据：7 个短幻觉段与邻居的**绝对重叠量**为 0.16/0.5/0.18/0.18/0.2/0.2/0.5s（最小 0.16s）；它们词数均 ≤3。
    - **长段豁免**：真实相邻段边界模糊（ADR-020 已知），如 `anxious. There's a difference.`（4 词）与前段 `...you get anxi[ous]` 边界重叠 0.20s 却为真实续接。仅当 `词数 < max_words_for_overlap` 才启用重叠信号，长句（≥4 词）豁免，改由信号 B/C 兜底。jimmy 的真实长段（`And the vocals…`、`anxious.…`）全部豁免保留；`Субтитры…`（3 词）仍被拦（确为脑补水印）。
    - **为何用绝对重叠量而非比例**：原草案用「重叠占自身窗口比例 >40%」，但 `Now what?`（0.76s 窗口只重叠 0.2s=26%）和 `Субтитры`（1.48s 重叠 0.18s=12%）会漏判。绝对重叠量稳定可靠。
 2. **信号 B（语速）**：`词数 >= min_words`(2) 且 `语速(wps) > max_wps`(8.0) → 物理不可能（3 词/0.16s=18.8wps）。防御深度，兜极短脑补。
-3. **信号 C（低置信度）**：`avg_logprob < avg_logprob_thr`(-1.0) 且（`no_speech_prob` 缺失或 >= `no_speech_thr`(0.6)）→ Whisper 自判低自信。兜**听错型**幻觉（如把音乐听成 `Thank you.`），此型无几何指纹、单靠 A/B 拦不住。
+3. **信号 C（Whisper 非语音自判，2026-08-29 强化为独立信号）**：`no_speech_prob >= no_speech_thr`(0.6) **单独**即丢弃——恢复段最强信号。fill_gaps 以 `no_speech_threshold=0` 强制解码，若模型对洞判 60%+ 非语音，恢复文本几乎必为幻觉，`avg_logprob` **不设闸**（kathy_meta_vlog 的 `We'll be right back.` avg=-0.650、`Thank you.` avg=-0.947 均 >-1.0，旧 AND 条件全部漏过，但 no_speech 0.766/0.799 暴露）。C2：`avg_logprob < -1.0` 单独兜旧缓存缺 `no_speech_prob` 字段。真实恢复段 no_speech 低（jimmy `Got it walking.` 0.1）不受影响。
+4. **信号 D（零时长词，2026-08-29 补遗）**：零时长词（`start >= end`）计数 >= `min_zero_dur_words`(2) → DTW 坍缩指纹（复用 ADR-020 第四信号，应用于恢复段）。堵 A/B/C 盲区：kathy_meta_vlog 开头 0-10.7s 的非语音能量（无人机开机声/环境底噪）被 `no_speech_threshold=0` 强制解码硬拼成 `Hubsan x4 H502E Desire 2-3-18`，该段无重叠、0.66wps、`avg_logprob=-0.942`（恰在 -1.0 阈值之上）全部逃过 A/B/C，但尾 3 词 `2`/`-3`/`-18` 零时长命中 D。真实恢复段（`We'll be right back.`/`Get it.`/`Thank you.`）实测**零个**零时长词，不误杀；单个零时长词（对齐边缘抖动）不触发（阈值 2）。独立重转写同一窗口得 `Hey Madam`（两次解码不一致）确证该窗口非稳定语音。实现：`fill_gaps._count_zero_dur` + 信号 D 于信号 C 之前判定。
 
 ### collapse 替换路径的特殊处理
 
@@ -56,10 +57,10 @@ ADR-020 在 `merge.py` 的 `drop_hallucination_segments` 新增第四（时间�
 ## 后果
 
 - **`src/video_translate/fill_gaps.py`**：
-  - 新增 `_is_recovered_hallucination`、`_overlap_with_any`、`_recovered_wps`。
+  - 新增 `_is_recovered_hallucination`、`_overlap_with_any`、`_recovered_wps`、`_count_zero_dur`（信号 D，2026-08-29）。
   - `_decode_once` 在 `_is_echo` 之后调用守卫；恢复段 dict 携带 `avg_logprob`/`no_speech_prob`/`compression_ratio`。
   - `_probe` 新增 `check_overlap` 参数；collapse 替换路径传 `False`。
-- **`tests/test_fill_gaps_recovered_guard.py`**（新增）：jimmy 实测案例固化（7 幻觉命中 + 真实恢复段不误杀 + collapse 路径不受重叠信号影响 + 字段携带贯通），含 3 个端到端（FakeModel 替换 `faster_whisper`，无真实 GPU 依赖）。
+- **`tests/test_fill_gaps_recovered_guard.py`**（新增）：jimmy 实测案例固化（7 幻觉命中 + 真实恢复段不误杀 + collapse 路径不受重叠信号影响 + 字段携带贯通）+ kathy_meta_vlog 信号 D 案例（`Hubsan x4 H502E Desire 2-3-18` 零时长尾词命中丢弃、`We'll be right back.` 不误杀、单零时长词不触发），含 3 个端到端（FakeModel 替换 `faster_whisper`，无真实 GPU 依赖）。
 - **`AGENTS.md`**：红线表新增「补洞恢复段幻觉」行；质量护栏表幻觉拦截行纳入 `_is_recovered_hallucination`。
 
 ## 已知限制

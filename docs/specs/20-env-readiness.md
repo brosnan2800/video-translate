@@ -1,28 +1,31 @@
 # Spec 20 — 环境就绪：`setup` / `doctor` 行为规范（E1-E4）
 
 Module: `toolchain.py` + `cli.py`（`setup` / `doctor` 子命令）+ `audio_profile.py`.
-Decision ADR-023 / ADR-024 / ADR-025 / ADR-026.
-关联：`docs/TOOLING.md`、`TOOLCHAIN.md`、MAJOR_VERSION_PLAN.md §3.2 R1-R7。
+Decision ADR-023 / ADR-024 / ADR-025 / ADR-026 / ADR-029.
+关联：`docs/TOOLING.md`、`TOOLCHAIN.md`、MAJOR_VERSION_PLAN.md §3.2 R1-R7、
+Spec 23（命令入口确定化，统一 `uv run`）。
 
 ## Purpose
 
-把「环境确定性工程」对外可观测的行为收敛为 `make setup`（就绪）+ `make doctor`
-（校验）两个入口，保证新 clone / 小白 / 新 Agent 走**唯一确定路径**即可达到
-「依赖、ffmpeg、模型、CUDA 全部就绪」的状态。**禁止自由发挥配环境**（AGENTS.md
-Phase 0 铁律）。
+把「环境确定性工程」对外可观测的行为收敛为 `uv run video-translate setup`
+（就绪）+ `uv run video-translate doctor`（校验）两个入口（ADR-029 / Spec 23：
+命令一律经 `uv run` 启动，恒定位到项目 `.venv`，禁止裸 `make`/`python`），
+保证新 clone / 小白 / 新 Agent 走**唯一确定路径**即可达到「依赖、ffmpeg、
+模型、CUDA 全部就绪」的状态。**禁止自由发挥配环境**（AGENTS.md Phase 0 铁律）。
 
 ## 就绪态定义（doctor 全绿 = 就绪）
 
 | 检查项 | 判定 | 不满足时的行为 |
 |---|---|---|
-| 依赖 | venv 可 `import`（uv sync 装好） | `make setup` 重装 |
+| 依赖 | venv 可 `import`（uv sync 装好） | `uv run video-translate setup` 重装 |
 | ffmpeg / ffprobe | `init_toolchain` 注入 PATH 后可调用（系统 PATH 或 `VT_FFMPEG_DIR`） | `[MISS]` → 提示 `run: video-translate setup --ffmpeg` |
 | 模型缓存 | 项目根 `models/large-v3/model.bin` 存在 **且** ≥ 2 GiB（完整 ≈ 3.09 GB） | `[MISS]` → 提示 `run: video-translate setup` |
 | CUDA 来源 | `doctor` 标注 `venv-torch` / `env` / `none` | `none` → CPU 降级（非致命） |
+| 命令入口 | `doctor` 标注 `uv-run` / `venv`（ADR-029 / Spec 23） | `bare` → 提示 `cd <repo> && uv run video-translate ...`（非致命） |
 
 ## 接口契约
 
-### `setup` 子命令（`video-translate setup` / `make setup`）
+### `setup` 子命令（`uv run video-translate setup`，等价 `make setup`）
 
 - 主路径 `uv sync --extra dev`（pip 兜底，ADR-023）。
 - 预拉模型到 `<repo>/models/`；下载前删除「存在但 < 2 GiB」的残缺 `model.bin`
@@ -30,7 +33,7 @@ Phase 0 铁律）。
 - 新旗标 `--ffmpeg`：下载便携版到 `tools/ffmpeg/` 并写 `.env.local` 的
   `VT_FFMPEG_DIR`（ADR-024）；`ensure_ffmpeg` 按平台选源 + 走代理 + 幂等（已存在跳过）。
 
-### `doctor` 子命令（`make doctor`）
+### `doctor` 子命令（`uv run video-translate doctor`，等价 `make doctor`）
 
 - ffmpeg/ffprobe 缺失 → `[MISS]` + `run: video-translate setup --ffmpeg`。
 - 模型 `[MISS]`（不存在或 < 2 GiB）→ `run: video-translate setup`。

@@ -134,7 +134,7 @@ video-translate doctor      # CUDA source: venv-torch
 | # | 规则 | 正例 |
 |---|---|---|
 | R1 | 运行时依赖进 `pyproject` 顶层 `dependencies`；dev 工具进 `[optional-dependencies].dev` | demucs/torchaudio 在顶层 |
-| R2 | CUDA wheel 只走镜像索引，绝不裸装 | `uv sync` / `pip install --index-url …cu124/` |
+| R2 | CUDA wheel 只走镜像索引，绝不裸装；索引版本须与 `pyproject` 一致（当前 **cu128** / torch 2.8 线） | `uv sync` / `pip install --index-url …cu128/` |
 | R3 | `uv.lock` 是依赖唯一事实来源，与 `pyproject` 成对变更 | 改依赖必重跑 `uv lock` |
 | R4 | 外部二进制（ffmpeg）不手动装、不进 git，统一 `setup --ffmpeg` 下载到 `tools/`（gitignore） | `video-translate setup --ffmpeg` |
 | R5 | 模型权重不进 git，**项目本地优先（零 C 盘）** 落 `<repo>/models/<name>/`；`HF_HOME` 仅回退覆盖；过完整性校验（E3） | `make setup` 拉模型到 `<repo>/models/` |
@@ -154,8 +154,18 @@ video-translate doctor      # CUDA source: venv-torch
    - `tools/<tool>/` 加入 `.gitignore`（R4）。
    - `TOOLCHAIN.md` 的探测步骤收敛为「PATH → setup 自动下载」，删掉任何「全盘搜」步骤（E2 先例）。
 3. **模型权重**：默认落 `<repo>/models/<name>/`（零 C 盘），加 ≥ 下限的完整性校验 + 自愈（E3 先例，R5）。
-4. **CUDA / 运行时库**：优先自动探测 venv 内自带库，显式 env 变量作覆盖（E4 先例）。
-5. **文档同步**：本专册 + `TOOLCHAIN.md` + `AGENTS.md` 红线表同步更新；跨平台降级路径必须写清。
+4. **语料 / 数据资产**（如 whisperx 对齐所需的 NLTK `punkt` / `punkt_tab`）：
+   落 `<repo>/models/nltk_data/`，`setup --align` 幂等下载，`doctor` 缺失即打印修复
+   命令；**代码侧在调用前主动把该目录注册进库的搜索路径**（`register_nltk_path()`
+   写入 `nltk.data.path`）。这样运行时不依赖 `NLTK_DATA` 之类的环境变量，且
+   `doctor` 与真实运行看到同一份状态 —— 否则会出现「doctor 报缺失、实际却能用」
+   的假告警（踩过）。关键性不亚于二进制：whisperx 缺语料时抛的 LookupError 会被
+   逐段回退吞掉，表现为「对齐跑完了但一个时间戳都没变」。
+5. **CUDA / 运行时库**：优先自动探测 venv 内自带库（venv-torch），显式 env 变量
+   `VT_CUDA_DIR` 作覆盖，其次才是系统 `CUDA_PATH`；每个候选项都必须**实际含有
+   CUDA DLL** 才算命中（E4 先例 —— 否则 `CUDA_PATH=F:\Program Files` 这类无关
+   目录会被当成 CUDA 目录）。
+6. **文档同步**：本专册 + `TOOLCHAIN.md` + `AGENTS.md` 红线表同步更新；跨平台降级路径必须写清。
 
 ---
 
@@ -164,9 +174,13 @@ video-translate doctor      # CUDA source: venv-torch
 ```bash
 make setup            # uv sync + 模型预拉，一次成功
 uv lock --check       # 0 退出
-video-translate doctor  # ffmpeg [OK] / CUDA source: venv-torch 或 none / 模型 [OK]
+video-translate doctor  # ffmpeg [OK] / CUDA source: venv-torch / 模型 [OK] / whisperx OK
 pytest                # 全量绿（E2/E3/E4 均有 mock 单测覆盖，不真联网/不真下 3GB）
 ```
 - E2 单测：`tests/test_toolchain.py`（下载 mock、zip 解压、`.env.local` 写入、幂等跳过）。
 - E3 单测：构造小尺寸假 `model.bin` 验证检测/自愈路径；加载失败退出码 `EXIT_MISSING_DEP(3)`。
-- E4 单测：解析顺序（显式 env 优先 / 自动探测 / 无 torch 回退 CPU）。
+- E4 单测：解析顺序（显式 `VT_CUDA_DIR` → venv-torch 自动探测 → 系统 `CUDA_PATH`）；
+  且**无关目录（不含 CUDA DLL）必须被拒绝**，系统 `CUDA_PATH` 不得抢在 venv-torch 之前。
+- 对齐（T4）：`video-translate setup --align` 幂等可重复执行；`doctor` 显示
+  `whisperx: OK`；**在没有 `NLTK_DATA` 环境变量时**对齐仍能自动定位项目内语料
+  （不出现 LookupError —— 出现即意味着语料缺失导致对齐静默失效）。

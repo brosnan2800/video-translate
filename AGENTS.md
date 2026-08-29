@@ -20,6 +20,8 @@ Read order: this file → [`TOOLCHAIN.md`](TOOLCHAIN.md) for environment setup �
 | 陷阱类别 | ❌ 严禁的错误操作 (Anti-Pattern) | 💥 致命后果 (Consequence) | ✅ 唯一正确做法 (Correct Pattern) |
 |---|---|---|---|
 | **声学时间戳** | 在断句合并、翻译或后处理中篡改/重算 `start`/`end` | 破坏声学对齐，字幕与实际人声发音错位 | 严格保留转写产生的时间戳；下游**只改文本，绝不重算时间轴**。 |
+| **强制对齐（T4）** | 误以为 `--align whisperx` 会改写文本/断句、或把对齐接到 Mac / 默认安装；更动 `transcribe_fingerprint` 让切换 `--align` 触发重转写 | 文本/断句漂移、Mac 装不上 whisperx 崩溃、golden 回归失败、GPU 重转写浪费 | 对齐 pass 本身只改 `words[].start/end`（及由词推导段边界），对齐输入输出的段数/文本/分组不变；**默认 `auto`（T4 默认化）**：CUDA + whisperx 可用即走 whisperx，Mac/未装自动降级 `none` 不崩溃（行为零变化）；显式 `--align none` 仍是历史字节级路径（golden 保护）；whisperx 仅在 `[gpu]` extra（Windows/Linux+CUDA）；对齐是**独立缓存层**，不进转写指纹（切 `--align` 不重转写）。**但下游 merge 会按更准的词间气口重新断句，最终段数可能变**（实测 40→42），见下一条。详见 [ADR-028](docs/adr/028-whisperx-alignment-pass.md) / [Spec 22](docs/specs/22-whisperx-alignment.md)。 |
+| **对齐后翻译失效（T4）** | 对齐（默认 `auto`：GPU 机器转写即走 whisperx）后不重译，直接拿旧的 `zh_segments.json` 跑 `generate` | 对齐把段边界收紧到真实词边界（去掉首尾静音），且更准的气口让 merge 改变断句 → **段数变化**，旧翻译按 index 对不上，中英错行串行（实测 40 段字幕对 42 段英文） | **只要走了对齐（GPU 机器默认即对齐），转写完成后就必须重新翻译**（至少补齐新增 index）再 `generate`；`generate` 的 `verify_align` 与 `verify` 内容 lane 会报行数/覆盖不匹配，不要绕过它。重跑 OCR 之外的一切都可复用，唯独翻译要重做。 |
 | **断点缓存** | 遇到报错或重试时执行 `rm chunk_*.json` 或删除中间缓存 | 摧毁断点续跑机制，长视频被迫全部从头重跑 | 保留所有分块缓存；若仅需重跑翻译与生成，使用 `run --skip transcribe`。 |
 | **表现层窗口** | 人为传入 `--tail 0 --min-dur 0` 试图“缩短/收紧”字幕 | 字幕在发音前一闪而过、或人未说完字幕已消失 | 保持默认值 `--tail 0.3 --min-dur 1.0`（阅读呼吸余量）；仅用 `--offset` 微调整体早出。 |
 | **剪映缓存碰撞** | 重新生成字幕时 `rm -rf` 视频输出子目录 | 剪映内部缓存记住同名文件，导致新字幕在剪映内不生效 | 严禁删除输出目录；让 `generate` 自动递增版本号（如 `_v2`、`_v3`）。 |
@@ -28,14 +30,15 @@ Read order: this file → [`TOOLCHAIN.md`](TOOLCHAIN.md) for environment setup �
 | **人声分离时长** | 用 ffmpeg/demucs 手动裁切/重采样后再喂给 Whisper，或质疑「分离后时长 ≠ 原视频」为 BUG | 字幕时间戳全局漂移，1s 错位 = 全片报废 | 分离输出**必须** `|dur(out) - dur(orig)| < 50ms`；否则 CLI 自动降级回原音频，不要手改。 |
 | **8GB GPU OOM** | 用脚本并行跑 demucs + Whisper，或在同一进程让两模型常驻显存 | RTX 3060/4060 级别必炸 CUDA OOM | CLI 已保证「demucs→释放显存→Whisper」顺序；若需脚本调用，也必须遵守「单一大模型串行」。 |
 | **人声分离缓存** | 开了 `--separate-vocals` 又手动 `rm chunk_*.json` 试图「强制重跑 Whisper 但保留 vocals.wav」 | chunk 指纹已嵌入 vsep 参数，删缓存只删一半会让 resegment/fill_gaps 找不到同路径 vocals.wav | 正常跑不用管缓存；真要清空就把输出目录的 `<base>.vocals_*.wav` 和 `chunk_*.json` 一起删，或换个 base。 |
-| **工具链查找** | 仅因 `where ffmpeg` 为空便向用户报错停摆 | 忽略了 `.env` 注入机制，造成虚假缺失报错 | 运行 `video-translate doctor`，或按 [TOOLCHAIN.md](TOOLCHAIN.md) 配置 `.env` 中的 `VT_FFMPEG_DIR`。 |
+| **工具链查找** | 仅因 `where ffmpeg` 为空便向用户报错停摆 | 忽略了 `.env` 注入机制，造成虚假缺失报错 | 运行 `uv run video-translate doctor`，或按 [TOOLCHAIN.md](TOOLCHAIN.md) 配置 `.env` 中的 `VT_FFMPEG_DIR`。 |
+| **环境定位（命令入口）** | 裸跑 `python` / `video-translate` / `make`，指望 PATH 指向项目环境 | 命中 PATH 里残留的旧全局环境（如 `F:\Python311`，缺 whisperx），`doctor` 误报未安装、反复排障 | **所有命令一律 `uv run ...`**（在项目根执行），`uv` 自动定位项目 `.venv`；开新窗口先 `cd <repo>` 再加 `uv run` 前缀。详见 [Spec 23](docs/specs/23-environment-location.md) / [ADR-029](docs/adr/029-command-entry-uv-run.md)。 |
 | **Exit Code 6** | 遇到程序退出码 6 时当成错误反复重试 `run` | 死循环卡在转写步骤，无法进入翻译 | 退出码 6 是 `[AWAITING_AGENT]` 挂起信号，表明转写已完成，等待 Agent 执行翻译。 |
 | **依赖装错环境** | 把 `demucs`/`torch` 这类重依赖放进 optional extra（`[audio]`）或只写在 `requirements.txt` 却不进 `pyproject` 顶层 `dependencies` | 默认 `pip install -e .` 不装它，依赖飘到系统 Python、venv 里 `import` 不到、`--separate-vocals` 静默降级 | **任何运行时依赖都写进 `pyproject` 顶层 `dependencies`**（不藏 extra）；装环境只用 `pip install -e .` / `uv sync` 一条命令，不依赖额外动作。详见 [TOOLCHAIN.md](TOOLCHAIN.md) §依赖与 wheel 镜像。 |
-| **CUDA wheel 装成 CPU 版** | 用 `pip install`（不带 `--index-url`）装 `torch`/`torchaudio`，或以为 `[tool.uv.sources]` 对 pip 生效 | 无代理时 pip 回退 PyPI 默认 `+cpu` wheel，`torch.cuda.is_available()`=False，GPU 加速失效 | **CUDA 版必须走镜像索引**：`uv sync`（认 `[tool.uv.sources]`，自动按平台选 CUDA/CPU wheel）或 `pip install torch --index-url https://mirrors.tuna.tsinghua.edu.cn/pytorch-wheels/cu124/`。绝不裸 `pip install torch`。详见 [TOOLCHAIN.md](TOOLCHAIN.md) §依赖与 wheel 镜像。 |
-| **镜像源靠 Agent 临选** | Agent/人工每次安装时现场拼 `--extra-index-url` 或挑代理 | 换人或换机就装不动、或装错源，不可复现 | **镜像源固化进 `pyproject` 的 `[tool.uv.index]`**（cu124→清华镜像）+ `PIP_EXTRA_INDEX_URL` 进 [TOOLCHAIN.md](TOOLCHAIN.md)；安装一律程序决定，不靠临场决策。 |
+| **CUDA wheel 装成 CPU 版** | 用 `pip install`（不带 `--index-url`）装 `torch`/`torchaudio`，或以为 `[tool.uv.sources]` 对 pip 生效 | 无代理时 pip 回退 PyPI 默认 `+cpu` wheel，`torch.cuda.is_available()`=False，GPU 加速失效 | **CUDA 版必须走镜像索引**：`uv sync`（认 `[tool.uv.sources]`，自动按平台选 CUDA/CPU wheel，无需任何手工参数）或 `pip install torch --index-url https://download.pytorch.org/whl/cu128/`（CN 无代理可换清华 `https://mirrors.tuna.tsinghua.edu.cn/pytorch-wheels/cu128/`）。绝不裸 `pip install torch`，且索引版本必须与 `pyproject` 一致（当前 **cu128** / torch 2.8 线，由 `[gpu]` extra 的 whisperx 3.8.x 决定）。详见 [TOOLCHAIN.md](TOOLCHAIN.md) §依赖与 wheel 镜像。 |
+| **镜像源靠 Agent 临选** | Agent/人工每次安装时现场拼 `--extra-index-url` 或挑代理 | 换人或换机就装不动、或装错源，不可复现 | **镜像源固化进 `pyproject` 的 `[tool.uv.index]`**（cu128 官方 PyTorch 索引，`explicit = true` 让它只服务 torch/torchaudio，不遮蔽 PyPI 上的通用包）+ `PIP_EXTRA_INDEX_URL` 进 [TOOLCHAIN.md](TOOLCHAIN.md)；安装一律程序决定，不靠临场决策。 |
 | **尾部回音幻觉** | 在笑声/欢呼/掌声等"有能量无语义"窗口后，看到新段复述上一句尾部（如真句 `give me a yogurt either way.` 后冒出 `I'm not hungry either way.`）时，手工删段或重算时间戳 | 手工删段破坏 index 对齐、重算时间戳破坏声学层；且下次重跑又复现 | 这是 Whisper 自回归固有缺陷（ADR-020）。**不要手工改**，靠 `drop_hallucination_segments` 自动拦截：段内词与前驱**逐字共享时间戳且含零时长词**（第四信号）即判回音；转写层已携带 `avg_logprob` 供第五信号。两信号已在单测覆盖，全片重跑自动生效。 |
 | **依赖与外部工具** | 加依赖只改 `pyproject` 不提交 `uv.lock`；手动下载 ffmpeg/模型塞进仓库或散落各盘 | 换机版本飘移、装成 CPU wheel、二进制垃圾散落缓存 | 一切依赖与外部资产按 [MAJOR_VERSION_PLAN.md](MAJOR_VERSION_PLAN.md) §3.2 规则 R1-R7 执行：依赖进顶层 + lockfile 成对提交；ffmpeg 由 `setup --ffmpeg` 自动下载；模型默认落项目根 `models/`（零 C 盘）不进 git。详见 [docs/TOOLING.md](docs/TOOLING.md)。 |
-| **补洞恢复段幻觉** | `fill_gaps` 漏音补洞恢复出的 `_recovered` 段（如 `Don't worry.`/`I'm a clown.`/`Hi, son.`/`Now what?`/`This is bad.`）与邻居段**时间窗口重叠**（骑在已确认音频上）或**语速物理不可能**（3 词塞进 0.16s），却因只过了文本相似度检查而溜进字幕 | 转写层 `drop_hallucination_segments` 只作用于 Whisper 原产段、在 fill_gaps **之前**运行，补洞恢复段完全绕过了它；手工改会破坏断点续跑 | `fill_gaps` 已内置 `_is_recovered_hallucination` 守卫（ADR-020 补遗/ADR-021）：恢复段与现有段重叠 >0.12s、或语速 >8wps、或 `avg_logprob`<-1.0 即丢弃；collapse 替换路径关闭重叠信号以免误杀真替换。已单测固化，**全片重跑自动生效，不要手工改**。 |
+| **补洞恢复段幻觉** | `fill_gaps` 漏音补洞恢复出的 `_recovered` 段（如 `Don't worry.`/`I'm a clown.`/`Hi, son.`/`Now what?`/`This is bad.`）与邻居段**时间窗口重叠**（骑在已确认音频上）或**语速物理不可能**（3 词塞进 0.16s），却因只过了文本相似度检查而溜进字幕 | 转写层 `drop_hallucination_segments` 只作用于 Whisper 原产段、在 fill_gaps **之前**运行，补洞恢复段完全绕过了它；手工改会破坏断点续跑 | `fill_gaps` 已内置 `_is_recovered_hallucination` 守卫（ADR-020 补遗/ADR-021）：恢复段与现有段重叠 >0.12s、或语速 >8wps、或 `no_speech_prob`>=0.6（Whisper 自判非语音，最强信号，avg_logprob 不设闸）、或 `avg_logprob`<-1.0、或**零时长词 ≥2 个**（DTW 坍缩指纹，如开头非语音能量被硬拼成 `Hubsan x4 H502E...`/`We'll be right back.`/`Thank you.` 全部被拦）即丢弃；collapse 替换路径关闭重叠信号以免误杀真替换。已单测固化，**全片重跑自动生效，不要手工改**。 |
 | **断句切点** | 看到句尾词被掐到下一条字幕（`my sister` ‖ `deidre`、`we don't` ‖ `know`）时，手工在剪映里挪词或改文本 | 破坏 index 对齐与声学时间戳；下次重跑复现 | 42 字符剪映上限必须切，但 V8 已让切点**智能回退**（ADR-022）：优先标点边界→次选 >0.3s 词间气口→贪心兜底；句首连接词孤儿（`because`）自动并右。无标点+零间隙的密集语流物理无解，等 whisperX 对齐后气口浮现。重跑自动生效。 |
 
 ---
@@ -65,22 +68,23 @@ Read order: this file → [`TOOLCHAIN.md`](TOOLCHAIN.md) for environment setup �
 
 ### Phase 0: 探测与确认 (Preflight)
 
-> **环境必须一步到位，禁止自由发挥配环境。** 绝不允许 Agent 自行把 FFmpeg / 模型 / 工具链散落缓存到各处。所有环境就绪动作统一走确定入口：
+> **环境必须一步到位，禁止自由发挥配环境。** 绝不允许 Agent 自行把 FFmpeg / 模型 / 工具链散落缓存到各处。所有环境就绪动作统一走确定入口（命令一律 `uv run`，恒定位项目 `.venv`，[Spec 23](docs/specs/23-environment-location.md)）：
 > ```bash
-> make setup                      # 一键装齐：uv sync 依赖 + 预拉 large-v3 模型（约 3GB）
-> make doctor                     # 校验：FFmpeg / CUDA·CPU / 模型缓存 全绿才继续
+> cd <repo>                       # 先进入项目根
+> uv run video-translate setup    # 一键装齐：uv sync 依赖 + 预拉 large-v3 模型（约 3GB）
+> uv run video-translate doctor   # 校验：命令入口 entry / FFmpeg / CUDA·CPU / 模型缓存 全绿才继续
 > ```
-> `make setup` 默认走 `uv sync`（`uv.lock` 固化版本，跨机可复现）；未装 uv 时自动回退 pip。若 `make setup` 因网络/代理失败，参考 [`TOOLCHAIN.md`](TOOLCHAIN.md) 配置代理与镜像，再重跑，**不要**手动到处下载或改路径。
+> `uv run video-translate setup` 默认走 `uv sync`（`uv.lock` 固化版本，跨机可复现）；未装 uv 时先按官方 installer 安装（Windows `irm https://astral.sh/uv/install.ps1 | iex`；macOS/Linux `curl -LsSf https://astral.sh/uv/install.sh | sh`），见 [TOOLCHAIN.md](TOOLCHAIN.md) §环境入口。若因网络/代理失败，参考 [`TOOLCHAIN.md`](TOOLCHAIN.md) 配置代理与镜像，再重跑，**不要**手动到处下载或改路径。
 
 1. **定位视频**：优先查找 `videos/` 目录；若为空或多文件，与用户确认目标视频。
-2. **环境自检（先 `make setup` 再 `make doctor`）**：
+2. **环境自检（先 `uv run video-translate setup` 再 `uv run video-translate doctor`）**：
    ```bash
-   make doctor
+   uv run video-translate doctor
    ```
-   检查 FFmpeg、CUDA / CPU 设备、模型缓存是否就绪。模型显示 `[MISS]` 时先跑 `make setup`（或 `video-translate setup`）预拉，**不要**去改 `.env` 假设那是模型配置。若 FFmpeg / ffprobe 显示 `[MISS]`，运行 `video-translate setup --ffmpeg` 自动下载便携版，**不要**全盘搜或手动安装（E2 已消灭「全盘搜」这一步）。
+   检查命令入口（`entry: uv-run` / `venv` 才正确）、FFmpeg、CUDA / CPU 设备、模型缓存是否就绪。模型显示 `[MISS]` 时先跑 `uv run video-translate setup` 预拉，**不要**去改 `.env` 假设那是模型配置。若 FFmpeg / ffprobe 显示 `[MISS]`，运行 `uv run video-translate setup --ffmpeg` 自动下载便携版，**不要**全盘搜或手动安装（E2 已消灭「全盘搜」这一步）。
 3. **音频画像、VAD 与人声分离确认**：
    ```bash
-   video-translate doctor --video "videos/<video.mp4>"
+   uv run video-translate doctor --video "videos/<video.mp4>"
    ```
    - 检查推荐的 VAD 模式（裸跑 / `--vad` / `--adaptive-vad`）。
    - 若提示 `vocal separation: RECOMMENDED (--separate-vocals)` 或已知视频含强 BGM/多杂音，在 Phase 1 运行时追加 `--separate-vocals`。
@@ -91,46 +95,64 @@ Read order: this file → [`TOOLCHAIN.md`](TOOLCHAIN.md) for environment setup �
 执行转写流水线（默认使用 Agent 引擎）：
 ```bash
 # 标准运行
-video-translate run "videos/<video.mp4>"
+uv run video-translate run "videos/<video.mp4>"
 
 # 强 BGM / 伴奏 / 噪音场景（经 doctor 推荐或人工判断）
-video-translate run "videos/<video.mp4>" --separate-vocals
+uv run video-translate run "videos/<video.mp4>" --separate-vocals
 ```
 - 转写采用分块可续跑设计（`chunk_N.json` 自动断点恢复）。
-- 转写 + 断句合并 + 漏音补洞完成后，生成 `<base>.translate_task.json`。
+- **强制声学对齐（T4，默认 `auto`）**：CUDA + whisperx 可用时自动跑 WhisperX 词级时间戳精修
+  （独立缓存层，不重转写；Mac/未装静默降级 `none`）。显式 `--align none` 关闭，`--align whisperx`
+  强制（不可用则告警回退）。**对齐后段边界会被收紧、merge 可能改变段数 → Phase 2 必须重译**。
+- 转写 + 断句合并 + 漏音补洞完成后，生成 `<base>.translate_task.json`（默认 `film` 风格）。
+- **翻译风格（T3 / ADR-027）**：用 `--style {film,literal,bilingual_study}` 选择翻译人设
+  与守则。`film`（默认，影视二创口语感）/`literal`（忠实直译，学术/技术/法律保真优先）/
+  `bilingual_study`（双语精读，生僻词括号注记）。多风格 `--style film,literal` 一次生成
+  多份任务文件（`<base>.film.translate_task.json` 等）。显式 `--persona`/`VT_PERSONA`
+  覆盖风格预设人设。
 - **程序主动返回 Exit Code 6 (`[AWAITING_AGENT]`) 挂起，等待 Agent 翻译。**
 
 ---
 
 ### Phase 2: Agent 翻译 (Agent-as-Engine)
 作为翻译引擎，Agent 执行以下步骤：
-1. 读取 `<base>.translate_task.json`，阅读 `full_transcript` 全局上下文、`source` 背景提示与 `persona` 设定。
-2. 逐批翻译 `to_translate` 中的每一项（遵循「信达雅 + 口语感」，保留语气情绪）。
-3. 生成 `<base>.zh_segments.json`，格式为严格的 `{"<str(index)>": "<zh>", ...}` 字典，**必须 100% 覆盖所有 index**。
+1. 读取 `<base>.translate_task.json`（或多风格下的 `<base>.<style>.translate_task.json`），
+   阅读 `full_transcript` 全局上下文、`source` 背景提示与 `persona` / `guidelines` 设定。
+2. 逐批翻译 `to_translate` 中的每一项（遵循 `persona` 与 `guidelines` 指定的风格取向，
+   默认「信达雅 + 口语感」，保留语气情绪）。
+3. 生成 `<base>.zh_segments.json`（多风格下为 `<base>.<style>.zh_segments.json`），
+   格式为严格的 `{"<str(index)>": "<zh>", ...}` 字典，**必须 100% 覆盖所有 index**。
 4. （可选）校验覆盖完整性：
    ```bash
-   python -c "from video_translate.translate import validate_zh; print(validate_zh('<base>.segments_en.json', '<base>.zh_segments.json'))"
+   uv run python -c "from video_translate.translate import validate_zh; print(validate_zh('<base>.segments_en.json', '<base>.zh_segments.json'))"
    ```
 
 ---
 
 ### Phase 3: 字幕生成 (Generate)
 ```bash
-video-translate generate \
+uv run video-translate generate \
     --segments "videos/<base>.segments_en.json" \
     --zh "videos/<base>.zh_segments.json" \
-    --outdir "videos/<base>" --base "<base>"
+    --outdir "videos" --base "<base>"
+# 多风格时，对每个风格分别生成（文件名带 .<style> 后缀）：
+uv run video-translate generate \
+    --segments "videos/<base>.segments_en.json" \
+    --zh "videos/<base>.literal.zh_segments.json" \
+    --outdir "videos" --base "<base>" --style literal
 ```
 - 自动运行 `verify_align` 索引对齐检查（防错行）。
 - 输出 4 个核心产物（`.bilingual.srt`、`.zh.srt`、`.en.srt`、`.txt`）。
 - 落地于独立的 `<base>/` 子目录，并自动处理 `_vN` 版本递增以规避剪映导入缓存。
+- `--style <name>` 会让输出文件名带 `.{style}` 后缀（如 `<base>.literal.bilingual.srt`）；
+  省略则保持默认 `<base>.bilingual.srt`（向后兼容）。
 
 ---
 
 ### Phase 4: 门禁自检与交付 (Verify & Deliver)
 运行三 Lane 统一门禁检查（[Spec 18](docs/specs/18-verify.md)）：
 ```bash
-video-translate verify \
+uv run video-translate verify \
     --segments "videos/<base>.segments_en.json" \
     --zh "videos/<base>.zh_segments.json" \
     --video "videos/<video.mp4>"
@@ -147,7 +169,7 @@ video-translate verify \
 ### 4.1 全自动无头模式 (`--engine google`)
 若无需 Agent 介入的高质量翻译：
 ```bash
-video-translate run "videos/<video.mp4>" --engine google
+uv run video-translate run "videos/<video.mp4>" --engine google
 ```
 翻译失败项将沉淀至 `<base>.agent_pending.json`。
 
@@ -155,17 +177,17 @@ video-translate run "videos/<video.mp4>" --engine google
 针对 Google 引擎未译出的段落：
 ```bash
 # 1. 生成待补任务
-video-translate backfill --pending "<base>.agent_pending.json" --out "<base>.zh_segments.json"
+uv run video-translate backfill --pending "<base>.agent_pending.json" --out "<base>.zh_segments.json"
 # 2. Agent 翻译后保存为 your_zh.json
 # 3. 回填并重新生成
-video-translate backfill --pending "<base>.agent_pending.json" --out "<base>.zh_segments.json" \
+uv run video-translate backfill --pending "<base>.agent_pending.json" --out "<base>.zh_segments.json" \
     --agent-zh your_zh.json --segments "<base>.segments_en.json" --outdir "videos/<base>" --base "<base>"
 ```
 
 ### 4.3 局部多语种重转写 (`resegment`)
 针对特定时间窗口的混杂语种修正（如预告片中夹杂的日语片段）：
 ```bash
-video-translate resegment --segments "<base>.segments_en.json" --video "<video.mp4>" \
+uv run video-translate resegment --segments "<base>.segments_en.json" --video "<video.mp4>" \
     --windows 12.0-18.5 41.0-45.0 --lang ja
 ```
 

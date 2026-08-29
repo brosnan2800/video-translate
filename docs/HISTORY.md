@@ -79,6 +79,18 @@ by unit tests replaying the real sitcom samples.
   `--vad-threshold` exposes it. Trade-off: very short opening utterances
   may be missed (e.g. "Saladin" at 1.84s). Manual cue recommended for imports.
 
+### V5 — 双轨翻译风格体系 (T3, ADR-027 / Spec 21)
+- **三轨 Persona 矩阵** `STYLE_PERSONAS`：`film`（默认，影视二创口语感，等价于历史
+  `DEFAULT_PERSONA`）/ `literal`（忠实直译，学术/技术/法律保真优先）/
+  `bilingual_study`（双语精读，生僻词括号注记）。
+- **`--style {film,literal,bilingual_study}`** 注入 `translate_task.json`（schema v2 → v3，
+  新增 `style` 字段）。优先级：CLI `--style` > `VT_STYLE` > toml `[translate].style` > 默认 `film`。
+  显式 `--persona` / `VT_PERSONA` 覆盖风格预设人设。
+- **双轨输出**：`--style film,literal` 一次生成多份任务文件
+  （`<base>.film.translate_task.json` / `<base>.literal.translate_task.json`），Agent 各译一份，
+  `generate --style <name>` 产出 `<base>.<style>.bilingual.srt` 等。默认单轨文件名向后兼容。
+- **诗歌/歌词**：归入 `film` 轨，靠 `source` 字段引导（不单列 `poetic` 预设）。
+
 ## V7 additions (quiet / low-volume & whisper video handling)
 
 Discovered 2026-08-04 on the 《母与子》上/下 clips. **No code changed** — V7 is

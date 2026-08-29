@@ -4,6 +4,8 @@
 > 创建：2026-07-31
 > 修订：2026-08-21（完成 T1 CUDA+.env 工具链隔离；引入双轨翻译风格与智能人声分离预处理；扩展独立 LLM API 与 Web 校对看板）
 > 修订：2026-08-25（对标研究 [Voice-Pro](docs/RESEARCH-voice-pro.md) 后新增 **E1-E4 环境确定性工程**为下一阶段最高优先级；固化「依赖与外部工具管理规则」§3.2；原 T3-T7 顺延）
+> 修订：2026-08-28（**T3 双轨翻译风格体系已落地**：ADR-027 + Spec 21，三轨 Persona 矩阵 + `--style` + 双轨输出，全部单测绿；**T4 WhisperX 强制声学对齐已落地**：ADR-028 + Spec 22，`--align whisperx` 词级时间戳精修，独立 pass + 独立缓存层 + 8GB 分步调度 + 优雅降级，全部单测绿）
+> 修订：2026-08-29（**T4 默认化**：`--align` 默认 `none` → `auto`，CUDA + whisperx 可用即自动 whisperx，否则降级 none；同步 AGENTS/README/Spec 22/ADR-013/references 口径）
 > 目标分支：`feat/v5-cuda-windows`
 > 当前版本：`4.0.0` $\rightarrow$ 目标版本：`5.0.0`
 
@@ -127,30 +129,38 @@ flowchart TD
 3. `.env.win.example` 移除 pyvideotrans 硬编码示例，注明「通常无需配置；仅当 venv torch/lib 缺 DLL 时手工指定」。
 **涉及文件**：`src/video_translate/toolchain.py`、`tests/test_toolchain.py`（解析顺序单测：显式 env 优先、自动探测、无 torch 回退）、`.env.win.example`、`TOOLCHAIN.md` §2.2
 **验收标准**：
-- 有 GPU + venv cu124 torch 的机器**不配** `VT_CUDA_DIR` 也能 `device=cuda`；
-- 显式 `VT_CUDA_DIR` 仍优先生效；无 torch/torch 无 DLL 时静默 CPU 降级不崩溃；
+- 有 GPU + venv **cu128** torch 的机器**不配** `VT_CUDA_DIR` 也能 `device=cuda`；
+- 探测顺序（实现）：① 显式 `VT_CUDA_DIR` / `VT_TORCH_LIB_DIR` → ② venv 内
+  `torch/lib`（自动探测，`doctor` 标注 `source: venv-torch`）→ ③ 系统 `CUDA_PATH`。
+  每个候选项都必须**实际含有 CUDA DLL** 才算命中，否则 `CUDA_PATH=F:\Program Files`
+  这类无关目录会被误当成 CUDA 目录（这正是本机踩到的坑，已加校验）；
+- 无 torch / torch 无 DLL 时静默 CPU 降级不崩溃；
 - `doctor` 正确标注来源；全量 `pytest` 绿。
 
 ---
 
-### T3 — 双轨翻译风格体系（影视意译 vs 忠实直译）【里程碑 4 / E 系列完成后启动】
+### T3 — 双轨翻译风格体系（影视意译 vs 忠实直译）【里程碑 4 / E 系列完成后启动】 ✅ DONE (2026-08-28)
 > **背景**：不同视频场景对翻译诉求完全不同——电影/美剧/脱口秀需要“口语化、接地气、短促有力、情绪饱满”；而科技演讲/公开课/财报会议则需要“术语严谨、概念忠实、保留逻辑从句”。
 **核心设计：**
 1. **预设 Persona 矩阵**：
-   - `film`（默认/影视二创）：信达雅 + 口语感，短句节奏优先，文化梗意译，限制单行字数。
+   - `film`（默认/影视二创）：信达雅 + 口语感，短句节奏优先，文化梗意译，限制单行字数。诗歌/歌词靠 `source` 字段引导（不单列 `poetic` 预设）。
    - `literal`（忠实直译）：严谨对齐原文主谓宾，保留学术/专业修饰，专有名词严格忠实。
    - `bilingual_study`（双语精读）：直译为主，生僻词/熟词生义在括号内追加注记。
 2. **CLI 与配置接入**：
-   - `--style {film,literal,bilingual_study}`（或 `VT_STYLE`），注入 `translate_task.json` 的 `persona` 与 `guidelines`。
+   - `--style {film,literal,bilingual_study}`（或 `VT_STYLE` / toml `[translate].style`），注入 `translate_task.json` 的 `persona` 与 `guidelines`（version 3，新增 `style` 字段）。
+   - 显式 `--persona`/`VT_PERSONA` 覆盖风格预设人设（用户自定义优先）。
 3. **输出多轨可选**：
    - 支持通过参数同时生成两套独立字幕（如 `<base>.film.bilingual.srt` 与 `<base>.literal.bilingual.srt`），方便创作者对比选优。
+   - 默认单轨（`film`）文件名与历史完全一致，向后兼容；双轨时 task/zh/srt 带 `.<style>` 后缀。
+**落地文档**：ADR-027（`docs/adr/027-translation-style-tracks.md`）+ Spec 21（`docs/specs/21-translation-styles.md`）；单测覆盖风格解析、task 注入、双轨命名。
 
 ---
 
-### T4 — WhisperX 强制声学对齐（修极端声学漂移）【GPU 专享】
+### T4 — WhisperX 强制声学对齐（修极端声学漂移）【GPU 专享】 ✅ DONE (2026-08-28)
 > **背景**：ADR-013 决策。在 Windows/Linux GPU 环境下，通过 wav2vec2 模型进行词级强制对齐，将词时间戳精度从 82% 提升至 96% 以上。
+> **实现**：ADR-028（实现级决策）+ Spec 22（行为契约）。转写核心 faster-whisper 1.2.1 不动，仅借用 whisperx 的 wav2vec2 对齐能力；对齐为独立 pass + 独立缓存层；8GB 显存分步调度；逐级优雅降级。
 **核心设计：**
-1. CLI 增加 `--align {none,whisperx}`（默认 `none`）。
+1. CLI 增加 `--align {auto,none,whisperx}`（**默认 `auto`**：CUDA + whisperx 可用即 whisperx，否则降级 `none`；T4 默认化，2026-08-29 修订）。
 2. 仅在 Windows/Linux 且安装了 `whisperx` 时调用；在 Mac/无该库环境下显式告警并**优雅降级回退 `none`**，绝不崩溃。
 3. 对齐只优化词级时间戳，绝不修改文本内容与断句分组。
 4. 缓存指纹中追加 `align` 维度，隔离不同对齐模式的缓存。
@@ -211,7 +221,7 @@ flowchart TD
 | # | 规则 | 反例（禁止） | 正例 |
 |---|---|---|---|
 | R1 | **运行时 Python 依赖一律写进 `pyproject` 顶层 `dependencies`**；dev-only 工具（pytest/lint）进 `[project.optional-dependencies].dev` | 把 `demucs` 藏进 `[audio]` extra 导致默认安装缺失 | demucs/torchaudio 均在顶层 |
-| R2 | **CUDA wheel 只走镜像索引，绝不裸装**：`uv sync` 认 `[tool.uv.sources]`；pip 必须显式 `--index-url` 清华 cu124 | 裸 `pip install torch` 装成 `+cpu` | `uv sync` / `pip install --index-url …/pytorch-wheels/cu124/` |
+| R2 | **CUDA wheel 只走镜像索引，绝不裸装**：`uv sync` 认 `[tool.uv.sources]`；pip 必须显式 `--index-url`，且版本与 `pyproject` 一致（当前 **cu128** / torch 2.8 线，由 `[gpu]` extra 的 whisperx 3.8.x 决定） | 裸 `pip install torch` 装成 `+cpu`；或按旧文档装 cu124 而与 lock 冲突 | `uv sync` / `pip install --index-url …/pytorch-wheels/cu128/` |
 | R3 | **`uv.lock` 是依赖唯一事实来源**：任何 `pyproject` 依赖变更，必须在同一 commit 内重跑 `uv lock` 提交（E1 落地后生效） | 改了 pyproject 不更新 lockfile，换机版本飘移 | pyproject + uv.lock 成对变更 |
 | R4 | **外部二进制（ffmpeg 等）不手动安装、不进 git**：统一由 `setup --ffmpeg` 自动下载到 `tools/`（gitignore），路径写 `.env.local` 登记 | Agent 全盘搜 ffmpeg.exe 写回协议；把 ffmpeg.exe 提交进仓库 | `video-translate setup --ffmpeg` 一步到位 |
 | R5 | **模型权重不进 git，项目本地优先（零 C 盘）**：默认落项目根 `models/<name>/`（含 `model.bin`），随项目拷贝、不读写系统用户目录；仅当项目根 `models/` 缺失时才回退 `HF_HOME`（默认 `~/.cache/huggingface` 仍可用作覆盖）；缓存必须过完整性校验（E3，下限 2GiB 自愈） | 每项目塞一份 3GB 权重进 git；把模型缓存散落 C 盘用户目录；残缺 model.bin 静默使用 | `make setup` 拉模型到 `<repo>/models/` + 完整性自愈校验 |
@@ -274,7 +284,7 @@ flowchart TD
 - **E2**：无 ffmpeg PATH 的环境 `video-translate setup --ffmpeg` 后 `doctor` 全绿；下载/解压/登记全流程单测（mock 网络）覆盖。
 - **E3**：残缺缓存（<2GB 假 model.bin）被检出并自愈重下；`run` 阶段模型加载失败输出含修复命令的指引。
 - **E4**：不配 `VT_CUDA_DIR` 时 GPU 机器自动用 venv torch/lib 命中 CUDA；显式 `VT_CUDA_DIR` 仍优先；无 GPU 静默降级 CPU；`doctor` 标注 CUDA 来源。
-- **T3**：`--style film` 与 `--style literal` 能产出对应风格的译文，支持双轨输出。
+- **T3**：`--style film` / `--style literal` / `--style bilingual_study` 分别产出对应风格译文；`--style film,literal` 双轨输出（`<base>.film.bilingual.srt` + `<base>.literal.bilingual.srt`）；默认单轨文件名向后兼容；全部单测绿。【已通过，2026-08-28】
 - **T4**：鲍德温类漂移样本时间戳误差 < 150ms；可用 `verify --video` 声学 lane 量化（ADR-012 / Spec 18）。
 - **T5**：多人视频 cue 带 `Speaker N:` 标签。
 - **T6**：`--engine llm` 支持直接调用 DeepSeek / OpenAI API 自动完成翻译与格式自愈。
@@ -289,6 +299,8 @@ flowchart TD
   - **ADR-011**：VAD 由默认开改为选开（默认关 / 裸跑）。
   - **ADR-012**：修订「时间戳是声学事实」不变量，引入独立声学参照 + `verify` 三 lane。
   - **ADR-013**：WhisperX 强制对齐（GPU 盒）引入决策（对应 T4）。
+  - **ADR-028**：T4 实现级决策（仅借用对齐不换核心 / 独立 pass + 独立缓存层 / 8GB 分步调度 / 逐段安全回退 / 依赖准入）。
+  - **Spec 22**：T4 行为契约（CLI 三级覆盖 / 缓存命名 / 降级矩阵 / 不变量 / TDD 清单）。
   - **ADR-014**：撤销 ADR-001 的 CUDA 硬编码禁令，`device`/`compute_type` 改为 `auto` 自动探测（对应 T1）。
   - **ADR-020**：尾部回音幻觉防御——第四信号（共享音频确定性指纹）+ 第五信号（Whisper 置信度字段），补 V4 双信号盲区（对应 sitcom 实战发现的 57s 回音）。
 - **研究输入**：[docs/RESEARCH-voice-pro.md](docs/RESEARCH-voice-pro.md)（2026-08-25，E 系列与 §3.2 规则的论证来源）。

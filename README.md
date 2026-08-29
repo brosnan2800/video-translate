@@ -4,9 +4,25 @@
 
 ---
 
+## 🤖 给 AI Agent 的引导（Agent Onboarding）
+
+> 你是被召唤来操作本项目的 Agent。**不要直接猜命令，先按顺序读完以下协议再动手。**
+
+1. **[`AGENTS.md`](AGENTS.md)** — 必读。规定执行协议、避坑防呆红线（声学时间戳不可改、开对齐必须重译、剪映缓存自动递增等）与确定性四阶段状态机（Preflight → Transcribe → Translate → Generate/Verify）。
+2. **[`TOOLCHAIN.md`](TOOLCHAIN.md)** — 环境搭建与 `.env` / 代理 / 镜像配置。
+3. **[`docs/TOOLING.md`](docs/TOOLING.md)** — 工具与依赖管理专册（E1 uv.lock 可复现 / E2 ffmpeg 自动下载 / E3 模型缓存校验自愈 / E4 CUDA venv 优先），新增任何外部工具或 Python 依赖都照其第 6 节清单执行。
+4. **[`docs/specs/00-overview.md`](docs/specs/00-overview.md)** — 行为总览；**[`docs/adr/`](docs/adr)** — 架构决策理由速查。
+
+**环境一律走 `uv run video-translate setup && uv run video-translate doctor`（命令统一 `uv run` 前缀，恒定位项目 `.venv`，见 [Spec 23](docs/specs/23-environment-location.md)），不要手动散落工具链、不要裸 `pip install torch`、不要改声学时间轴。** 任何依赖变更必须 `uv lock` 与 `pyproject.toml` 同 commit 提交。
+
+---
+
+---
+
 ## 🌟 核心特性 (Key Highlights)
 
 - **🎙️ 声学绝对对齐 (Acoustic-Accurate Alignment)**：严格保留 whisper 转写产生的底层时间戳，下游断句与翻译**只改文本、绝不重算时间轴**，彻底杜绝字幕音画漂移（[ADR-012](docs/adr/012-acoustic-timestamp-truth.md)）。
+- **🔧 强制声学对齐 (Forced Alignment, T4)**：**默认 `--align auto`** —— CUDA + whisperx 可用时自动用 WhisperX 的 wav2vec2 把每个词的时间戳校准到真实发音，消除快语速 / 长台词的字幕抢跑滞后；Mac / 未安装自动优雅降级 `none`（行为零变化），显式 `--align none` 可关闭（[ADR-028](docs/adr/028-whisperx-alignment-pass.md) / [Spec 22](docs/specs/22-whisperx-alignment.md)）。
 - **🤖 Agent 即引擎 (Agent-as-Engine)**：CLI 专注于声学重计算与切分，将翻译任务以结构化 JSON 抛给宿主 AI Agent（Claude / Cursor / VS Code Copilot 等）完成高质量上下文翻译，本地无需配置庞大 LLM 运行时；同时提供 `--engine google` 作为全自动无头兜底（[ADR-005](docs/adr/005-agent-as-engine.md)）。
 - **⚡ 硬件自适应与工具链隔离**：支持 NVIDIA CUDA 自动加速与 CPU/int8 平滑降级；通过 `.env` / `.env.<platform>` 自动加载 FFmpeg 与 CUDA 库，彻底解耦宿主环境与业务代码（[TOOLCHAIN.md](TOOLCHAIN.md)）。
 - **🛡️ 三维质量护栏 (Three-Lane Guardrails)**：
@@ -22,7 +38,7 @@
 ```mermaid
 flowchart TD
     Video[输入视频或音频] --> Doctor[0. doctor 环境自检与音频画像推荐 VAD]
-    Doctor --> Run[1. video-translate run 视频]
+    Doctor --> Run[1. uv run video-translate run 视频]
 
     subgraph Acoustic [声学阶段本地 CLI]
         Run --> Transcribe[faster-whisper 转写分块可续跑]
@@ -39,11 +55,11 @@ flowchart TD
     end
 
     subgraph Presentation [表现与交付阶段本地 CLI]
-        AgentTranslate --> Generate[2. video-translate generate]
+        AgentTranslate --> Generate[2. uv run video-translate generate]
         Generate --> AlignCheck[自动校验 zh/en 索引对齐]
         Generate --> Render[输出带 offset/tail 保护的双语 SRT 与 TXT]
         Render --> VersionDir[落地防剪映缓存失效子目录 base_vN]
-        VersionDir --> Verify[3. video-translate verify 门禁校验]
+        VersionDir --> Verify[3. uv run video-translate verify 门禁校验]
     end
 ```
 
@@ -53,17 +69,19 @@ flowchart TD
 
 ### 0. 先决条件 (Prerequisites)
 - **Python >= 3.10**
-- **推荐安装 [uv](https://docs.astral.sh/uv/)**：`make setup` 默认走 `uv sync`（由 `uv.lock` 固化依赖版本，跨机器可复现）。未装 uv 时自动回退到 `pip install -e .`。
-- **FFmpeg / ffprobe**：`make setup` 之后若 `doctor` 报 ffmpeg 缺失，运行 `video-translate setup --ffmpeg` 即可**自动下载便携版**到 `tools/`（无需手动安装）。
+- **安装 [uv](https://docs.astral.sh/uv/)**（一次性引导器；Windows `irm https://astral.sh/uv/install.ps1 | iex`，macOS/Linux `curl -LsSf https://astral.sh/uv/install.sh | sh`）：`uv run video-translate setup` 默认走 `uv sync`（由 `uv.lock` 固化依赖版本，跨机器可复现）。
+- **命令入口**：所有命令在项目根执行并统一加 `uv run` 前缀（`uv run video-translate ...` / `uv run python ...`），`uv` 自动定位项目 `.venv`，不依赖 PATH 里的系统 Python（[Spec 23](docs/specs/23-environment-location.md)）。
+- **FFmpeg / ffprobe**：`uv run video-translate setup` 之后若 `doctor` 报 ffmpeg 缺失，运行 `uv run video-translate setup --ffmpeg` 即可**自动下载便携版**到 `tools/`（无需手动安装）。
 - Whisper 模型权重（约 3GB）会在下一步**自动下载**，无需手动获取。
 
 ### 1. 一键安装（依赖 + 模型）
 ```bash
-make setup
+cd <repo>
+uv run video-translate setup
 ```
-该命令一次性完成：通过 `uv sync`（或 pip 回退）安装全部依赖、并**自动预拉 `large-v3` 模型权重**到项目根 `models/large-v3/`（零 C 盘，随项目拷贝）。无需手动配置模型路径。
+该命令一次性完成：通过 `uv sync` 安装全部依赖、并**自动预拉 `large-v3` 模型权重**到项目根 `models/large-v3/`（零 C 盘，随项目拷贝）。无需手动配置模型路径。
 
-> 若你的网络需要代理/镜像，请先参考 [TOOLCHAIN.md](TOOLCHAIN.md) 配置代理环境变量，再重跑 `make setup`。
+> 若你的网络需要代理/镜像，请先参考 [TOOLCHAIN.md](TOOLCHAIN.md) 配置代理环境变量，再重跑 `uv run video-translate setup`。
 
 ### 2. 配置本地工具链（FFmpeg / CUDA，可选）
 若 FFmpeg / CUDA 不在系统 PATH 中，根据操作系统复制对应的环境模板（详细说明见 [TOOLCHAIN.md](TOOLCHAIN.md)）：
@@ -75,7 +93,7 @@ cp .env.mac.example .env.mac
 # Linux
 cp .env.linux.example .env.linux
 ```
-在 `.env.win` 中配置你本地的工具路径（**通常留空即可**——CUDA 由 venv 内 torch 自动探测、FFmpeg 可由 `video-translate setup --ffmpeg` 自动下载；仅覆盖时填写）：
+在 `.env.win` 中配置你本地的工具路径（**通常留空即可**——CUDA 由 venv 内 torch 自动探测、FFmpeg 可由 `uv run video-translate setup --ffmpeg` 自动下载；仅覆盖时填写）：
 ```dotenv
 VT_FFMPEG_DIR=
 VT_CUDA_DIR=
@@ -83,47 +101,51 @@ VT_CUDA_DIR=
 
 ### 3. 环境自检 (Doctor)
 ```bash
-make doctor
+uv run video-translate doctor
 ```
-确保 `ffmpeg`、`ffprobe` 和模型缓存处于 `[OK]` 状态。若模型显示 `[MISS]`，重跑 `make setup` 即可（不要手动改 `.env` 假设那是模型配置）。
+确保命令入口（`entry: uv-run` / `venv` 才正确）、`ffmpeg`、`ffprobe` 和模型缓存处于 `[OK]` 状态。若模型显示 `[MISS]`，重跑 `uv run video-translate setup` 即可（不要手动改 `.env` 假设那是模型配置）。
 
 ### 4. 运行完整管线
 
 #### 模式 A：Agent 引擎模式（推荐，默认）
 ```bash
-# 1. 运行转写并生成翻译任务
-video-translate run "videos/example.mp4"
+# 1. 运行转写并生成翻译任务（默认 film 影视口语风格；可加 --style 切换）
+uv run video-translate run "videos/example.mp4" --style film
+# 学术/技术/法律内容如需保真，用 --style literal；双语精读用 --style bilingual_study
+# 双轨对比：--style film,literal 一次生成两套任务文件
 # 程序转写完成后会返回 Exit Code 6 挂起，并输出 videos/example.translate_task.json
 
 # 2. AI Agent（或人工）阅读 task 文件后，生成 videos/example.zh_segments.json
 
 # 3. 生成双语字幕与文本文件
-video-translate generate --segments "videos/example.segments_en.json" --zh "videos/example.zh_segments.json" --outdir "videos/example" --base "example"
+uv run video-translate generate --segments "videos/example.segments_en.json" --zh "videos/example.zh_segments.json" --outdir "videos" --base "example"
 
 # 4. 运行质量自检门禁
-video-translate verify --segments "videos/example.segments_en.json" --zh "videos/example.zh_segments.json" --video "videos/example.mp4"
+uv run video-translate verify --segments "videos/example.segments_en.json" --zh "videos/example.zh_segments.json" --video "videos/example.mp4"
 ```
 
 #### 模式 B：Google 翻译无头模式（全自动）
 ```bash
-video-translate run "videos/example.mp4" --engine google
+uv run video-translate run "videos/example.mp4" --engine google
 ```
 
 ---
 
 ## 🛠️ CLI 命令与参数速查 (CLI Reference)
 
+> 所有命令均在项目根执行，统一 `uv run` 前缀（恒定位项目 `.venv`，Spec 23）。
+
 | 命令 (Subcommand) | 作用 | 核心参数示例 |
 |---|---|---|
-| `doctor` | 检查环境依赖、GPU 状态，分析视频音频画像推荐 VAD | `video-translate doctor --video "videos/sample.mp4"` |
-| `run` | 一站式执行流水线（转写 $\rightarrow$ 任务生成 $\rightarrow$ 生成字幕） | `video-translate run "videos/sample.mp4" [--vad] [--adaptive-vad]` |
-| `transcribe` | 仅执行音频抽取、Whisper 转写、合并断句与漏音补洞 | `video-translate transcribe "videos/sample.mp4"` |
-| `translate` | 执行翻译任务（Agent 模式下生成 task，Google 模式下直接调用） | `video-translate translate --segments "...segments_en.json" --out "...zh_segments.json"` |
-| `generate` | 将中英文合并生成 4 个产物，自动防剪映同名缓存碰撞 | `video-translate generate --segments "...segments_en.json" --zh "...zh_segments.json"` |
-| `verify` | 运行声学、内容、表现三维度门禁校验与语义回读 | `video-translate verify --segments "...segments_en.json" --zh "...zh_segments.json" --video "...mp4"` |
-| `backfill` | 针对 Google 模式下失败的段落进行回填补录 | `video-translate backfill --pending "...agent_pending.json" --out "...zh_segments.json"` |
-| `resegment` | 对特定时间窗口强制重转写指定语言（如修复混合语种） | `video-translate resegment --segments "...segments_en.json" --video "...mp4" --windows 12.0-18.5 --lang ja` |
-| `setup` | 检查并按需下载 faster-whisper `large-v3` 模型 | `video-translate setup [--model large-v3]` |
+| `doctor` | 检查命令入口、环境依赖、GPU 状态，分析视频音频画像推荐 VAD | `uv run video-translate doctor --video "videos/sample.mp4"` |
+| `run` | 一站式执行流水线（转写 $\rightarrow$ 任务生成 $\rightarrow$ 生成字幕） | `uv run video-translate run "videos/sample.mp4" [--vad] [--adaptive-vad] [--style film\|literal\|bilingual_study] [--align auto\|none\|whisperx]`（默认 `auto`：GPU 走 whisperx） |
+| `transcribe` | 仅执行音频抽取、Whisper 转写、合并断句与漏音补洞 | `uv run video-translate transcribe "videos/sample.mp4"` |
+| `translate` | 执行翻译任务（Agent 模式下生成 task，Google 模式下直接调用） | `uv run video-translate translate --segments "...segments_en.json" --out "...zh_segments.json"` |
+| `generate` | 将中英文合并生成 4 个产物，自动防剪映同名缓存碰撞 | `uv run video-translate generate --segments "...segments_en.json" --zh "...zh_segments.json"` |
+| `verify` | 运行声学、内容、表现三维度门禁校验与语义回读 | `uv run video-translate verify --segments "...segments_en.json" --zh "...zh_segments.json" --video "...mp4"` |
+| `backfill` | 针对 Google 模式下失败的段落进行回填补录 | `uv run video-translate backfill --pending "...agent_pending.json" --out "...zh_segments.json"` |
+| `resegment` | 对特定时间窗口强制重转写指定语言（如修复混合语种） | `uv run video-translate resegment --segments "...segments_en.json" --video "...mp4" --windows 12.0-18.5 --lang ja` |
+| `setup` | 检查并按需下载 faster-whisper `large-v3` 模型 | `uv run video-translate setup [--model large-v3]` |
 
 ---
 
@@ -146,7 +168,7 @@ CLI 参数 > 系统环境变量 / .env.local > .env.<platform> > .env > .video-t
 | `VT_ENGINE` | `engine` | `agent` | 翻译引擎：`agent` (任务分发) 或 `google` (无头模式) |
 | `VT_PROXY` | `proxy` | `None` | HTTP 代理地址（仅 Google 引擎与模型下载需用，SOCKS 不支持） |
 | `HF_ENDPOINT` | - | `None` | 国内 HuggingFace 镜像源（如 `https://hf-mirror.com`） |
-| `PIP_EXTRA_INDEX_URL` | - | `None` | 国内 PyTorch wheel 镜像（CN 无代理安装用，如 `https://mirrors.tuna.tsinghua.edu.cn/pytorch-wheels/cu124/`；`uv sync` 已内置，pip 需手动设） |
+| `PIP_EXTRA_INDEX_URL` | - | `None` | 国内 PyTorch wheel 镜像（CN 无代理安装用，如 `https://mirrors.tuna.tsinghua.edu.cn/pytorch-wheels/cu128/`；版本须与 `pyproject` 的 cu128 一致。`uv sync` 已内置，pip 需手动设） |
 
 ---
 

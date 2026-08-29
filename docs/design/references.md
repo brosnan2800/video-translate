@@ -106,7 +106,7 @@
   零新依赖哲学要求保住 golden 回归。
 - **但真正的 WhisperX 强制对齐（~96% 精度）并未被永久拒绝——是 GPU 盒专用、
   延后落地的路径**（ADR-013，对应 MAJOR_VERSION_PLAN **T4**；ADR-013 内部记作 T3，
-  本文统一用 T4）：`--align {none,whisperx}` 默认 `none`，
+  本文统一用 T4）：`--align {auto,none,whisperx}` 默认 `auto`（T4 默认化：GPU 即 whisperx），
   仅 `[windows]` extra，对齐只润词级/显示时间戳、不改段落语义；显式请求但库
   不可用（典型 Mac）时告警并自动回退 `none`。参考关系从"借鉴思想"升级为
   "**未来在 GPU 路径真正采用其算法**"。

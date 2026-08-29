@@ -14,7 +14,7 @@
 
 | 层 | 机制 | 谁判断 |
 |---|---|---|
-| **① 依赖 wheel 层** | `pyproject` 的 `[[tool.uv.sources]]` 平台 marker：Windows/Linux → CUDA(cu124) wheel（官方 PyTorch 索引）；macOS → CPU wheel（官方源）。`uv.lock` 为**全平台统一 lockfile**（内含各平台版本+hash），`uv sync` 按当前机器自动取 | uv / pip（按 marker） |
+| **① 依赖 wheel 层** | `pyproject` 的 `[[tool.uv.sources]]` 平台 marker：Windows/Linux → CUDA(**cu128**) wheel（官方 PyTorch 索引，torch 2.8 线 —— 由 `[gpu]` extra 的 whisperx 3.8.x 决定，见 ADR-028）；macOS → CPU wheel（官方源）。`uv.lock` 为**全平台统一 lockfile**（内含各平台版本+hash），`uv sync` 按当前机器自动取 | uv / pip（按 marker） |
 | **② 环境变量层** | `.env`（全平台基础）→ `.env.win` / `.env.mac` / `.env.linux`（按 `sys.platform` 自动选）→ `.env.local`（单机覆盖） | `toolchain.py::get_platform_env_filename()` |
 | **③ 运行设备层** | `VT_DEVICE=auto` → 有 NVIDIA 则 `cuda+int8_float16`，否则 `cpu+int8` 平滑降级（ADR-014）；8GB 显存机器强制 demucs→释放→Whisper 串行 | `transcribe.py::resolve_device()` |
 
@@ -30,6 +30,7 @@
 |---|---|---|---|
 | 运行时（生产） | `pyproject` 顶层 `[project.dependencies]` | `make setup` / `uv sync` / `pip install -e .` | 所有用户 |
 | 开发依赖 | `[project.optional-dependencies].dev`（pytest 等） | `make install-dev` / `pip install -e ".[dev]"` | 贡献者/跑测试 |
+| GPU 对齐（T4） | `[project.optional-dependencies].gpu`（whisperx，仅 Windows/Linux+CUDA） | `uv sync --extra gpu`（macOS 自动排除，零新依赖） | GPU 用户（`--align` 默认 `auto`，装好后自动启用 whisperx） |
 
 **形态维度**：当前「源码即产品」——用户是 Agent + 开发者，同一台机器同一 `.venv`，dev 与 prod 靠下面的目录隔离而非独立部署；传统打包分发（PyInstaller 单 exe，见 `MAJOR_VERSION_PLAN.md` §5）为远期规划，启动前无需强分离。
 
@@ -82,8 +83,9 @@ CLI 参数 / 系统运行时 os.environ  >  .env.local (本地私有)  >  .env.<
 - `HF_ENDPOINT`：HuggingFace 镜像源（如 `https://hf-mirror.com`）。
 - `PIP_EXTRA_INDEX_URL`：PyTorch wheel 镜像（`uv sync` 已通过 `pyproject.toml` 的
   `[[tool.uv.index]]` + `[[tool.uv.sources]]` 按平台自动选源，无需手动设；仅当用 `pip`
-  兜底安装时才需设此环境变量，CUDA 12.4 例：
-  `https://download.pytorch.org/whl/cu124/`）。
+  兜底安装时才需设此环境变量，CUDA 12.8 例（与 `pyproject` 的 cu128 保持一致）：
+  `https://download.pytorch.org/whl/cu128/`；CN 无代理可用清华
+  `https://mirrors.tuna.tsinghua.edu.cn/pytorch-wheels/cu128/`）。
 - `VT_DEVICE`：计算设备（`auto` / `cuda` / `cpu`）。
 - `VT_COMPUTE_TYPE`：量化类型（`auto` / `int8_float16` / `int8` / `float16`）。
 - `VT_ENGINE`：翻译引擎（默认 `agent`，可选 `google`）。
@@ -238,8 +240,8 @@ video-translate verify --segments videos/example.segments_en.json --zh videos/ex
 本项目用 CTranslate2 后端跑 faster-whisper，`device=auto` 在本机（RTX 3070 Ti,
 CUDA 12.x）会命中 GPU。**E4 后 CUDA 库目录解析顺序（自动，无需手动注入 PATH）**：
 
-1. **venv 内 `torch/lib`** —— `uv sync` 装的 cu124 wheel 自带完整 CUDA 运行时
-   （cublas/cudnn），自动探测，`doctor` 标注 `venv-torch`；
+1. **venv 内 `torch/lib`** —— `uv sync` 装的 cu128 wheel（torch 2.8 线）自带完整 CUDA
+   运行时（cublas/cudnn），自动探测，`doctor` 标注 `venv-torch`；
 2. **`VT_CUDA_DIR` / `VT_TORCH_LIB_DIR`** —— 显式覆盖（最高优先级，仅 venv 内
    缺 DLL 的特殊场合手填）；
 3. 都没有 → **静默 CPU 降级**（`--device cpu --compute-type int8`），不崩溃。
@@ -300,18 +302,21 @@ cd f:\workbuddy\github\video-translate
 
 ### 规则 2：CUDA wheel 必须走镜像索引，绝不裸装
 - ✅ **首选 `make setup` / `uv sync`**：认 `pyproject` 的 `[[tool.uv.sources]]`，按平台 marker 自动
-  选 wheel（Windows/Linux→官方 `cu124`，macOS→官方 `cpu`）。
-- ✅ **用 pip 兜底时**必须显式指定索引（pip 不读 `[tool.uv.*]`）：
+  选 wheel（Windows/Linux→官方 `cu128`，macOS→官方 `cpu`）。
+- ✅ **用 pip 兜底时**必须显式指定索引（pip 不读 `[tool.uv.*]`，版本须与 `pyproject` 一致）：
   ```powershell
-  $env:PIP_EXTRA_INDEX_URL = "https://download.pytorch.org/whl/cu124/"
+  $env:PIP_EXTRA_INDEX_URL = "https://download.pytorch.org/whl/cu128/"
   pip install -e .
   # 或重装 torch/torchaudio 时强制走 CUDA 源：
-  pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124/
+  pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128/
   ```
 - ❌ 禁止裸 `pip install torch`（无代理时回退 PyPI 默认 `+cpu` wheel，GPU 失效）。
 
 ### 规则 3：镜像源固化进项目配置，不靠 Agent 临选
-- CUDA 索引已写入 `pyproject` 的 `[[tool.uv.index]]`（cu124→官方 PyTorch 索引），`uv sync` 自动生效。
+- CUDA 索引已写入 `pyproject` 的 `[[tool.uv.index]]`（**cu128** 官方 PyTorch 索引），`uv sync` 自动生效。
+  两个 PyTorch 索引都标了 `explicit = true`：它们只服务 `[[tool.uv.sources]]` 里点名的
+  torch/torchaudio，不会用陈旧版本遮蔽 PyPI 上的通用包（否则 tqdm 之类会被锁死在
+  cu128 索引里那个过低的版本上，导致解析无解）。
 - `PIP_EXTRA_INDEX_URL` 作为 pip 用户的兜底，写在此文件 §镜像环境变量段。
 - 安装一律"程序/配置决定"，任何 Agent/人工都不应在安装时现场拼镜像或挑代理。
 
@@ -319,7 +324,7 @@ cd f:\workbuddy\github\video-translate
 ```powershell
 . .venv\Scripts\Activate.ps1
 python -c "import torch, demucs; print(torch.__version__, torch.cuda.is_available())"
-# 期望：版本带 +cu124（或 cu12x），cuda.is_available() == True（有卡机器）
+# 期望：版本形如 2.8.0+cu128，cuda.is_available() == True（有卡机器）
 ```
 
 ---
