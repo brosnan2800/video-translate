@@ -91,7 +91,7 @@ flowchart TD
 **动作清单**：
 1. 在仓库根执行 `uv lock` 生成 `uv.lock` 并提交（确认 `.gitignore` 未排除它）。
 2. `Makefile` 的 `setup` 目标改为 `uv sync` 优先（检测 `uv` 不存在时打印一条安装指引并回退 `pip install -e .`）。
-3. `TOOLCHAIN.md` §3.1 与 `README.md` Quickstart 安装口径统一为：**uv sync 为标准路径，pip 为兜底**；`pyproject` 任何依赖变更后必须重跑 `uv lock` 并同 commit 提交。
+3. `TOOLCHAIN.md` §2.5 与 `README.md` Quickstart 安装口径统一为：**uv sync 为标准路径，pip 为兜底**；`pyproject` 任何依赖变更后必须重跑 `uv lock` 并同 commit 提交。
 **涉及文件**：`uv.lock`（新增）、`Makefile`、`TOOLCHAIN.md`、`README.md`
 **验收标准**：
 - 新 clone 目录下 `make setup` 一次成功（uv 路径），`uv lock --check` 通过；
@@ -218,7 +218,7 @@ flowchart TD
 
 ### 3.2 依赖与外部工具管理规则（R1-R7，长期固化）
 
-> 本规则自 2026-08-25 起生效，约束**此后所有新增工具、依赖与二进制资产**。来源：既有红线（AGENTS.md §1 / TOOLCHAIN.md §3.1）+ Voice-Pro 对标研究。执行模型在动任何依赖前必须逐条对照。
+> 本规则自 2026-08-25 起生效，约束**此后所有新增工具、依赖与二进制资产**。来源：既有红线（AGENTS.md §1 / TOOLCHAIN.md §2.5）+ Voice-Pro 对标研究。执行模型在动任何依赖前必须逐条对照。
 
 | # | 规则 | 反例（禁止） | 正例 |
 |---|---|---|---|
@@ -306,5 +306,5 @@ flowchart TD
   - **ADR-014**：撤销 ADR-001 的 CUDA 硬编码禁令，`device`/`compute_type` 改为 `auto` 自动探测（对应 T1）。
   - **ADR-020**：尾部回音幻觉防御——第四信号（共享音频确定性指纹）+ 第五信号（Whisper 置信度字段），补 V4 双信号盲区（对应 sitcom 实战发现的 57s 回音）。
 - **研究输入**：[docs/RESEARCH-voice-pro.md](docs/RESEARCH-voice-pro.md)（2026-08-25，E 系列与 §3.2 规则的论证来源）。
-- **依赖规则**：§3.2 R1-R7 与 [TOOLCHAIN.md](TOOLCHAIN.md) §3.1、[AGENTS.md](AGENTS.md) §1 红线表三处互为引用，修订时须三处同步。
+- **依赖规则**：§3.2 R1-R7 与 [TOOLCHAIN.md](TOOLCHAIN.md) §2.5、[AGENTS.md](AGENTS.md) §1 红线表三处互为引用，修订时须三处同步。
 - 本计划文档（`MAJOR_VERSION_PLAN.md`）随仓库走，作为后续任务开发的唯一事实来源。

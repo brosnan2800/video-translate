@@ -2,7 +2,7 @@
 
 - **Status**: Accepted（已落地，E1）
 - **Date**: 2026-08-25
-- **关联**: `MAJOR_VERSION_PLAN.md` §3.2 R1-R7、E1、`TOOLCHAIN.md` §3.1、`docs/TOOLING.md` §1、ADR-014（CUDA wheel 依赖镜像索引）
+- **关联**: `MAJOR_VERSION_PLAN.md` §3.2 R1-R7、E1、`TOOLCHAIN.md` §2.5、`docs/TOOLING.md` §1、ADR-014（CUDA wheel 依赖镜像索引）
 - **落地**: `uv.lock`（已提交）、`Makefile setup` 主路径 `uv sync`（pip 兜底）、`pyproject.toml` `[tool.uv.index]` / `[tool.uv.sources]`
 
 ## 背景

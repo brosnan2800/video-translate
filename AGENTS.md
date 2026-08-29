@@ -74,7 +74,7 @@ Read order: this file → [`TOOLCHAIN.md`](TOOLCHAIN.md) for environment setup �
 > uv run video-translate setup    # 一键装齐：uv sync 依赖 + 预拉 large-v3 模型（约 3GB）
 > uv run video-translate doctor   # 校验：命令入口 entry / FFmpeg / CUDA·CPU / 模型缓存 全绿才继续
 > ```
-> `uv run video-translate setup` 默认走 `uv sync`（`uv.lock` 固化版本，跨机可复现）；未装 uv 时先按官方 installer 安装（Windows `irm https://astral.sh/uv/install.ps1 | iex`；macOS/Linux `curl -LsSf https://astral.sh/uv/install.sh | sh`），见 [TOOLCHAIN.md](TOOLCHAIN.md) §环境入口。若因网络/代理失败，参考 [`TOOLCHAIN.md`](TOOLCHAIN.md) 配置代理与镜像，再重跑，**不要**手动到处下载或改路径。
+> `uv run video-translate setup` 默认走 `uv sync`（`uv.lock` 固化版本，跨机可复现）；未装 uv 时先按官方 installer 安装（Windows `irm https://astral.sh/uv/install.ps1 | iex`；macOS/Linux `curl -LsSf https://astral.sh/uv/install.sh | sh`），见 [TOOLCHAIN.md](TOOLCHAIN.md) §1.3。若因网络/代理失败，参考 [`TOOLCHAIN.md`](TOOLCHAIN.md) 配置代理与镜像，再重跑，**不要**手动到处下载或改路径。
 
 1. **定位视频**：优先查找 `videos/` 目录；若为空或多文件，与用户确认目标视频。
 2. **环境自检（先 `uv run video-translate setup` 再 `uv run video-translate doctor`）**：

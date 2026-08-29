@@ -35,7 +35,7 @@ _DEMUCS_AVAILABLE_CACHE: bool | None = None
 # Demucs downloads its weights via torch.hub, which honors TORCH_HOME. We point
 # TORCH_HOME at <repo>/models/torch so the weight NEVER lands in the user's
 # C:\Users\...\ cache (project tooling rule: no artifacts in the system drive's
-# user dir). See TOOLCHAIN.md §4.
+# user dir). See TOOLCHAIN.md §6.
 _REPO_ROOT = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 )

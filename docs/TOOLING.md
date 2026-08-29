@@ -37,7 +37,7 @@
 | lockfile | `uv.lock`（仓库根，已提交，不 gitignore） | `uv` 生成；任何 `pyproject` 依赖变更必须同 commit 重跑 `uv lock` |
 | 安装主路径 | `Makefile` 的 `setup` 目标 = `uv sync --extra dev`（缺 dev 时回退 `uv sync`） | 未装 `uv` 时自动回退 `pip install -e .` 并打印安装指引 |
 | 镜像索引 | `pyproject.toml` 的 `[tool.uv.index]`（清华 cu124）+ `[tool.uv.sources]`（按平台选 wheel） | CUDA wheel 只走镜像，绝不裸装（R2） |
-| 文档口径 | `TOOLCHAIN.md` §3.1 + `README.md` Quickstart | 统一为「uv sync 标准、pip 兜底」 |
+| 文档口径 | `TOOLCHAIN.md` §2.5 + `README.md` Quickstart | 统一为「uv sync 标准、pip 兜底」 |
 
 ### 1.3 依赖变更标准动作（R1 + R3）
 ```bash

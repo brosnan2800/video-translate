@@ -42,10 +42,10 @@ flowchart TD
     Doctor --> Run[1. uv run video-translate run 视频]
 
     subgraph Acoustic [声学阶段本地 CLI]
-        Run --> VocalSep[可选 人声分离 demucs --separate-vocals 抑制 BGM 哄笑噪声]
+        Run --> VocalSep["可选 人声分离 demucs --separate-vocals 抑制 BGM 哄笑噪声"]
         VocalSep --> Transcribe[faster-whisper 转写分块可续跑]
-        Transcribe --> Align[WhisperX 词级时间戳精修 T4 默认 auto GPU 可用时启用]
-        Align --> Merge[断句合并 幻觉过滤 漂移吸附 智能切点回退 V8]
+        Transcribe --> WhisperX["WhisperX 词级强制对齐 · T4 默认 auto · GPU 可用时启用"]
+        WhisperX --> Merge[断句合并 幻觉过滤 漂移吸附 智能切点回退 V8]
         Merge --> FillGaps[fill_gaps 漏音补洞自检]
         FillGaps --> TaskOut[输出 translate_task.json]
     end

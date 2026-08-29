@@ -40,7 +40,7 @@ setup:
 		uv sync --extra dev || uv sync; \
 		uv run python -m video_translate.cli setup; \
 	else \
-		echo "[setup] uv not found — run setup manually with the venv python (see TOOLCHAIN.md §3.1):"; \
+		echo "[setup] uv not found — run setup manually with the venv python (see TOOLCHAIN.md §2.5):"; \
 		echo "        .venv/Scripts/python.exe -m video_translate.cli setup"; \
 	fi
 

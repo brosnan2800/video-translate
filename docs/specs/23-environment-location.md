@@ -2,7 +2,7 @@
 
 - 状态: 批准（实现）
 - 日期: 2026-08-29
-- 关联: ADR-029、Spec 20（环境就绪）、TOOLCHAIN.md §入口、AGENTS.md Phase 0
+- 关联: ADR-029、Spec 20（环境就绪）、TOOLCHAIN.md §1.3、AGENTS.md Phase 0
 - 修复对象: 「环境定位漂移」——裸 `python` / `video-translate` / `make` 命中
   PATH 里残留的旧全局环境（如 `F:\Python311`，缺 whisperx），而非项目 `.venv`
 
