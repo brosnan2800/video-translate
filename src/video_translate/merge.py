@@ -27,6 +27,15 @@ DEFAULT_SPLIT_GAP = 1.0    # seconds, intra-segment silence that triggers a spli
 # are also tiny (few words), get rejoined into their left neighbor.
 DEFAULT_MIN_CUE_DUR = 1.0  # seconds
 DEFAULT_SHORT_CUE_WORDS = 3
+# V8 (ADR-022): smart break point — an inter-word pause must exceed this to be
+# considered a speaker's breath worth cutting at (sub-gap; the >1s ones were
+# already split by _split_by_gap before _split_by_length ever runs).
+DEFAULT_SMART_PAUSE = 0.3  # seconds
+# V8 (ADR-022): leading-orphan rejoin — a <=2-word fragment with no sentence
+# punctuation, sitting this close to its right neighbour, is a leading
+# connective ("because", "So,") that belongs to the NEXT line, not a standalone
+# cue. Gaps beyond this mean the fragment is genuinely independent.
+DEFAULT_LEADING_ORPHAN_GAP = 1.5  # seconds
 # V6 (B4): a run of at most this many words, separated from the rest of its own
 # sentence by at least DEFAULT_DRIFT_GAP seconds, is treated as word-timestamp
 # drift rather than a real pause. See snap_drifted_words.
@@ -61,6 +70,28 @@ _TOKEN_RE = re.compile(r"[a-z0-9']+")
 # share an n-gram with, so signals 1+2 never fire. The independent silencedetect
 # reference is the only thing that catches it. Silence == no speech, so dropping
 # is safe; it only triggers when `silence_intervals` is supplied.
+#
+# ADR-020 (V5) adds a FOURTH and FIFTH signal to catch the "tail-echo" failure
+# mode the dual signal (signals 1+2) misses:
+#   Observed in the wild (sitcom, laughter/applause bed): whisper re-emits the tail
+#   of the PREVIOUS real sentence as a new segment, e.g. real "give me a yogurt
+#   either way." followed by phantom "I'm not hungry either way." The DTW aligner
+#   COLLAPSES the phantom tokens onto the neighbor's word boundaries — partly as
+#   zero-duration (start==end) BUT partly by RE-USING the neighbor's timestamps
+#   (the "either way" tail overlaps verbatim). That dilution means:
+#     - collapse ratio < 50% (some tokens DID get a real, borrowed timestamp)
+#     - shared n-gram < 3 words ("either way" is only 2 tokens)
+#   so signals 1+2 both fall just short. The two new signals:
+#   4. audio-sharing echo (DETERMINISTIC): the phantom segment's words overlap a
+#      neighbor's word intervals heavily (>=50%) AND it contains >=1 zero-duration
+#      word. This is the geometric fingerprint of DTW collapse onto a neighbor.
+#      No probability threshold, so it cannot false-positive on genuine
+#      overlapping talk (those have no zero-duration words).
+#   5. low acoustic confidence: whisper's own per-segment avg_logprob is low
+#      (gated by no_speech_prob). Fields are carried from transcribe.py (ADR-020).
+#      avg_logprob is the reliable half — laughter/applause has energy so
+#      no_speech_prob alone is unreliable; we only drop when avg_logprob is low
+#      AND (no_speech_prob is missing OR high enough).
 
 
 def _tokens(text: str) -> list[str]:
@@ -95,6 +126,52 @@ def _collapse_ratio(seg: dict[str, Any]) -> float:
     return zero / len(words)
 
 
+def _is_time_nested(seg: dict[str, Any], neighbor: dict[str, Any], eps: float = 0.1) -> bool:
+    """V5 / ADR-020 fourth signal (deterministic echo fingerprint).
+
+    A tail-echo hallucination's tokens are DTW-aligned onto the *real* neighbor
+    segment's audio, so the echo's whole time window is physically **contained
+    within** the neighbor's window (it "rides on" the real speech). Genuine
+    adjacent cues never nest — at most their boundaries blur by a few hundred ms,
+    but the later cue still starts *after* the earlier one ends.
+
+    This containment test is far more robust than a per-word overlap ratio, which
+    false-fires on ordinary boundary blur (e.g. cue A ends at 136.74, cue B starts
+    at 136.92, and B's first word interval crosses into B's *next* neighbor whose
+    "like" anchor spans B's start).
+    """
+    ss, se = float(seg.get("start", 0.0)), float(seg.get("end", 0.0))
+    ns, ne = float(neighbor.get("start", 0.0)), float(neighbor.get("end", 0.0))
+    return ss >= ns - eps and se <= ne + eps
+
+
+def _has_zero_dur(seg: dict[str, Any]) -> bool:
+    return any(w.get("start", 0) >= w.get("end", 0) for w in (seg.get("words") or []))
+
+
+def _low_confidence(seg: dict[str, Any],
+                    avg_logprob_thr: float,
+                    no_speech_thr: float) -> bool:
+    """V5 / ADR-020 fifth signal: a Whisper segment emitted with a low acoustic
+    confidence is a likely hallucination.
+
+    Uses faster-whisper's own per-segment confidence fields (carried by
+    transcribe.py). avg_logprob is the more reliable of the two — for
+    tail-echo hallucinations the model re-emits text with little acoustic
+    backing, so its token log-probs sag well below genuine speech. no_speech_prob
+    alone is unreliable on laughter/applause (energy present, low no-speech), so
+    it is gated behind a *low* avg_logprob to avoid false positives.
+    """
+    alp = seg.get("avg_logprob")
+    nsp = seg.get("no_speech_prob")
+    if alp is None:
+        return False
+    if alp < avg_logprob_thr:
+        if nsp is None or nsp >= no_speech_thr:
+            return True
+    return False
+
+
 def _in_silence_window(start: float, end: float,
                        silences: list[tuple[float, float]],
                        eps: float = 1e-3) -> bool:
@@ -112,6 +189,10 @@ def drop_hallucination_segments(
     collapse_ratio: float = 0.5,
     ngram: int = 3,
     silence_intervals: list[tuple[float, float]] | None = None,
+    # V5 / ADR-020 new signals:
+    nested_eps: float = 0.1,
+    avg_logprob_thr: float = -1.0,
+    no_speech_thr: float = 0.6,
     progress=print,
 ) -> list[dict[str, Any]]:
     """Drop hallucination segments (see module comment above). Pure filter:
@@ -122,6 +203,17 @@ def drop_hallucination_segments(
     sits inside a detected silence interval is dropped as an isolated-silence
     hallucination (no acoustic backing), independently of the collapse/repeat
     dual signal.
+
+    V5 / ADR-020: adds two more signals to catch tail-echo hallucinations that
+    the dual-signal misses (the echo's tokens get DTW-aligned onto the neighbor's
+    word boundaries, so neither the collapse ratio nor the shared n-gram clears
+    the original thresholds):
+      * Fourth signal (time-nested echo): the segment's window is *contained
+        within* a neighbor's window AND it contains at least one zero-duration
+        word — the deterministic fingerprint of an audio-sharing echo. Genuine
+        adjacent cues never nest (they only blur at the boundary).
+      * Fifth signal (low confidence): Whisper's own avg_logprob is low, gated by
+        no_speech_prob, using confidence fields carried from transcribe.py.
     """
     kept: list[dict[str, Any]] = []
     n = len(segs)
@@ -139,6 +231,28 @@ def drop_hallucination_segments(
                          f"{(s.get('text') or '')!r} "
                          f"[collapsed {len(words)}w + repeated n-gram]")
                 dropped = True
+        # Fourth signal: time-nested audio-sharing tail-echo (deterministic).
+        if not dropped:
+            prev = segs[i - 1] if i > 0 else None
+            nxt = segs[i + 1] if i + 1 < n else None
+            for nb in (prev, nxt):
+                if nb is None:
+                    continue
+                if _has_zero_dur(s) and _is_time_nested(s, nb, nested_eps):
+                    progress(f"[hallucination] drop seg#{i} "
+                             f"({s.get('start')}-{(s.get('end'))}): "
+                             f"{(s.get('text') or '')!r} "
+                             f"[time-nested echo — window rides on neighbor audio]")
+                    dropped = True
+                    break
+        # Fifth signal: low Whisper acoustic confidence.
+        if not dropped and _low_confidence(s, avg_logprob_thr, no_speech_thr):
+            progress(f"[hallucination] drop seg#{i} "
+                     f"({s.get('start')}-{(s.get('end'))}): "
+                     f"{(s.get('text') or '')!r} "
+                     f"[low acoustic confidence avg_logprob="
+                     f"{s.get('avg_logprob')}]")
+            dropped = True
         if not dropped and silence_intervals:
             st = float(s.get("start", 0.0))
             en = float(s.get("end", 0.0))
@@ -256,21 +370,85 @@ def _split_by_gap(words: list[dict[str, Any]], max_gap: float = DEFAULT_SPLIT_GA
 
 def _split_by_length(words: list[dict[str, Any]], max_chars: int = DEFAULT_MAX_CHARS):
     """Break a word list into groups whose joined length <= max_chars, cutting
-    only at word boundaries (never inside a word)."""
+    only at word boundaries (never inside a word).
+
+    V8 (ADR-022): smart break point. When the greedy window overflows, the cut
+    is RELOCATED backwards inside the window to a linguistically safer spot
+    instead of dropping wherever the cap happens to land:
+      1. the LATEST punctuation boundary (`,;:.!?` — "…months, | we don't…",
+         never "we don't | know"); requires front >= 2 words
+      2. else the largest inter-word pause > DEFAULT_SMART_PAUSE (speaker's
+         natural breath — the window's own >1s silences were already split off
+         by _split_by_gap, so this catches the 0.3-1.0s sub-pauses)
+      3. else the greedy edge (legacy behaviour)
+    Relocation only ever moves the cut EARLIER, so no group can exceed
+    max_chars (the tail must still absorb the overflowing word).
+    """
     groups: list[list[dict[str, Any]]] = []
     cur: list[dict[str, Any]] = []
     cur_len = 0
     for w in words:
         wl = len((w.get("word") or "").strip())
         if cur and cur_len + wl > max_chars:
-            groups.append(cur)
-            cur = []
-            cur_len = 0
+            cut = _smart_break_index(cur, wl, max_chars)
+            if cut is not None:
+                groups.append(cur[:cut])
+                cur = cur[cut:]
+                cur_len = sum(len((x.get("word") or "").strip()) for x in cur)
+            else:
+                groups.append(cur)
+                cur = []
+                cur_len = 0
         cur.append(w)
         cur_len += wl
     if cur:
         groups.append(cur)
     return groups
+
+
+def _smart_break_index(
+    cur: list[dict[str, Any]],
+    wl_next: int,
+    max_chars: int,
+    *,
+    min_front: int = 2,
+    pause_thr: float = DEFAULT_SMART_PAUSE,
+) -> int | None:
+    """Better break index inside `cur` than the greedy edge len(cur), or None.
+
+    Triggered when cur + the overflowing word would exceed max_chars. Scans
+    candidates i (min_front <= i < len(cur)) where the tail cur[i:] can still
+    absorb the overflowing word (word-char sum <= max_chars). Prefers the
+    LATEST punctuation boundary (longest front group, least visual change),
+    then the LARGEST inter-word pause above `pause_thr`.
+    """
+    n = len(cur)
+    if n < min_front + 1:
+        return None
+    tail_lens = [0] * (n + 1)
+    for i in range(n - 1, -1, -1):
+        tail_lens[i] = tail_lens[i + 1] + len((cur[i].get("word") or "").strip())
+    # 1) latest punctuation boundary (front group ends on ,;:.!?)
+    for i in range(n - 1, min_front - 1, -1):
+        if tail_lens[i] + wl_next > max_chars:
+            continue
+        wprev = (cur[i - 1].get("word") or "").strip()
+        if wprev and wprev[-1] in ",;:.!?":
+            return i
+    # 2) largest inter-word pause (word i-1 | word i gap) above threshold
+    best_i = None
+    best_pause = pause_thr  # must strictly exceed the threshold
+    for i in range(min_front, n):
+        if tail_lens[i] + wl_next > max_chars:
+            continue
+        try:
+            pause = float(cur[i]["start"]) - float(cur[i - 1]["end"])
+        except (KeyError, TypeError, ValueError):
+            pause = 0.0
+        if pause > best_pause:
+            best_pause = pause
+            best_i = i
+    return best_i
 
 
 # --------------------- V6 (B4): word-timestamp drift snap ---------------------
@@ -446,6 +624,62 @@ def merge_short_cues(
     return out
 
 
+def rejoin_leading_orphans(
+    segs: list[dict[str, Any]],
+    *,
+    max_words: int = 2,
+    max_gap: float = DEFAULT_LEADING_ORPHAN_GAP,
+    max_dur: float = DEFAULT_MAX_DUR,
+) -> list[dict[str, Any]]:
+    """V8 (ADR-022): merge LEADING connective orphans into their RIGHT neighbour.
+
+    WHY: _split_by_gap faithfully preserves >1s pauses, but a pause that lands
+    right after a leading connective produces an orphan cue like "because"
+    (jimmy 116.33: 1.35s pause, then "you do take…"). V4's merge_short_cues
+    only rejoins into the LEFT neighbour and misses these — the fragment is a
+    dangling modifier whose sentence lives on the RIGHT.
+
+    Rejoin when ALL hold:
+      1. fragment is <= max_words words
+      2. fragment does NOT end with sentence punctuation [.!?] (a comma tail
+         like "So," is still an unfinished line — it merges)
+      3. right neighbour exists and is close (gap < max_gap — beyond that the
+         fragment is genuinely standalone; jimmy's "But I" sits 1.89s away and
+         stays put)
+      4. joined span stays <= max_dur
+
+    Pure: returns a new list; input is not mutated. Boundaries come only from
+    inputs (first start / last end), words are concatenated — the acoustic
+    invariant is preserved (the pause simply lives inside the joined window).
+    """
+    out: list[dict[str, Any]] = []
+    i = 0
+    while i < len(segs):
+        s = segs[i]
+        nxt = segs[i + 1] if i + 1 < len(segs) else None
+        nwords = len(s.get("words") or [])
+        ends_sent = _SENT_END.search((s.get("text") or "").strip()) is not None
+        if (nxt is not None and 0 < nwords <= max_words and not ends_sent
+                and nxt["start"] - s["end"] < max_gap
+                and nxt["end"] - s["start"] <= max_dur):
+            left_words = s.get("words") or []
+            nxt_words = nxt.get("words") or []
+            merged: dict[str, Any] = {
+                "start": s["start"],
+                "end": nxt["end"],
+                "text": ((s.get("text") or "").strip() + " "
+                         + (nxt.get("text") or "").strip()).strip(),
+            }
+            if left_words or nxt_words:
+                merged["words"] = left_words + nxt_words
+            out.append(merged)
+            i += 2
+        else:
+            out.append(dict(s))
+            i += 1
+    return out
+
+
 def apply_merge(
     segments_path: str,
     *,
@@ -460,6 +694,7 @@ def apply_merge(
     snap_drift: bool = True,
     drift_gap: float = DEFAULT_DRIFT_GAP,
     rejoin_short: bool = True,
+    rejoin_leading: bool = True,
     silence_intervals: list[tuple[float, float]] | None = None,
     progress=print,
 ) -> str:
@@ -502,5 +737,7 @@ def apply_merge(
         )
     if rejoin_short:
         merged = merge_short_cues(merged, max_dur=max_dur)
+    if rejoin_leading:
+        merged = rejoin_leading_orphans(merged, max_dur=max_dur)
     save_json(segments_path, merged, indent=0)
     return segments_path

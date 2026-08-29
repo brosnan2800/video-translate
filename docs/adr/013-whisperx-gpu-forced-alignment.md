@@ -1,8 +1,8 @@
 # ADR-013 — Phase 3：WhisperX 强制对齐（GPU 盒执行，Mac 不引入）
 
-- 状态：接受（实现延后至 GPU 盒 / Windows 分支）
-- 日期：2026-08-18
-- 关联：ADR-008（stable-ts 拒收 → 路线 A）、ADR-011（VAD 选开）、ADR-012（声学真相修订）、Spec 18（verify 三 lane）、MAJOR_VERSION_PLAN T3（WhisperX/GPU）
+- 状态：接受（已由 ADR-028 + Spec 22 落地实现）
+- 日期：2026-08-18（更新 2026-08-28）
+- 关联：ADR-008（stable-ts 拒收 → 路线 A）、ADR-011（VAD 选开）、ADR-012（声学真相修订）、Spec 18（verify 三 lane）、**ADR-028（实现级决策）、Spec 22（行为契约）**、MAJOR_VERSION_PLAN §T4（WhisperX/GPU）
 
 ## 背景
 ADR-012 把「修声学层」明确拆成两件正交的事：
@@ -23,23 +23,26 @@ ADR-012 把「修声学层」明确拆成两件正交的事：
 边界：
 
 - WhisperX 仅作为 `[windows]` extra 安装；Mac 安装（`pip install -e .`）零变化、零新依赖。
-- CLI 新增 `--align {none,whisperx}`，**默认 `none`**（Mac 默认即 none，行为不变）。
+- CLI 新增 `--align {auto,none,whisperx}`，**默认 `auto`**（2026-08-29 修订 / T4 默认化：CUDA + whisperx 可用即 whisperx，否则降级 `none`；Mac 默认即 none，行为不变）。
 - 对齐只**润词级 / 显示时间戳**，不改段落语义、顺序、文本（沿用 V4 时间戳不变量 + ADR-012 修订后不变量）。
 - 缓存指纹必须含 `align` 后端（与 `device`/`compute_type` 同列，ADR-012 已要求含 device/compute_type），否则 `cpu/none` 产物会被 `cuda/whisperx` 复用、反之亦然。
 
 ## 理由
 - **Mac 边界是硬约束不是偏好**：py3.13 无 stable-ts wheel、WhisperX 要 CUDA——两者都指向「修时间轴 ≠ Mac 目标」。继续在 Mac 上纠结漂移修复是方向性误判（ADR-012 已论证）。
 - **精度收益确定**：wav2vec2 强制对齐 96% vs faster-whisper DTW 82%，是根治 V4/V6 漂移的唯一干净手段；但必须付出 GPU 盒的代价。
-- **零回归风险**：`align=none`（默认）路径与现状字节级一致；新依赖完全隔离在 Windows extra，Mac golden 回归不受影响。
+- **零回归风险**：`align=none` 路径与现状字节级一致（**2026-08-29 修订**：默认已改为 `auto`，该保证仅对显式 `--align none`、或 `auto` 降级为 `none` 的主机成立）；新依赖完全隔离在 Windows extra，Mac golden 回归不受影响。
 
 ## 后果（与 MAJOR_VERSION_PLAN T3 对齐）
 - `transcribe.py` 增加可选对齐钩子 `align_segments(segments, audio, language, align_backend="whisperx")`，仅当 `--align whisperx` 且库可用时调用，在 chunk 转写后、`merge.py` 处理前回写词级时间戳（T3.1）。
-- CLI `transcribe` / `run` 加 `--align {none,whisperx}`（默认 none）（T3.2）。
+- CLI `transcribe` / `run` 加 `--align {auto,none,whisperx}`（默认 auto，2026-08-29 修订）（T3.2）。
 - **优雅降级（关键）**：若用户显式 `--align whisperx` 但运行环境无该库（典型：**Mac**），CLI 必须**告警并自动回退 `none`**，绝不能崩溃或静默错用 DTW 时间戳——这与 ADR-012「Mac 只检测 + 路由」一致。
 - 回退预案：若 WhisperX 与 `faster-whisper==1.2.1` 冲突，改用 `stable-ts`（py3.12 可装，对齐质量仍优于裸 faster-whisper），同样走 Windows-only extra（T3.5 / 计划 §4）。
 - 依赖隔离：whisperx 仅 `[windows]` extra；若其自带更快版 faster-whisper 与 1.2.1 冲突，用 Windows 专属 venv，绝不影响 Mac。
 
 ## 已知限制
-- 实现未开工（状态：接受 / 延后）。所有代码改动只在 Windows 分支 `feat/v5-cuda-windows`，Mac 主分支保持可用、不合并直至 Windows 验证通过（计划 §6）。
-- 强制对齐的验收标准（计划 §5 T3）：鲍德温类漂移样本时间戳误差 < 150ms；该验收只能在 GPU 盒完成。
-- Mac 上的声学层漂移只能靠 ADR-012 的「检测 + 路由」缓解（VAD 钉边界 + `verify` 声学 lane 报警），**无法根除**——根除必须 WhisperX / GPU。
+- 实现已开工并落地（ADR-028 + Spec 22）。实现级决策（独立对齐 pass + 独立缓存层、
+  不追加进转写指纹）见 ADR-028；行为契约见 Spec 22。
+- 强制对齐的验收标准（计划 §5 T4）：鲍德温类漂移样本时间戳误差 < 150ms；该验收
+  只能在 GPU 盒完成（`verify --video` 声学 lane 量化留档）。
+- Mac 上的声学层漂移只能靠 ADR-012 的「检测 + 路由」缓解（VAD 钉边界 + `verify`
+  声学 lane 报警），**无法根除**——根除必须 WhisperX / GPU。

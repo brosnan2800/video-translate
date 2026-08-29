@@ -15,7 +15,7 @@ from __future__ import annotations
 import re
 import subprocess
 
-from .ffmpeg_utils import build_audio_profile_cmd
+from .ffmpeg_utils import _resolve_binary, build_audio_profile_cmd
 
 # VAD routing thresholds (ADR-011 / V7 operating truth).
 LOW_MEAN_DB = -20.0
@@ -116,6 +116,43 @@ def recommend_vad(profile: AudioProfile) -> tuple[str, str]:
     return ("--vad", f"clean level (mean={mean}, max={maxv} dB) -> VAD anchors to silence")
 
 
+# A chunk whose silence coverage meets/exceeds this fraction is treated as
+# "clean with clear pauses" -> VAD on anchors segment edges to real silence.
+# Below it the chunk is continuous audio (laugh / cheer / music) -> bare, so
+# VAD won't eject speech masked by the overlapping noise. (ADR-015)
+CLEAN_SILENCE_FRACTION = 0.10
+
+
+def _silence_fraction(silences: list[tuple[float, float]], dur: float) -> float:
+    """Fraction of [0, dur] covered by detected silence intervals."""
+    if not silences or dur <= 0:
+        return 0.0
+    covered = 0.0
+    for (s, e) in silences:
+        s = max(0.0, float(s))
+        e = min(float(dur), float(e))
+        if e > s:
+            covered += (e - s)
+    return covered / dur
+
+
+def route_vad_chunk(profile: AudioProfile, chunk_dur: float) -> bool:
+    """Per-chunk VAD routing for adaptive mode (ADR-015).
+
+    Returns True if VAD should be ON for this chunk, False (bare) otherwise.
+    Pure function of the chunk's local audio profile — deterministic, no I/O.
+    """
+    if not profile.ok:
+        return False  # safe default: bare (don't drop anything)
+    # Low level -> tuned VAD (recall for quiet speech) — ADR-011 low-level branch.
+    low = (profile.mean_vol is not None and profile.mean_vol < LOW_MEAN_DB) or \
+          (profile.max_vol is not None and profile.max_vol < LOW_MAX_DB)
+    if low:
+        return True
+    # Otherwise: clean (clear pauses) anchors to silence; continuous noise -> bare.
+    return _silence_fraction(profile.silence_intervals, chunk_dur) >= CLEAN_SILENCE_FRACTION
+
+
 def analyze_audio(video_path: str, noise: str = "-30dB", d: float = 0.3) -> AudioProfile:
     """Run volumedetect + silencedetect and return an AudioProfile.
 
@@ -123,9 +160,16 @@ def analyze_audio(video_path: str, noise: str = "-30dB", d: float = 0.3) -> Audi
     (doctor/verify) degrade gracefully instead of crashing the pipeline.
     """
     try:
+        cmd = build_audio_profile_cmd(video_path, noise=noise, d=d)
+        # Resolve the portable build even when called outside the CLI (toolchain
+        # PATH injection not yet applied) — execution-time, command stays pure.
+        cmd[0] = _resolve_binary("ffmpeg")
         proc = subprocess.run(
-            build_audio_profile_cmd(video_path, noise=noise, d=d),
-            capture_output=True, text=True,
+            cmd, capture_output=True, text=True,
+            # Windows decodes with the locale codec (GBK on zh-CN) unless told
+            # otherwise; ffmpeg echoes the input path, so a non-ASCII video name
+            # raises UnicodeDecodeError and kills the whole profile pass.
+            encoding="utf-8", errors="replace",
         )
     except FileNotFoundError:
         return AudioProfile(ok=False)

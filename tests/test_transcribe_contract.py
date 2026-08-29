@@ -5,6 +5,8 @@ exercised by pre-seeding chunk_N.json so the model is never loaded.
 """
 import os
 
+import pytest
+
 from video_translate import transcribe as T
 from video_translate.io_utils import save_json
 
@@ -37,8 +39,11 @@ def test_merge_chunks_preserves_order():
 
 
 def test_forced_constants():
-    assert T.DEVICE == "cpu"
-    assert T.COMPUTE_TYPE == "int8"
+    # V5 (ADR-014): device is no longer a hard-coded constant; it defaults to
+    # "auto" and resolves to cpu/int8 on a CUDA-free machine.
+    assert T.DEFAULT_DEVICE == "auto"
+    assert T.DEFAULT_COMPUTE_TYPE == "auto"
+    assert T.resolve_device("cpu", "int8") == ("cpu", "int8")
     # V4 quality pass: beam search (not greedy) + no cross-segment conditioning
     assert T.BEAM_SIZE == 5 and T.BEST_OF == 5
     assert T.CONDITION_ON_PREVIOUS_TEXT is False
@@ -46,6 +51,19 @@ def test_forced_constants():
     # V6 (B2): recall-biased VAD so quiet / music-underscored lines still decode
     assert T.VAD_THRESHOLD < 0.5
     assert T.VAD_PARAMS["threshold"] == T.VAD_THRESHOLD
+
+
+def test_resolve_device_explicit_override():
+    """Explicit device/compute_type are honoured verbatim (no auto-probing)."""
+    assert T.resolve_device("cuda", "float16") == ("cuda", "float16")
+    assert T.resolve_device("cpu", None) == ("cpu", "int8")
+
+
+def test_resolve_device_auto_cpu_fallback(monkeypatch):
+    """On a CUDA-free machine, auto resolves to the historical cpu/int8."""
+    monkeypatch.setattr(T, "_cuda_available", lambda: False)
+    assert T.resolve_device("auto", "auto") == ("cpu", "int8")
+    assert T.resolve_device(None, None) == ("cpu", "int8")
 
 
 def test_vad_threshold_override_changes_fingerprint():
@@ -94,6 +112,7 @@ def test_resume_skips_completed_chunks_without_model(tmp_path, monkeypatch):
     _seed_chunk(outdir, "apollo_story", 1, [{"start": 240, "end": 241, "text": "world"}])
 
     out = T.transcribe_video("dummy.mp4", outdir, base="apollo_story",
+                             align_backend="none",
                              progress=lambda *_: None)
     merged = __import__("json").load(open(out, encoding="utf-8"))
     assert [s["text"] for s in merged] == ["hello", "world"]
@@ -139,6 +158,7 @@ def test_transcribe_stores_words(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "faster_whisper", fake)
 
     out = T.transcribe_video("vid.mp4", str(tmp_path), base="x", lang=None,
+                              align_backend="none",
                               progress=lambda *_: None)
     merged = _json.load(open(out, encoding="utf-8"))
     assert captured["word_timestamps"] is True
@@ -146,6 +166,53 @@ def test_transcribe_stores_words(tmp_path, monkeypatch):
         {"word": "Hello", "start": 1.05, "end": 1.4},
         {"word": "world", "start": 1.5, "end": 1.95},
     ]
+
+
+def test_transcribe_carries_confidence_fields(tmp_path, monkeypatch):
+    """V5 / ADR-020: transcribe must carry Whisper's per-segment confidence
+    fields (avg_logprob / no_speech_prob / compression_ratio) into the emitted
+    segments so the hallucination filter can use them without re-decoding."""
+    import json as _json
+    import sys
+
+    monkeypatch.setattr(T, "probe_duration", lambda p: 10.0)
+    monkeypatch.setattr(T, "extract_chunk", lambda *a, **k: None)
+
+    class FakeWord:
+        def __init__(self, word, start, end):
+            self.word = word
+            self.start = start
+            self.end = end
+
+    class FakeSeg:
+        def __init__(self):
+            self.text = "Hello world"
+            self.start = 1.0
+            self.end = 2.0
+            self.words = [FakeWord("Hello", 1.05, 1.4), FakeWord("world", 1.5, 1.95)]
+            self.avg_logprob = -0.42
+            self.no_speech_prob = 0.03
+            self.compression_ratio = 1.1
+
+    class FakeModel:
+        def __init__(self, *a, **k):
+            pass
+
+        def transcribe(self, wav, language=None, **kw):
+            return [FakeSeg()], None
+
+    fake = type(sys)("faster_whisper")
+    fake.WhisperModel = FakeModel
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake)
+
+    out = T.transcribe_video("vid.mp4", str(tmp_path), base="x", lang=None,
+                             align_backend="none",
+                             progress=lambda *_: None)
+    merged = _json.load(open(out, encoding="utf-8"))[0]
+    assert merged["avg_logprob"] == -0.42
+    assert merged["no_speech_prob"] == 0.03
+    assert merged["compression_ratio"] == 1.1
+
 
 
 def test_transcribe_resume_keeps_words(tmp_path, monkeypatch):
@@ -167,6 +234,7 @@ def test_transcribe_resume_keeps_words(tmp_path, monkeypatch):
                   "words": [{"word": "ya", "start": 240.1, "end": 240.9}]}])
 
     out = T.transcribe_video("dummy.mp4", str(tmp_path), base="apollo_story",
+                              align_backend="none",
                               progress=lambda *_: None)
     merged = _json.load(open(out, encoding="utf-8"))
     assert merged[0]["words"][0]["word"] == "hi"
@@ -185,6 +253,7 @@ def test_transcribe_base_defaults_to_input_stem(tmp_path, monkeypatch):
 
     monkeypatch.setattr(T, "extract_chunk", _boom)
     out = T.transcribe_video("/path/to/myvideo.mp4", str(tmp_path),
+                             align_backend="none",
                              progress=lambda *_: None)
     assert out.endswith("myvideo.segments_en.json")
 
@@ -210,6 +279,7 @@ def test_transcribe_lang_none_passes_language_none(tmp_path, monkeypatch):
     monkeypatch.setattr(T, "extract_chunk", lambda *a, **k: None)
 
     T.transcribe_video("vid.mp4", str(tmp_path), base="x", lang=None,
+                       align_backend="none",
                        progress=lambda *_: None)
     assert captured["language"] is None
 
@@ -235,5 +305,274 @@ def test_transcribe_lang_en_passed_through(tmp_path, monkeypatch):
     monkeypatch.setattr(T, "extract_chunk", lambda *a, **k: None)
 
     T.transcribe_video("vid.mp4", str(tmp_path), base="x", lang="en",
+                       align_backend="none",
                        progress=lambda *_: None)
     assert captured["language"] == "en"
+
+
+# --- ADR-015: adaptive per-chunk VAD ---
+
+
+def test_adaptive_vad_changes_fingerprint_only_when_on():
+    """adaptive_vad=True must be a distinct cache family; OFF keeps the
+    historical fingerprint unchanged (no golden regression)."""
+    off = T.transcribe_fingerprint("large-v3", 240.0, None, T.build_vad_params())
+    on = T.transcribe_fingerprint("large-v3", 240.0, None, T.build_vad_params(),
+                                  adaptive_vad=True)
+    assert off != on
+    # explicit False == omitted (historical fingerprint preserved)
+    assert T.transcribe_fingerprint("large-v3", 240.0, None, T.build_vad_params(),
+                                    adaptive_vad=False) == off
+
+
+def test_transcribe_video_adaptive_routes_per_chunk(monkeypatch, tmp_path):
+    """adaptive_vad=True: each chunk's VAD flag is decided by its local profile,
+    not the global use_vad. A silent profile chunk -> VAD on; a noisy chunk -> bare."""
+    import json as _json
+    import sys
+
+    captured = {"vad_flags": []}
+
+    monkeypatch.setattr(T, "probe_duration", lambda p: 10.0)
+
+    def _fake_extract(*a, **k):
+        return None
+
+    monkeypatch.setattr(T, "extract_chunk", _fake_extract)
+
+    # chunk profile: clean (has silence) -> route_vad_chunk True
+    from video_translate.audio_profile import AudioProfile
+    monkeypatch.setattr(T, "analyze_audio", lambda wav: AudioProfile(
+        mean_vol=-16.0, max_vol=0.0, silence_intervals=[(0.0, 2.0)], ok=True))
+
+    class FakeModel:
+        def __init__(self, *a, **k):
+            pass
+
+        def transcribe(self, wav, language=None, **kw):
+            captured["vad_flags"].append(kw.get("vad_filter"))
+            return [], None
+
+    fake = type(sys)("faster_whisper")
+    fake.WhisperModel = FakeModel
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake)
+
+    T.transcribe_video("vid.mp4", str(tmp_path), base="x", lang="en",
+                       use_vad=False, adaptive_vad=True,
+                       align_backend="none",
+                       progress=lambda *_: None)
+    # single 10s chunk -> one decode, VAD on (clean profile)
+    assert captured["vad_flags"] == [True]
+
+
+def test_transcribe_video_adaptive_bare_on_noise(monkeypatch, tmp_path):
+    """A continuous-noise chunk routes to bare (VAD off) even in adaptive mode."""
+    import sys
+
+    captured = {"vad_flags": []}
+
+    monkeypatch.setattr(T, "probe_duration", lambda p: 10.0)
+    monkeypatch.setattr(T, "extract_chunk", lambda *a, **k: None)
+    from video_translate.audio_profile import AudioProfile
+    monkeypatch.setattr(T, "analyze_audio", lambda wav: AudioProfile(
+        mean_vol=-16.0, max_vol=-3.0, silence_intervals=[], ok=True))
+
+    class FakeModel:
+        def __init__(self, *a, **k):
+            pass
+
+        def transcribe(self, wav, language=None, **kw):
+            captured["vad_flags"].append(kw.get("vad_filter"))
+            return [], None
+
+    fake = type(sys)("faster_whisper")
+    fake.WhisperModel = FakeModel
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake)
+
+    T.transcribe_video("vid.mp4", str(tmp_path), base="x", lang="en",
+                       use_vad=False, adaptive_vad=True,
+                       align_backend="none",
+                       progress=lambda *_: None)
+    assert captured["vad_flags"] == [False]
+
+
+# --- T4: WhisperX forced alignment (Spec 22, ADR-028) ---
+
+
+def test_align_none_keeps_transcribe_fingerprint_unchanged():
+    """铁律 3 + 决策 2: --align none 的转写指纹与历史哈希一致，golden 零回归。"""
+    base_fp = T.transcribe_fingerprint("large-v3", 240.0, None, T.build_vad_params())
+    # the fingerprint function has no align parameter at all (decoupled layer)
+    assert "none" not in base_fp
+    assert "whisperx" not in base_fp
+
+
+def test_align_auto_resolves_whisperx_when_capable(monkeypatch):
+    """auto（T4 默认化）: CUDA + whisperx 可用 -> 解析为 whisperx。"""
+    import torch
+    import video_translate.align as AL
+    monkeypatch.setattr(AL, "whisperx_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    assert T._resolve_align_backend("auto") == "whisperx"
+
+
+def test_align_auto_degrades_to_none_without_cuda(monkeypatch, capsys):
+    """auto: 无 CUDA -> 提示并回退 none（默认路径静默降级，非告警）。"""
+    import torch
+    import video_translate.align as AL
+    monkeypatch.setattr(AL, "whisperx_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    assert T._resolve_align_backend("auto") == "none"
+    captured = capsys.readouterr()
+    assert "auto" in captured.err.lower()
+
+
+def test_align_auto_degrades_to_none_without_package(monkeypatch):
+    """auto: whisperx 未安装 -> 回退 none。"""
+    import torch
+    import video_translate.align as AL
+    monkeypatch.setattr(AL, "whisperx_available", lambda: False)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    assert T._resolve_align_backend("auto") == "none"
+
+
+def test_align_pass_writes_and_reuses_cache(tmp_path, monkeypatch, capsys):
+    """对齐 pass：首次写独立对齐缓存；二次运行命中缓存（断点续跑，不重转写/不对齐）。"""
+    import sys
+    import video_translate.align as AL
+
+    outdir = str(tmp_path)
+    monkeypatch.setattr(T, "probe_duration", lambda p: 10.0)
+    monkeypatch.setattr(T, "extract_chunk", lambda *a, **k: None)
+    monkeypatch.setattr(T, "analyze_audio", lambda wav: None)
+
+    # whisperx available
+    monkeypatch.setattr(AL, "whisperx_available", lambda: True)
+    align_calls = {"n": 0}
+
+    def _fake_align(segments, *a, **k):
+        align_calls["n"] += 1
+        out = []
+        for seg in segments:
+            nw = [{"word": w["word"], "start": round(w["start"] + 0.1, 2),
+                   "end": round(w["end"] + 0.1, 2)} for w in seg["words"]]
+            out.append({"text": seg["text"], "words": nw,
+                        "start": nw[0]["start"] if nw else seg["start"],
+                        "end": nw[-1]["end"] if nw else seg["end"]})
+        return {"segments": out}
+
+    fake = type(sys)("whisperx")
+    fake.align = _fake_align
+    fake.load_align_model = lambda *a, **k: (object(), object())
+    fake.load_audio = lambda *a, **k: object()
+    monkeypatch.setitem(sys.modules, "whisperx", fake)
+    monkeypatch.setattr(AL, "release_align_memory", lambda *a, **k: None)
+
+    class FakeWord:
+        def __init__(self, word, start, end):
+            self.word = word
+            self.start = start
+            self.end = end
+
+    class FakeSeg:
+        def __init__(self):
+            self.text = "Hi there"
+            self.start = 0.0
+            self.end = 1.0
+            self.words = [FakeWord("Hi", 0.1, 0.4), FakeWord("there", 0.5, 0.95)]
+            self.avg_logprob = -0.3
+            self.no_speech_prob = 0.01
+            self.compression_ratio = 1.0
+
+    transcribe_calls = {"n": 0}
+
+    class FakeModel:
+        def __init__(self, *a, **k):
+            pass
+
+        def transcribe(self, wav, language=None, **kw):
+            transcribe_calls["n"] += 1
+            info = type("FakeInfo", (), {"language": "en"})()
+            return [FakeSeg()], info
+
+    fake_fw = type(sys)("faster_whisper")
+    fake_fw.WhisperModel = FakeModel
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake_fw)
+
+    params = dict(base="apollo", lang=None, align_backend="whisperx",
+                  progress=lambda *_: None)
+    # first run: transcribe 1x + align 1x
+    T.transcribe_video("vid.mp4", outdir, **params)
+    assert transcribe_calls["n"] == 1 and align_calls["n"] == 1
+
+    # alignment cache file exists (uses the independent align fingerprint)
+    fp = T.transcribe_fingerprint("large-v3", 240.0, None)
+    import video_translate.align as AL
+
+    align_fp = AL.align_fingerprint(fp, "en", backend="whisperx")
+    align_cache = os.path.join(outdir, f"apollo.{align_fp}.chunk_0.whisperx.json")
+    assert os.path.exists(align_cache)
+
+    # second run: full resume (transcribe 0x) + align cache hit (align 0x)
+    T.transcribe_video("vid.mp4", outdir, **params)
+    assert transcribe_calls["n"] == 1  # unchanged
+    assert align_calls["n"] == 1       # unchanged (cache hit)
+
+
+def test_align_rewrites_word_timestamps_in_merged_output(tmp_path, monkeypatch):
+    """对齐后的词戳应进入 segments_en.json（merge.py 按词戳断句，全链路受益）。"""
+    import sys
+    import video_translate.align as AL
+
+    monkeypatch.setattr(T, "probe_duration", lambda p: 10.0)
+    monkeypatch.setattr(T, "extract_chunk", lambda *a, **k: None)
+    monkeypatch.setattr(T, "analyze_audio", lambda wav: None)
+    monkeypatch.setattr(AL, "whisperx_available", lambda: True)
+
+    def _fake_align(segments, *a, **k):
+        out = []
+        for seg in segments:
+            nw = [{"word": w["word"], "start": round(w["start"] + 0.25, 2),
+                   "end": round(w["end"] + 0.25, 2)} for w in seg["words"]]
+            out.append({"text": seg["text"], "words": nw,
+                        "start": nw[0]["start"], "end": nw[-1]["end"]})
+        return {"segments": out}
+
+    fake = type(sys)("whisperx")
+    fake.align = _fake_align
+    fake.load_align_model = lambda *a, **k: (object(), object())
+    fake.load_audio = lambda *a, **k: object()
+    monkeypatch.setitem(sys.modules, "whisperx", fake)
+    monkeypatch.setattr(AL, "release_align_memory", lambda *a, **k: None)
+
+    class FakeWord:
+        def __init__(self, word, start, end):
+            self.word = word
+            self.start = start
+            self.end = end
+
+    class FakeSeg:
+        def __init__(self):
+            self.text = "Hi there"
+            self.start = 0.0
+            self.end = 1.0
+            self.words = [FakeWord("Hi", 0.1, 0.4), FakeWord("there", 0.5, 0.95)]
+
+    class FakeModel:
+        def __init__(self, *a, **k):
+            pass
+
+        def transcribe(self, wav, language=None, **kw):
+            info = type("FakeInfo", (), {"language": "en"})()
+            return [FakeSeg()], info
+
+    fake_fw = type(sys)("faster_whisper")
+    fake_fw.WhisperModel = FakeModel
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake_fw)
+
+    out = T.transcribe_video("vid.mp4", str(tmp_path), base="x", lang=None,
+                             align_backend="whisperx", progress=lambda *_: None)
+    merged = __import__("json").load(open(out, encoding="utf-8"))
+    # +0.25 shift applied
+    assert merged[0]["words"][0]["start"] == pytest.approx(0.35)
+    assert merged[0]["words"][1]["start"] == pytest.approx(0.75)

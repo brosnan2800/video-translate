@@ -1,7 +1,8 @@
 # ADR-001 — Force CPU + int8 for transcription
 
-- **Status**: Accepted
+- **Status**: Superseded（硬编码部分被 ADR-014 撤销；CPU/int8 仍为无 CUDA 机器的默认）
 - **Date**: 2026-07-16
+- **Superseded by**: ADR-014（`device`/`compute_type` 改为 `auto` 自动探测 + 可显式覆盖）
 - **Context**: The dev machine is a Mac (Apple Silicon / AMD Radeon) plus a
   Windows box with an 8GB RTX 3070 Ti. faster-whisper runs on CTranslate2, which
   provides CUDA (NVIDIA) and CPU backends only — no ROCm (AMD) and no Metal

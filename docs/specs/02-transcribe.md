@@ -35,3 +35,16 @@ lazily — if all chunks are already done, no model load happens at all.
 - Within a chunk, timestamps are non-decreasing and `end >= start`.
 - Merged `segments_en.json` last `end` ≤ media duration.
 - `plan_chunks` covers `[0, total)` with no gap/overlap in planned windows.
+
+## Confidence fields (ADR-020)
+Each emitted segment **also carries** Whisper's per-segment confidence fields
+when available, so the hallucination guard (Spec 12 / `merge.py`) can use them
+without re-decoding:
+
+- `avg_logprob` (float): mean token log-probability. Low ⇒ likely hallucination.
+- `no_speech_prob` (float): Whisper's own no-speech score.
+- `compression_ratio` (float): repetition/looping indicator.
+
+These are copied verbatim from the faster-whisper `Segment` by `_seg_to_dict`;
+if a field is absent (older model / timeout) it is **omitted**, not defaulted —
+so the downstream fifth signal degrades inertly rather than false-firing.

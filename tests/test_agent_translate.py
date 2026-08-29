@@ -28,7 +28,8 @@ def test_prepare_task_creates_file(tmp_path):
     prepare_translate_task(sp, tp, progress=lambda *_: None)
     assert os.path.exists(tp)
     task = json.load(open(tp, encoding="utf-8"))
-    assert task["version"] == 2
+    assert task["version"] == 3  # T3 / ADR-027: style-track schema v3
+    assert "style" in task and task["style"] == "film"
     assert "persona" in task
     assert "output_schema" in task
     assert "batches" in task

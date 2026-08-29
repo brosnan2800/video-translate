@@ -46,9 +46,9 @@ from typing import Any
 
 from .ffmpeg_utils import extract_chunk, probe_duration
 from .transcribe import (
-    DEVICE, COMPUTE_TYPE, BEAM_SIZE, BEST_OF,
+    BEAM_SIZE, BEST_OF, resolve_device,
     CONDITION_ON_PREVIOUS_TEXT, REPETITION_PENALTY,
-    NO_SPEECH_THRESHOLD, TEMPERATURE_FALLBACK, build_vad_params,
+    NO_SPEECH_THRESHOLD, TEMPERATURE_FALLBACK,
 )
 
 
@@ -61,6 +61,17 @@ _PROBE_PADS: tuple[float, ...] = (0.2, 0.0, 0.5)
 _MULTI_PROBE_MIN_WINDOW = 4.0
 # Stop probing once a decode covers this fraction of the window.
 _PROBE_GOOD_COVERAGE = 0.6
+
+# Long-hole sub-windowing (recall hardening, B direction). A single forced
+# decode over a very wide hole (e.g. a 40s gap) is unreliable — whisper tends to
+# collapse it into one fragment or hallucinate, and the pad rotation above
+# cannot rescue it. We instead slice the hole into sub-windows of at most
+# ``_SUBWIN`` seconds (with ``_SUBWIN_OVERLAP`` overlap to avoid clipping a
+# sentence straddling a cut) and decode each independently, then de-duplicate the
+# seams. This is what recovers the speech hidden inside large uncovered-audio
+# windows that verify's acoustic lane flags (ADR-016 T2b).
+_SUBWIN = 12.0
+_SUBWIN_OVERLAP = 0.5
 
 
 def _norm_tokens(s: str) -> set[str]:
@@ -76,6 +87,139 @@ def _jaccard(a: str, b: str) -> float:
 
 def _ratio(a: str, b: str) -> float:
     return difflib.SequenceMatcher(None, a.lower(), b.lower()).ratio()
+
+
+def _overlap_with_any(cand: dict[str, Any],
+                       segments: list[dict[str, Any]]) -> float:
+    """Absolute time (seconds) that `cand`'s window overlaps any segment in
+    `segments`. Zero when isolated (the expected case for genuine recovery
+    spliced into a real hole)."""
+    cs, ce = float(cand["start"]), float(cand["end"])
+    if ce <= cs:
+        return 0.0
+    best = 0.0
+    for seg in segments:
+        ss, se = float(seg["start"]), float(seg["end"])
+        ov = min(ce, se) - max(cs, ss)
+        if ov > best:
+            best = ov
+    return best
+
+
+def _recovered_wps(cand: dict[str, Any]) -> float:
+    """speaking rate of a recovered segment: words / duration (words/sec)."""
+    words = cand.get("words") or []
+    dur = float(cand["end"]) - float(cand["start"])
+    if dur <= 0.01 or not words:
+        return 0.0
+    return len(words) / dur
+
+
+def _is_recovered_hallucination(
+    cand: dict[str, Any],
+    segments: list[dict[str, Any]],
+    *,
+    overlap_eps: float = 0.12,
+    max_wps: float = 8.0,
+    min_words: int = 2,
+    max_words_for_overlap: int = 4,
+    avg_logprob_thr: float = -1.0,
+    no_speech_thr: float = 0.6,
+    min_zero_dur_words: int = 2,
+    check_overlap: bool = True,
+) -> bool:
+    """Hallucination guard for fill_gaps RECOVERED segments (ADR-020 addendum).
+
+    Recovered segments are force-decoded to fill time holes. They ONLY pass the
+    text-similarity ``_is_echo`` check today; timestamp geometry is ignored, so
+    "audio-sharing" phantoms (whisper re-emitting a line that rides on the
+    already-confirmed neighbour audio) slip into the timeline. jimmy.mp4 showed
+    7 such cases (``Don't worry.``, ``I'm fucking fired!``, ``Субтитры...``,
+    ``I'm a clown.``, ``Hi, son.``, ``Now what?``, ``This is bad.``).
+
+    A recovered segment's job is to fill a hole (the gap between existing
+    segments). If its window overlaps an existing segment's window, it is
+    decoding the already-confirmed audio — an audio-sharing echo (signal A).
+    BUT genuine adjacent cues have fuzzy boundaries (a few hundred ms) without
+    nesting — e.g. ``anxious. There's a difference.`` overlaps the prior
+    ``...you get anxi[ous]`` by 0.20s yet is real speech. So signal A only
+    fires for SHORT recovered segments (<= max_words_for_overlap words): a long
+    recovered line is a real sentence regardless of a small boundary overlap.
+
+    Signals (any hit => hallucination), all conservative to avoid dropping real
+    recovered speech:
+      A. words <= max_words_for_overlap AND overlaps any existing segment by >
+         overlap_eps  (0.12s; short phantoms overlap >=0.16s, real long lines
+         exempt)
+      B. words >= min_words AND speaking rate (wps) > max_wps  (physically
+         impossible rate, e.g. 3 words in 0.16s = 18.8 wps)
+      C. Whisper non-speech judgement: no_speech_prob >= no_speech_thr
+         (0.6) — the STRONGEST single signal for recovered segments. fill_gaps
+         force-decodes holes with no_speech_threshold=0, so a recovery the
+         model scores >=60% non-speech is energy, not speech; its text is a
+         hallucination. avg_logprob must NOT gate this (phantoms can score
+         -0.65 yet be 76% non-speech). C2: avg_logprob < thr alone as a
+         fallback for older caches that lack no_speech_prob.
+      D. >= min_zero_dur_words words with zero duration (start >= end) — the
+         DTW-collapse fingerprint (ADR-020 signal 4) applied to RECOVERED
+         segments. A phantom decoded from non-speech energy (opening drone
+         boot / ambient hum) often contains words the aligner cannot place, so
+         they collapse onto a single timestamp. Real recovered speech keeps
+         real word intervals (0 zero-duration words in every real fixture);
+         e.g. kathy_meta_vlog's ``Hubsan x4 H502E Desire 2-3-18`` phantom has
+         three zero-duration tail words ("2", "-3", "-18") while the genuine
+         ``We'll be right back.`` / ``Get it.`` / ``Thank you.`` recoveries
+         have none.  This closes the A/B/C blind spot: that phantom had no
+         overlap, 0.66 wps and avg_logprob -0.942 (> -1.0 thr).
+
+    `check_overlap` is set False on the collapse-replacement path, where the
+    recovered window is *expected* to overlap the replaced segment — disabling
+    signal A there prevents dropping genuinely recovered replacement speech.
+    """
+    nw = len(cand.get("words") or [])
+    if (check_overlap and nw < max_words_for_overlap
+            and _overlap_with_any(cand, segments) > overlap_eps):
+        return True
+    if (cand.get("words") and nw >= min_words
+            and _recovered_wps(cand) > max_wps):
+        return True
+    # D: zero-duration words (DTW collapse fingerprint). Fire before C so a
+    # phantom with zero-dur words is dropped even when its avg_logprob sits just
+    # above the -1.0 threshold (the Hubsan blind spot).
+    if (cand.get("words")
+            and _count_zero_dur(cand) >= min_zero_dur_words):
+        return True
+    # C: Whisper's own non-speech judgement. fill_gaps force-decodes holes
+    # with no_speech_threshold=0, so a recovery carrying high no_speech_prob
+    # means the model heard energy but not clear speech — the recovered text
+    # is overwhelmingly likely a hallucination. no_speech_prob is the STRONGEST
+    # single signal for recovered segments; avg_logprob must NOT gate it:
+    #   Hubsan phantom       0.642 -> dropped (also via D)
+    #   We'll be right back. 0.766 -> dropped (signal A misses: exactly 4
+    #                                  words; old AND never fired at -0.65)
+    #   Thank you.           0.799 -> dropped
+    #   Get it.              0.373 -> kept  (low no_speech, plausible)
+    # Real recovered speech keeps low no_speech_prob (jimmy 'Got it walking.'
+    # 0.1). Threshold mirrors the old no_speech_thr (0.6).
+    nsp = cand.get("no_speech_prob")
+    if nsp is not None and nsp >= no_speech_thr:
+        return True
+    # C2: very low avg_logprob alone (older caches may lack no_speech_prob).
+    alp = cand.get("avg_logprob")
+    if alp is not None and alp < avg_logprob_thr:
+        return True
+    return False
+
+
+def _count_zero_dur(cand: dict[str, Any]) -> int:
+    """Count words whose interval collapsed to zero duration (start >= end).
+
+    Mirrors merge.py's ``_collapse_ratio`` primitive: a word the DTW aligner
+    cannot place collapses onto a single timestamp — the geometric fingerprint
+    of a hallucinated token over non-speech energy (ADR-020 signal 4).
+    """
+    return sum(1 for w in (cand.get("words") or [])
+               if w.get("start", 0) >= w.get("end", 0))
 
 
 def _is_echo(text: str, segments: list[dict[str, Any]]) -> bool:
@@ -106,6 +250,63 @@ def _is_echo(text: str, segments: list[dict[str, Any]]) -> bool:
         if _ratio(t, et) > 0.7:
             return True
     return False
+
+
+def _text_sim(a: str, b: str) -> float:
+    """Similarity for seam de-duplication: Jaccard, falling back to char ratio.
+
+    Reuses the same notion of "same utterance transcribed differently across a
+    boundary" that ``_is_echo`` relies on, but returns a continuous score so the
+    caller can threshold it.
+    """
+    a, b = (a or "").strip().lower(), (b or "").strip().lower()
+    if not a or not b:
+        return 0.0
+    if a == b:
+        return 1.0
+    j = _jaccard(a, b)
+    if j > 0:
+        return j
+    return _ratio(a, b)
+
+
+def _dedupe_seams(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop duplicate fragments produced at sub-window seams.
+
+    Two recovered segments are a seam duplicate when their time ranges overlap
+    and their text is near-identical (same neighbour tail decoded by two adjacent
+    sub-windows). We keep the earlier-starting one and trim any still-overlapping
+    later fragment to avoid double subtitles.
+    """
+    if not items:
+        return []
+    items = sorted(items, key=lambda s: float(s["start"]))
+    out: list[dict[str, Any]] = []
+    for it in items:
+        ts, te = float(it["start"]), float(it["end"])
+        dup = False
+        for kept in reversed(out):
+            ks, ke = float(kept["start"]), float(kept["end"])
+            overlap = min(te, ke) - max(ts, ks)
+            if overlap > 0.2 and _text_sim(it["text"], kept["text"]) > 0.5:
+                dup = True  # same fragment decoded by an adjacent sub-window
+                break
+            if overlap > 0.0:  # trim residual overlap, keep earlier window
+                te = min(te, ks)
+        if not dup and te > ts:
+            out.append({**it, "start": round(ts, 2), "end": round(te, 2)})
+    return out
+
+
+def _slice_long_hole(gs: float, ge: float) -> list[tuple[float, float]]:
+    """Sub-window boundaries for a wide hole (module-level for testing)."""
+    step = _SUBWIN - _SUBWIN_OVERLAP
+    subwins: list[tuple[float, float]] = []
+    cur = gs
+    while cur < ge - _EPS:
+        subwins.append((cur, min(cur + _SUBWIN, ge)))
+        cur += step
+    return subwins
 
 
 def _cps(seg: dict[str, Any]) -> float:
@@ -177,7 +378,7 @@ def fill_gaps(
     min_gap: float = 2.0,
     model_name: str = "large-v3",
     threads: int | None = None,
-    use_vad: bool = False,
+    use_vad: bool = False,  # ADR-016 (T2a): accepted for CLI compat but IGNORED — recovery is always bare
     no_speech_threshold: float = NO_SPEECH_THRESHOLD,
     temperature: list[float] | None = None,
     collapse_min_dur: float = 4.0,
@@ -185,6 +386,17 @@ def fill_gaps(
     silence_intervals: list[tuple[float, float]] | None = None,
     silencedetect_noise: str = "-30dB",
     silencedetect_d: float = 0.3,
+    device: str | None = None,
+    compute_type: str | None = None,
+    # T2 (ADR-017 / Spec 19 § (B)): force-decode recovery windows from the
+    # SAME audio_source used in the main transcription pass (typically the
+    # demucs-separated vocals.wav when the user ran --separate-vocals).
+    # None → fall back to the historical behaviour (decode directly from
+    # the original input_path video).
+    # NOTE: silence_intervals / silencedetect STILL consult input_path
+    # (Spec 19 Invariant #4) — the acoustic-fact reference is always the
+    # original unmodified audio, never the cleaned source.
+    audio_source: str | None = None,
     progress=print,
 ) -> list[dict[str, Any]]:
     """Audit `segments` for dropped speech in `input_path` and recover it.
@@ -251,28 +463,34 @@ def fill_gaps(
 
     # 2) force-decode each suspect window, drop echoes, splice real speech back
     os.environ.setdefault("HF_HUB_OFFLINE", "1")
-    vad_params = build_vad_params(None)
+    dev, ct = resolve_device(device, compute_type)
     from faster_whisper import WhisperModel
-    model = WhisperModel(model_name, device=DEVICE, compute_type=COMPUTE_TYPE,
+    model = WhisperModel(model_name, device=dev, compute_type=ct,
                          cpu_threads=threads)
 
     def _decode_once(gs: float, ge: float, pad: float,
-                     dedupe_pool: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Force-decode [gs-pad, ge+pad]; return non-echo segments (absolute times)."""
+                     dedupe_pool: list[dict[str, Any]],
+                     *,
+                     check_overlap: bool = True) -> list[dict[str, Any]]:
+        """Force-decode [gs-pad, ge+pad]; return non-echo, non-hallucination
+        segments (absolute times).
+        """
         ss = max(0.0, gs - pad)
         ee = min(total, ge + pad) if total else ge + pad
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
             wav = tf.name
+        _src: str = audio_source if audio_source else input_path
         try:
-            extract_chunk(input_path, wav, ss, ee - ss)
+            extract_chunk(_src, wav, ss, ee - ss)
             segs, _ = model.transcribe(
                 wav, language=lang, task="transcribe",
                 beam_size=BEAM_SIZE, best_of=BEST_OF,
                 condition_on_previous_text=CONDITION_ON_PREVIOUS_TEXT,
                 repetition_penalty=REPETITION_PENALTY,
-                vad_filter=use_vad,
-                **(dict(vad_parameters=vad_params) if use_vad else {}),
-                no_speech_threshold=0.0,  # force-decode the silence
+                # ADR-016 (T2a): recovery is ALWAYS bare. Forcing VAD here would
+                # re-eject the very speech-under-noise this module exists to fix.
+                vad_filter=False,
+                no_speech_threshold=0.0,  # force-decode even near-silence
                 temperature=temperature or TEMPERATURE_FALLBACK,
                 word_timestamps=True,
             )
@@ -283,24 +501,38 @@ def fill_gaps(
                     continue
                 if _is_echo(text, dedupe_pool):
                     continue  # leaked neighbour line, not new speech
-                out.append({
-                    "start": round(s.start + ss, 2),
-                    "end": round(s.end + ss, 2),
+                cand = {
+                    "start": round(float(s.start) + ss, 2),
+                    "end": round(float(s.end) + ss, 2),
                     "text": text,
                     "words": [
-                        {"word": w.word, "start": round(w.start + ss, 2),
-                         "end": round(w.end + ss, 2)}
+                        {"word": w.word, "start": round(float(w.start) + ss, 2),
+                         "end": round(float(w.end) + ss, 2)}
                         for w in (s.words or [])
                     ],
                     "_recovered": True,
-                })
+                }
+                # ADR-020 addendum: carry Whisper confidence fields so the guard's
+                # signal C works without re-decoding (mirrors transcribe._seg_to_dict).
+                for fld in ("avg_logprob", "no_speech_prob", "compression_ratio"):
+                    v = getattr(s, fld, None)
+                    if v is not None:
+                        cand[fld] = v
+                # ADR-020 addendum: drop audio-sharing / impossible-rate / low-cfg
+                # phantoms that slipped past the text-only _is_echo check.
+                if _is_recovered_hallucination(cand, dedupe_pool,
+                                               check_overlap=check_overlap):
+                    continue
+                out.append(cand)
             return out
         finally:
             if os.path.exists(wav):
                 os.remove(wav)
 
     def _probe(gs: float, ge: float,
-               dedupe_pool: list[dict[str, Any]]) -> list[dict[str, Any]]:
+               dedupe_pool: list[dict[str, Any]],
+               *,
+               check_overlap: bool = True) -> list[dict[str, Any]]:
         """Decode a window robustly, working around whisper's prefix collapse.
 
         Whisper is acutely sensitive to what sits at the *start* of the decode
@@ -321,7 +553,8 @@ def fill_gaps(
         best: list[dict[str, Any]] = []
         best_cov = -1.0
         for pad in pads:
-            cand = _decode_once(gs, ge, pad, dedupe_pool)
+            cand = _decode_once(gs, ge, pad, dedupe_pool,
+                                check_overlap=check_overlap)
             cov = sum(float(c["end"]) - float(c["start"]) for c in cand)
             if cov > best_cov:
                 best, best_cov = cand, cov
@@ -329,17 +562,49 @@ def fill_gaps(
                 break
         return best
 
+    def _probe_long_hole(gs: float, ge: float,
+                         dedupe_pool: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Slice a very wide hole into sub-windows and force-decode each.
+
+        ADR-016 (T2c): a single forced decode over a 30-50s hole is unreliable —
+        whisper collapses it or hallucinates, and the pad rotation in ``_probe``
+        cannot rescue it. We cut the hole into ``_SUBWIN``-second pieces (with
+        ``_SUBWIN_OVERLAP`` overlap so a sentence straddling a cut is not clipped)
+        and decode each independently with a small pad (neighbours can only leak
+        a fraction of a second into a sub-window, so echo is naturally bounded
+        there). Seam de-duplication happens once, globally, after all inserts are
+        collected (see below).
+
+        Returns merged, time-sorted, raw recovered segments for the hole.
+        """
+        subwins = _slice_long_hole(gs, ge)
+        merged: list[dict[str, Any]] = []
+        for (s0, s1) in subwins:
+            merged.extend(_decode_once(s0, s1, _PROBE_PADS[0], dedupe_pool))
+        return merged
+
     inserts: list[dict[str, Any]] = []
 
     for (gs, ge) in holes:
-        recovered = _probe(gs, ge, segments)
+        if (ge - gs) > _SUBWIN:
+            # ADR-016 (T2b): slice very wide holes for reliable recall
+            recovered = _probe_long_hole(gs, ge, segments)
+            tag = "long-hole"
+        else:
+            recovered = _probe(gs, ge, segments)
+            tag = "hole"
         if recovered:
             inserts.extend(recovered)
-            progress(f"[audit] hole {gs:.1f}->{ge:.1f}s: recovered "
+            progress(f"[audit] {tag} {gs:.1f}->{ge:.1f}s: recovered "
                      f"{len(recovered)} seg(s): {recovered[0]['text'][:50]!r}")
         else:
-            progress(f"[audit] hole {gs:.1f}->{ge:.1f}s: echo/empty — "
+            progress(f"[audit] {tag} {gs:.1f}->{ge:.1f}s: echo/empty — "
                      f"left as genuine silence")
+
+    # 2a) global seam de-dup across all recovered inserts (ADR-016 T2c). Catches
+    # duplicate fragments from long-hole sub-window overlap as well as any stray
+    # neighbour-leak that slipped past _is_echo.
+    inserts = _dedupe_seams(inserts)
 
     # 3) collapsed segments: re-decode the window; replace when we win content
     drop: set[int] = set()
@@ -347,7 +612,10 @@ def fill_gaps(
         seg = segments[idx]
         gs, ge = float(seg["start"]), float(seg["end"])
         pool = [s for j, s in enumerate(segments) if j != idx]
-        recovered = _probe(gs, ge, pool)
+        # ADR-020 addendum: collapse replacement windows intentionally overlap
+        # the replaced segment, so disable overlap signal A here (the replacement
+        # speech must not be mis-dropped); B (rate) and C (confidence) still apply.
+        recovered = _probe(gs, ge, pool, check_overlap=False)
         orig_len = len((seg.get("text") or "").strip())
         new_len = sum(len(r["text"]) for r in recovered)
         if recovered and (len(recovered) >= 2 or new_len > orig_len * 1.6):

@@ -115,7 +115,7 @@ def build_outputs(
     }
 
 
-def _resolve_out_base(outdir: str, base: str, flat: bool) -> tuple[str, str]:
+def _resolve_out_base(outdir: str, base: str, flat: bool, style: str | None = None) -> tuple[str, str]:
     """Resolve the actual (directory, file-base) for the final outputs.
 
     Default mode (flat=False): the four outputs are written into a per-video
@@ -124,13 +124,18 @@ def _resolve_out_base(outdir: str, base: str, flat: bool) -> tuple[str, str]:
     to ``<base>_v1.{suffix}``, ``_v2``, ... so re-runs never overwrite and
     video editors (e.g. Jianying) treat each as a fresh import — no stale cache.
 
+    ``style`` (T3 / ADR-027): when set, the output stem becomes ``<base>.<style>``
+    so multiple style tracks (film / literal / bilingual_study) coexist in the
+    same subfolder without colliding on the plain stem.
+
     Legacy mode (flat=True): write ``<base>{suffix}`` directly into ``outdir``
     with no subfolder and no version suffix (deterministic, for tests/scripts).
     """
+    out_base = f"{base}.{style}" if style else base
     if flat:
-        return outdir, base
+        return outdir, out_base
     sub = os.path.join(outdir, base)
-    pat = re.compile(re.escape(base) + r"(?:_v(\d+))?\.bilingual\.srt$")
+    pat = re.compile(re.escape(out_base) + r"(?:_v(\d+))?\.bilingual\.srt$")
     has_plain = False
     max_n = 0
     if os.path.isdir(sub):
@@ -143,7 +148,7 @@ def _resolve_out_base(outdir: str, base: str, flat: bool) -> tuple[str, str]:
             else:
                 max_n = max(max_n, int(m.group(1)))
     ver = "" if not has_plain and max_n == 0 else f"_v{max_n + 1}"
-    return sub, base + ver
+    return sub, out_base + ver
 
 
 def _prune_old_versions(out_dir: str, base: str) -> None:
@@ -151,7 +156,8 @@ def _prune_old_versions(out_dir: str, base: str) -> None:
 
     A "set" is the four files sharing one stem: ``<base>`` (plain) or
     ``<base>_vN``. The plain set counts as the oldest. Everything except the
-    two most-recently-modified stems is removed.
+    two most-recently-modified stems is removed. ``base`` here already includes
+    any ``<style>`` suffix (see ``_resolve_out_base``).
     """
     stem_pat = re.compile(r"^" + re.escape(base) + r"(?:_v(\d+))?$")
     stems: dict[str, float] = {}
@@ -191,6 +197,7 @@ def generate_subtitles(
     tail: float = 0.0,
     flat: bool = False,
     prune_old: bool = False,
+    style: str | None = None,
     progress=print,
 ) -> list[str]:
     """Read segments + zh JSON, write the four outputs.
@@ -200,6 +207,9 @@ def generate_subtitles(
     ``_resolve_out_base``). Pass flat=True for the legacy behavior of writing
     directly into ``outdir`` with no subfolder and no version.
 
+    ``style`` (T3 / ADR-027): when set, output filenames gain a ``<base>.<style>``
+    stem (e.g. ``clip.literal.bilingual.srt``) so multiple style tracks coexist.
+
     Returns the list of written file paths.
     """
     segments = load_json(segments_path)
@@ -208,7 +218,7 @@ def generate_subtitles(
 
     outputs = build_outputs(segments, zh, gap=gap, min_dur=min_dur,
                             offset=offset, tail=tail)
-    out_dir, out_base = _resolve_out_base(outdir, base, flat)
+    out_dir, out_base = _resolve_out_base(outdir, base, flat, style=style)
     os.makedirs(out_dir, exist_ok=True)
     written: list[str] = []
     for suffix, content in outputs.items():
@@ -218,9 +228,10 @@ def generate_subtitles(
     # Sidecar: persist display-window options so `verify` (Spec 18 presentation
     # lane) can auto-check that the perceived window wasn't over-tightened.
     save_json(os.path.join(out_dir, out_base + ".generate_opts.json"),
-              {"gap": gap, "min_dur": min_dur, "offset": offset, "tail": tail})
+              {"gap": gap, "min_dur": min_dur, "offset": offset, "tail": tail,
+               "style": style})
     if prune_old:
-        _prune_old_versions(out_dir, base)
+        _prune_old_versions(out_dir, out_base)
     progress(
         f"[generate] bilingual/zh/en/txt written for base={base!r} "
         f"-> {out_dir} ({len(segments)} segments, gap={gap}, min_dur={min_dur}, "

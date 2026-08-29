@@ -17,8 +17,9 @@ dependency is added.
 ## Task file schema (`prepare_translate_task`)
 ```json
 {
-  "version": 1,
-  "persona": "<信达雅+口语感 default, configurable via [llm] persona>",
+  "version": 3,
+  "style": "film",
+  "persona": "<style-preset persona, or --persona override>",
   "output_schema": { "type": "object", "description": "str(index) -> zh", ... },
   "batches": [
     {
@@ -32,6 +33,12 @@ dependency is added.
 ```
 Defaults: `batch_size=8`, `context_window=2` (before+after). `index_key` (default
 None = positional; `"index"` for backfill to preserve original indices).
+
+**Style track (T3 / ADR-027 / Spec 21)**: `version` is now `3` with a top-level `style`
+field (default `film`). The `persona` comes from `STYLE_PERSONAS[style]`; an explicit
+`--persona`/`VT_PERSONA` overrides it. Multi-style (`--style film,literal`) emits one
+task per style — `<base>.film.translate_task.json` / `<base>.literal.translate_task.json` —
+and the agent fills each `<base>.<style>.zh_segments.json` separately.
 
 ## `validate_zh(segments_path, zh_path) -> (ok, missing_indices)`
 Checks every segment index has a zh entry. Used by the agent to self-check before

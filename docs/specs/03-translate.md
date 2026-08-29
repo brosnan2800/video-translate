@@ -19,6 +19,12 @@ optionally, `{base}.agent_pending.json`.
   translation task file (`<base>.translate_task.json`, batched + context + persona)
   and returns exit 6 (`EXIT_AWAITING_AGENT`). The calling agent translates with its
   own LLM and writes `zh_segments.json`. No LLM client dependency.
+- **Style track (T3 / ADR-027 / Spec 21)**: pass `--style {film,literal,bilingual_study}`
+  to inject a preset persona + guidelines into the task file (`version: 3`, top-level
+  `style` field). Multi-value `--style film,literal` emits one suffixed task per style
+  (`<base>.film.translate_task.json` / `<base>.literal.translate_task.json`). An explicit
+  `--persona`/`VT_PERSONA` overrides the style preset. Default `film` is byte-compatible
+  with the legacy single-persona task.
 - **google** (headless fallback, V1 path): `deep_translator.GoogleTranslator`
   via auto-detected HTTP proxy. Defaults: `src="en"`, `tgt="zh-CN"`.
 - **Injectable**: `translate_fn` allows swapping the programmatic engine (used by

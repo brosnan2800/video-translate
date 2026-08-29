@@ -44,6 +44,17 @@ A third, subtler loss mode — **prefix collapse** — is handled inside the pro
    `new_chars > 1.6 × orig_chars`); otherwise the original is kept.
 5. **Merge & sort** — recovered inserts + kept originals, sorted by `start`.
 
+### Recovery is ALWAYS bare (ADR-016 / T2a)
+
+The forced decode in `_decode_once` **hard-codes `vad_filter=False`** and keeps
+`no_speech_threshold=0.0`. The run's `--vad` flag is **never** propagated into
+the recovery decode. Rationale (Spec 16 §Invariant originally stated this but the
+wiring contradicted it): forcing VAD here re-introduces the exact drop this module
+exists to fix — speech sitting under laughter / cheer / music is ejected by VAD.
+On `emily-blunt.mp4` the five cheer-masked windows (4:06, 4:24, 4:59, 6:15,
+15:29) were recovered only because the recovery ran bare. See also
+[ADR-015](adr:/015-adaptive-per-chunk-vad.md) for preventing the miss upstream.
+
 ### Prefix-collapse probe (`_probe`)
 Whisper latches onto whatever sits at the *start* of the decode window: if the
 pad reaches back far enough to catch the previous line's tail, the decoder emits
@@ -53,6 +64,22 @@ the probe does **not** bet on one pad. It tries `_PROBE_PADS = (0.2, 0.0, 0.5)`
 scores each result by how much of the window it covers, and keeps the best. Scan
 stops early once a probe covers `≥ _PROBE_GOOD_COVERAGE = 0.6` of the window, so
 the common case still costs a single decode.
+
+### Long-hole sub-windowing (`_probe_long_hole`, ADR-016 T2c)
+A single forced decode over a **very wide** hole (e.g. a 40 s gap) is itself
+unreliable: whisper collapses it into one fragment or hallucinates, and the pad
+rotation above cannot rescue it. So any hole wider than `_SUBWIN = 12.0 s` is
+**sliced** into sub-windows of at most `_SUBWIN` seconds, with `_SUBWIN_OVERLAP
+= 0.5 s` overlap so a sentence straddling a cut is not clipped. Each sub-window
+is force-decoded independently with a small pad (`_PROBE_PADS[0] = 0.2`) — a
+neighbour can only leak a fraction of a second into a sub-window, so echo is
+naturally bounded there. Adjacent sub-windows decode the overlap region twice;
+`_dedupe_seams()` drops the duplicate (time-overlap > 0.2 s **and** text
+similarity > 0.5, via `_text_sim` = Jaccard falling back to char-ratio) and trims
+any residual overlap to the earlier window. This is the B-direction recall
+hardening that recovers speech hidden inside the large uncovered-audio windows
+that `verify`'s acoustic lane flags (seen on `Everybody.Loves.Raymond.S01E04`,
+a 41 s gap at 922→963 s).
 
 ## Invariant (load-bearing)
 - **Timestamps stay acoustic facts.** Recovered segments reuse the whisper
@@ -72,7 +99,9 @@ the common case still costs a single decode.
 | `collapse_min_dur` | `4.0` | a segment must be this long to be a collapse candidate |
 | `collapse_ratio` | `0.45` | cps below `median × ratio` ⇒ collapse |
 | `_PROBE_PADS` | `(0.2, 0.0, 0.5)` | prefix-collapse mitigation |
-| `use_vad` | `False` | passed through from `--vad` |
+| `_SUBWIN` | `12.0` | holes wider than this are sliced into sub-windows (ADR-016 T2c) |
+| `_SUBWIN_OVERLAP` | `0.5` | overlap between sub-windows so cuts don't clip sentences |
+| `use_vad` | `False` | **ignored by the decode** — recovery is always bare (ADR-016) |
 
 CLI: `--no-audit` (on `transcribe` / `run`) skips the whole pass.
 

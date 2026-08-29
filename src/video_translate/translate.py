@@ -13,6 +13,7 @@ deep_translator is imported lazily so unit tests don't require it.
 """
 from __future__ import annotations
 
+import os
 import time
 from typing import Any, Callable
 
@@ -36,6 +37,7 @@ FULL_TRANSCRIPT_MAX_CHARS = 24000
 
 # V6 (B3): explicit rules the agent must follow. Shipped in the task file so the
 # contract lives with the data, not in whatever prompt happens to invoke it.
+# 通用守则（所有风格共享，与历史 TRANSLATION_GUIDELINES 字节一致，保证向后兼容）
 TRANSLATION_GUIDELINES = [
     "先通读 full_transcript 建立全局理解（场景、说话人关系、剧情走向），再逐 batch 翻译。",
     "source 字段给出视频出处/背景。若是已有影视、文学或历史题材作品，专有名词、人名、"
@@ -45,6 +47,26 @@ TRANSLATION_GUIDELINES = [
     "context_before / context_after 仅供参考，不要翻译、不要出现在输出里。",
     "输出必须覆盖 to_translate[*].index 的每一个下标（字符串形式）。",
 ]
+
+# 各风格专属守则：与 config.STYLE_PERSONAS 对齐（film 默认空，沿用通用守则）
+STYLE_GUIDELINES: dict[str, list[str]] = {
+    "film": [],
+    "literal": [
+        "保真优先：准确传达原文意思，不增译、不减译、不意译掉限定条件。",
+        "结构对齐：尽量保留原文的句子结构与主谓宾顺序，便于逐句对照。",
+        "术语严谨：专有名词、学术/法律/技术术语严格忠实，必要时保留英文原词并加括号。",
+        "逻辑从句：定语从句、条件句、让步状语等修饰关系必须清晰可辨。",
+        "不口语化：除非原文就是口语，否则不要用俚语或过于随意的表达。",
+    ],
+    "bilingual_study": [
+        "直译为主：译文贴近原文结构与词义，便于回映英文。",
+        "生词注记：对生僻词、熟词生义、文化专有项，在译文后用括号补注"
+        "（如：『bank（河岸，此处非银行）』）。",
+        "句式可回映：尽量让中文断句与英文句法对应，方便对照学习。",
+        "保留术语：专业术语首次出现可附英文原词。",
+        "不追求文采：清晰度与准确性高于修辞。",
+    ],
+}
 
 
 def _make_translator(src: str, tgt: str) -> Callable[[str], str]:
@@ -182,19 +204,32 @@ def prepare_translate_task(
     *,
     batch_size: int = DEFAULT_BATCH_SIZE,
     context_window: int = DEFAULT_CONTEXT_WINDOW,
-    persona: str = DEFAULT_PERSONA,
+    persona: str | None = None,
     index_key: str | None = None,
     glossary: str | None = None,
     source: str | None = None,
     full_transcript: bool = True,
     max_transcript_chars: int = FULL_TRANSCRIPT_MAX_CHARS,
+    # T3 (ADR-027 / Spec 21): style track
+    style: str = "film",
+    styles: list[str] | None = None,
+    outdir: str | None = None,
+    base: str | None = None,
     progress=print,
-) -> str:
+) -> str | list[str]:
     """Read segments, batch them with sliding-window context, write a translation
-    task file for the calling agent to fill. Returns task_path.
+    task file for the calling agent to fill.
+
+    Single-style mode (default): writes ``task_path`` (a single file named by the
+    caller) and returns its path.
+
+    Multi-style mode (``styles`` given): ignores ``task_path`` and writes one
+    task file per style, named ``<outdir>/<base>.<style>.translate_task.json``.
+    Returns the list of written paths. The base persona falls back to ``style``'s
+    preset when ``persona`` is not explicitly provided.
 
     The agent reads this file, translates each ``to_translate`` item per the
-    persona, and writes ``{str(index): zh}`` to ``<base>.zh_segments.json``.
+    persona, and writes ``{str(index): zh}`` to ``<base>[.<style>].zh_segments.json``.
 
     ``index_key``: if given, use ``seg[index_key]`` as the item's index (used by
     ``backfill`` where pending items carry their original zh_segments index);
@@ -210,11 +245,44 @@ def prepare_translate_task(
 
     ``full_transcript`` (V6/B3): ship the whole transcript alongside the batches
     so the agent has global context, not just a ±2-segment window.
+
+    ``style`` / ``styles`` (T3): selects the translation style preset(s). When
+    ``persona`` is explicitly provided it overrides the preset base (custom persona
+    takes priority), regardless of ``style``.
     """
+    # Multi-style mode: emit one suffixed task file per style.
+    if styles:
+        if outdir is None or base is None:
+            raise ValueError("outdir and base are required for multi-style task emission")
+        written: list[str] = []
+        for st in styles:
+            path = os.path.join(outdir, f"{base}.{st}.translate_task.json")
+            prepare_translate_task(
+                segments_path, path,
+                batch_size=batch_size, context_window=context_window,
+                persona=persona, index_key=index_key, glossary=glossary,
+                source=source, full_transcript=full_transcript,
+                max_transcript_chars=max_transcript_chars,
+                style=st, progress=progress,
+            )
+            written.append(path)
+        return written
+
     segs: list[dict[str, Any]] = load_json(segments_path)
     n = len(segs)
 
-    effective_persona = build_persona(persona, source=source, glossary=glossary)
+    # Base persona: explicit argument wins (unless it is merely the legacy
+    # default, which is exactly the film preset's persona), else the style preset.
+    from .config import STYLE_PERSONAS
+    if persona and persona != DEFAULT_PERSONA:
+        base_persona = persona
+    else:
+        base_persona = STYLE_PERSONAS[style].persona
+
+    effective_persona = build_persona(base_persona, source=source, glossary=glossary)
+    style_guidelines = list(TRANSLATION_GUIDELINES)
+    if style != "film":
+        style_guidelines = style_guidelines + STYLE_GUIDELINES.get(style, [])
     transcript, transcript_truncated = (
         build_full_transcript(segs, max_chars=max_transcript_chars)
         if full_transcript else ("", False)
@@ -238,11 +306,12 @@ def prepare_translate_task(
             "context_after": ca,
         })
     task = {
-        "version": 2,
+        "version": 3,
+        "style": style,
         "persona": effective_persona,
         "source": source,
         "glossary": glossary,
-        "guidelines": TRANSLATION_GUIDELINES,
+        "guidelines": style_guidelines,
         "full_transcript": transcript,
         "full_transcript_truncated": transcript_truncated,
         "output_schema": {
@@ -256,7 +325,7 @@ def prepare_translate_task(
         "batches": batches,
     }
     save_json(task_path, task, indent=2)
-    extra = ""
+    extra = f", style={style}"
     if source:
         extra += f", source={source!r}"
     if glossary:
