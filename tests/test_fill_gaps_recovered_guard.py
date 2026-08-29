@@ -12,7 +12,13 @@ fired! / Субтитры... / I'm a clown. / Hi, son. / Now what? / This is bad
 信号（任一命中即判幻觉，全保守防误杀真实补洞语音）：
   A. 与任一现有段窗口重叠 > overlap_eps（默认 0.12s）-> 骑在已确认音频上
   B. 词数 >= min_words 且 语速(wps) > max_wps（默认 8.0）-> 物理不可能
-  C. avg_logprob < thr 且 no_speech_prob >= no_speech_thr -> Whisper 低自信
+  C. no_speech_prob >= no_speech_thr（默认 0.6）-> Whisper 自判该窗口主要
+     非语音（恢复段最强信号，avg_logprob 不设闸：'We'll be right back.'
+     0.766 / 'Thank you.' 0.799 即便 avg>-1.0 也拦；C2 avg_logprob < thr
+     兜旧缓存缺 no_speech_prob）
+  D. 零时长词（start >= end）>= min_zero_dur_words（默认 2）-> DTW 坍缩指纹
+     （ADR-020 信号 4 应用于恢复段；kathy_meta_vlog 开头 10 秒非语音能量被
+     硬拼成 'Hubsan x4 H502E Desire 2-3-18'，靠 3 个零时长尾词命中 D）
   其中信号 A 在 collapse 替换路径关闭（被替换段本就与邻居重叠）。
 """
 import sys
@@ -113,6 +119,54 @@ def test_collapse_path_disables_overlap_signal():
     # 与邻居重叠（模拟被替换段窗口），但 collapse 路径只查 B/C
     neighbor = {"start": 55.27, "end": 56.37, "text": "motherfucking"}
     assert F._is_recovered_hallucination(cand, [neighbor], check_overlap=False) is False
+
+
+def test_signal_d_zero_dur_words_drops_hubsan_model_text():
+    """kathy_meta_vlog 0-10.7s 恢复段 'Hubsan x4 H502E Desire 2-3-18'（真实实测）：
+    对开头非语音能量硬拼的幻觉。无重叠、0.66 wps、avg_logprob -0.942
+    （>-1.0 阈值）全部逃过 A/B/C，但尾 3 词 "2"/"-3"/"-18" 零时长 -> 命中 D。
+    """
+    cand = {"start": 0.0, "end": 10.66, "text": "Hubsan x4 H502E Desire 2-3-18",
+            "words": _w((" Hubsan", 0.0, 2.38), (" x4", 2.38, 4.78),
+                        (" H502E", 4.78, 9.6), (" Desire", 9.6, 10.66),
+                        (" 2", 10.66, 10.66), (" -3", 10.66, 10.66),
+                        (" -18", 10.66, 10.66)),
+            "avg_logprob": -0.942, "no_speech_prob": 0.642}
+    # 孤立在开头（无邻居可重叠），证明信号 D 独立生效
+    assert F._is_recovered_hallucination(cand, []) is True
+
+
+def test_signal_c_high_no_speech_drops_we_ll_be_right_back():
+    """kathy_meta_vlog 'We'll be right back.'（no_speech=0.766, avg=-0.650）：
+    词数恰好=4（信号 A 的 <4 条件躲过）、无零时长词（信号 D 不命中）、
+    avg_logprob>-1.0（旧信号 C 的 AND 漏过）——但 no_speech=0.766>=0.6，
+    强化后的信号 C 单独拦截。独立重转写该窗口只得到 'Taylor Street.'
+    （前段尾部），确证幻觉。
+    """
+    cand = {"start": 17.51, "end": 19.21, "text": "We'll be right back.",
+            "words": _w((" We'll", 17.51, 18.09), (" be", 18.09, 18.11),
+                        (" right", 18.11, 18.13), (" back.", 18.13, 19.21)),
+            "avg_logprob": -0.650, "no_speech_prob": 0.766}
+    assert F._is_recovered_hallucination(cand, []) is True
+
+
+def test_signal_c_does_not_drop_low_no_speech_recovery():
+    """低 no_speech_prob 的真实恢复段不受强化信号 C 影响：jimmy 'Got it
+    walking.' no_speech=0.1 -> 保留。
+    """
+    cand = {"start": 35.3, "end": 36.72, "text": "Got it walking.",
+            "words": _w(("Got", 35.3, 35.7), ("it", 35.7, 36.2),
+                        ("walking.", 36.2, 36.72)),
+            "avg_logprob": -0.4, "no_speech_prob": 0.1}
+    assert F._is_recovered_hallucination(cand, []) is False
+
+
+def test_signal_d_single_zero_dur_word_alone_is_not_enough():
+    """单个零时长词不判幻觉（对齐边缘抖动常见）——阈值 min_zero_dur_words=2。"""
+    cand = {"start": 10.0, "end": 12.0, "text": "one collapsed word here",
+            "words": _w(("one", 10.0, 10.4), ("collapsed", 10.5, 10.5),
+                        ("word", 10.6, 11.0), ("here", 11.1, 12.0))}
+    assert F._is_recovered_hallucination(cand, []) is False
 
 
 # ---------------------------------------------------------------------------

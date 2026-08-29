@@ -15,7 +15,7 @@ from __future__ import annotations
 import re
 import subprocess
 
-from .ffmpeg_utils import build_audio_profile_cmd
+from .ffmpeg_utils import _resolve_binary, build_audio_profile_cmd
 
 # VAD routing thresholds (ADR-011 / V7 operating truth).
 LOW_MEAN_DB = -20.0
@@ -160,9 +160,16 @@ def analyze_audio(video_path: str, noise: str = "-30dB", d: float = 0.3) -> Audi
     (doctor/verify) degrade gracefully instead of crashing the pipeline.
     """
     try:
+        cmd = build_audio_profile_cmd(video_path, noise=noise, d=d)
+        # Resolve the portable build even when called outside the CLI (toolchain
+        # PATH injection not yet applied) — execution-time, command stays pure.
+        cmd[0] = _resolve_binary("ffmpeg")
         proc = subprocess.run(
-            build_audio_profile_cmd(video_path, noise=noise, d=d),
-            capture_output=True, text=True,
+            cmd, capture_output=True, text=True,
+            # Windows decodes with the locale codec (GBK on zh-CN) unless told
+            # otherwise; ffmpeg echoes the input path, so a non-ASCII video name
+            # raises UnicodeDecodeError and kills the whole profile pass.
+            encoding="utf-8", errors="replace",
         )
     except FileNotFoundError:
         return AudioProfile(ok=False)

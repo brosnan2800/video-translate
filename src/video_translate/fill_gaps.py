@@ -125,6 +125,7 @@ def _is_recovered_hallucination(
     max_words_for_overlap: int = 4,
     avg_logprob_thr: float = -1.0,
     no_speech_thr: float = 0.6,
+    min_zero_dur_words: int = 2,
     check_overlap: bool = True,
 ) -> bool:
     """Hallucination guard for fill_gaps RECOVERED segments (ADR-020 addendum).
@@ -152,10 +153,24 @@ def _is_recovered_hallucination(
          exempt)
       B. words >= min_words AND speaking rate (wps) > max_wps  (physically
          impossible rate, e.g. 3 words in 0.16s = 18.8 wps)
-      C. Whisper confidence: avg_logprob < thr AND (no_speech_prob missing or
-         >= no_speech_thr) — catches misheard phantoms that have no geometric
-         fingerprint (e.g. music heard as "Thank you."), using fields carried
-         from the faster-whisper Segment.
+      C. Whisper non-speech judgement: no_speech_prob >= no_speech_thr
+         (0.6) — the STRONGEST single signal for recovered segments. fill_gaps
+         force-decodes holes with no_speech_threshold=0, so a recovery the
+         model scores >=60% non-speech is energy, not speech; its text is a
+         hallucination. avg_logprob must NOT gate this (phantoms can score
+         -0.65 yet be 76% non-speech). C2: avg_logprob < thr alone as a
+         fallback for older caches that lack no_speech_prob.
+      D. >= min_zero_dur_words words with zero duration (start >= end) — the
+         DTW-collapse fingerprint (ADR-020 signal 4) applied to RECOVERED
+         segments. A phantom decoded from non-speech energy (opening drone
+         boot / ambient hum) often contains words the aligner cannot place, so
+         they collapse onto a single timestamp. Real recovered speech keeps
+         real word intervals (0 zero-duration words in every real fixture);
+         e.g. kathy_meta_vlog's ``Hubsan x4 H502E Desire 2-3-18`` phantom has
+         three zero-duration tail words ("2", "-3", "-18") while the genuine
+         ``We'll be right back.`` / ``Get it.`` / ``Thank you.`` recoveries
+         have none.  This closes the A/B/C blind spot: that phantom had no
+         overlap, 0.66 wps and avg_logprob -0.942 (> -1.0 thr).
 
     `check_overlap` is set False on the collapse-replacement path, where the
     recovered window is *expected* to overlap the replaced segment — disabling
@@ -168,12 +183,43 @@ def _is_recovered_hallucination(
     if (cand.get("words") and nw >= min_words
             and _recovered_wps(cand) > max_wps):
         return True
+    # D: zero-duration words (DTW collapse fingerprint). Fire before C so a
+    # phantom with zero-dur words is dropped even when its avg_logprob sits just
+    # above the -1.0 threshold (the Hubsan blind spot).
+    if (cand.get("words")
+            and _count_zero_dur(cand) >= min_zero_dur_words):
+        return True
+    # C: Whisper's own non-speech judgement. fill_gaps force-decodes holes
+    # with no_speech_threshold=0, so a recovery carrying high no_speech_prob
+    # means the model heard energy but not clear speech — the recovered text
+    # is overwhelmingly likely a hallucination. no_speech_prob is the STRONGEST
+    # single signal for recovered segments; avg_logprob must NOT gate it:
+    #   Hubsan phantom       0.642 -> dropped (also via D)
+    #   We'll be right back. 0.766 -> dropped (signal A misses: exactly 4
+    #                                  words; old AND never fired at -0.65)
+    #   Thank you.           0.799 -> dropped
+    #   Get it.              0.373 -> kept  (low no_speech, plausible)
+    # Real recovered speech keeps low no_speech_prob (jimmy 'Got it walking.'
+    # 0.1). Threshold mirrors the old no_speech_thr (0.6).
+    nsp = cand.get("no_speech_prob")
+    if nsp is not None and nsp >= no_speech_thr:
+        return True
+    # C2: very low avg_logprob alone (older caches may lack no_speech_prob).
     alp = cand.get("avg_logprob")
     if alp is not None and alp < avg_logprob_thr:
-        nsp = cand.get("no_speech_prob")
-        if nsp is None or nsp >= no_speech_thr:
-            return True
+        return True
     return False
+
+
+def _count_zero_dur(cand: dict[str, Any]) -> int:
+    """Count words whose interval collapsed to zero duration (start >= end).
+
+    Mirrors merge.py's ``_collapse_ratio`` primitive: a word the DTW aligner
+    cannot place collapses onto a single timestamp — the geometric fingerprint
+    of a hallucinated token over non-speech energy (ADR-020 signal 4).
+    """
+    return sum(1 for w in (cand.get("words") or [])
+               if w.get("start", 0) >= w.get("end", 0))
 
 
 def _is_echo(text: str, segments: list[dict[str, Any]]) -> bool:

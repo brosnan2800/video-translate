@@ -5,7 +5,20 @@ invoking the binaries (see build_probe_cmd / build_extract_cmd).
 """
 from __future__ import annotations
 
+import shutil
 import subprocess
+
+
+def _resolve_binary(name: str) -> str:
+    """Resolve ffmpeg/ffprobe to an absolute path when on PATH (toolchain injects
+    ``tools/ffmpeg/bin``), else return the bare name so subprocess searches PATH.
+
+    This makes direct calls (e.g. ``analyze_audio`` from a plain script, bypassing
+    the CLI's ``init_toolchain``) resolve the portable build instead of raising
+    FileNotFoundError. Command *construction* stays pure (unit-tested); resolution
+    happens only at execution time.
+    """
+    return shutil.which(name) or name
 
 
 def build_probe_cmd(input_path: str) -> list[str]:
@@ -38,7 +51,14 @@ def probe_duration(input_path: str) -> float:
     Raises:
         RuntimeError: if ffprobe fails or returns unparseable output.
     """
-    proc = subprocess.run(build_probe_cmd(input_path), capture_output=True, text=True)
+    cmd = build_probe_cmd(input_path)
+    cmd[0] = _resolve_binary("ffprobe")
+    proc = subprocess.run(
+        cmd, capture_output=True, text=True,
+        # Explicit utf-8: on Windows `text=True` decodes with the locale codec
+        # (GBK on zh-CN), which cannot decode a non-ASCII path echoed by ffprobe.
+        encoding="utf-8", errors="replace",
+    )
     if proc.returncode != 0:
         raise RuntimeError(f"ffprobe failed for {input_path!r}: {proc.stderr.strip()[:200]}")
     out = proc.stdout.strip()
@@ -54,10 +74,9 @@ def extract_chunk(input_path: str, wav_path: str, start: float, dur: float) -> N
     Raises:
         subprocess.CalledProcessError: if ffmpeg fails.
     """
-    subprocess.run(
-        build_extract_cmd(input_path, wav_path, start, dur),
-        capture_output=True, check=True,
-    )
+    cmd = build_extract_cmd(input_path, wav_path, start, dur)
+    cmd[0] = _resolve_binary("ffmpeg")
+    subprocess.run(cmd, capture_output=True, check=True)
 
 
 def build_audio_profile_cmd(input_path: str, noise: str = "-30dB", d: float = 0.3) -> list[str]:
