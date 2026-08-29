@@ -90,6 +90,10 @@ CLI 参数 / 系统运行时 os.environ  >  .env.local (本地私有)  >  .env.<
 - `VT_COMPUTE_TYPE`：量化类型（`auto` / `int8_float16` / `int8` / `float16`）。
 - `VT_ENGINE`：翻译引擎（默认 `agent`，可选 `google`）。
 - `VT_PROXY`：HTTP 代理地址（如 `http://127.0.0.1:7890`，仅在 `--engine google` 时使用）。
+- `VT_STYLE`：翻译风格轨（默认 `film`，可选 `literal` / `bilingual_study`，可逗号多轨；T3 / ADR-027）。
+- `VT_ALIGN`：词级强制对齐后端（默认 `auto`：GPU + whisperx 可用走 whisperx，否则 `none`；可选 `none` / `whisperx`；T4 / ADR-028）。
+- `VT_SEPARATE_VOCALS`：是否先用 Demucs 剥离纯人声再转写（默认 `false`；T2 / ADR-017）。
+- `VT_DEMUCS_MODEL`：Demucs 人声分离模型（默认 `htdemucs`；T2 高级参数）。
 
 ---
 

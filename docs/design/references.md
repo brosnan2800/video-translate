@@ -18,8 +18,8 @@
 | | Demucs | 人声分离 | 直接依赖（`--separate-vocals`，T2 已过） | CPU/GPU 均可 |
 | | deep-translator | Google 无头翻译兜底 + 重试 | 直接依赖（`--engine google`） | 仅兜底，主路径是 agent |
 | | stable-ts | regroup 拆分思想（gap/length） | **只借思想**，自写 `merge.py` 纯函数 | **拒收依赖**：py3.13 无 wheel（ADR-008） |
-| **2. GPU 模式直接引用** | CUDA / torch | venv 内 cu124 wheel 自带 CUDA 运行时 | 直接引用（E4：`venv torch/lib` 自动探测） | GPU 盒；显式 `VT_CUDA_DIR` 覆盖 |
-| | WhisperX | wav2vec2 强制对齐（词级时间戳 82%→96%） | **计划直接引用**（`--align whisperx`，仅 `[windows]` extra） | **T4 待落地**（ADR-013 延后，未实现） |
+| **2. GPU 模式直接引用** | CUDA / torch | venv 内 cu128 wheel 自带 CUDA 运行时 | 直接引用（E4：`venv torch/lib` 自动探测） | GPU 盒；显式 `VT_CUDA_DIR` 覆盖 |
+| | WhisperX | wav2vec2 强制对齐（词级时间戳 82%→96%） | **已直接引用**（`--align auto` 默认 GPU 走 whisperx，仅 `[gpu]` extra） | **T4 已落地**（ADR-028 + Spec 22，默认 `--align auto`） |
 | | pyannote | 说话人分离（Diarization） | 计划直接引用（`--diarize`） | T5 待落地，需 `HF_TOKEN` |
 | **3. 其他思想借鉴** | OpenMontage / agent 流 | "agent 即引擎"、EXIT 6 交还控制权 | 自实现极简契约（`translate_task.json`），**不引框架** | 不绑死某家 LLM SDK |
 | | WhisperX（思想） | 词级对齐 + 42 字行宽 + "需独立参照校验" | ADR-012 用 ffmpeg `silencedetect` 落地（`audio_profile`） | 零新依赖，Mac 可行 |
@@ -28,8 +28,9 @@
 **三条记忆要点：**
 1. **CPU 模式**：能"真引入"的才引入（faster-whisper / Demucs / deep-translator）；
    引入不了的（stable-ts 无 wheel）→ **只借思想**，自写最小实现。
-2. **GPU 模式**：才值得真引入重依赖（WhisperX / pyannote），但这两项是 **T4/T5 待落地**，
-   当前 GPU 已直接用的是 CUDA 加速（E4）+ Demucs（T2）。
+2. **GPU 模式**：才值得真引入重依赖（WhisperX / pyannote），其中 **T4（WhisperX 对齐）
+   已落地**（ADR-028）、**T5（pyannote 说话人分离）待落地**；当前 GPU 已直接用的是
+   CUDA 加速（E4）+ Demucs（T2）+ WhisperX 对齐（T4）。
 3. **思想借鉴**：OpenMontage（agent 即引擎）、WhisperX（需外参照校验）、Voice-Pro
    （工程最佳实践）——不引依赖，只吸收设计哲学。
 
@@ -99,17 +100,17 @@
   VAD，`verify` 三 lane 里的**声学 lane** 拿静音区间核对每个 cue——这是把
   WhisperX「对齐要外部分参照」的哲学，用不引入重依赖的方式移植了进来。
 
-**没借什么 / 为什么（关键：是"延后"不是"永不"）**
+**没借什么 / 为什么（关键：Mac 不引入，GPU 已落地）**
 
-- **Mac 当前不引入 wav2vec2 alignment 模型**：依赖更重、要 py3.12+CUDA、且对
-  中文支持参差；Mac 锁 `faster-whisper==1.2.1` + CPU/int8 确定性（ADR-001），
-  零新依赖哲学要求保住 golden 回归。
-- **但真正的 WhisperX 强制对齐（~96% 精度）并未被永久拒绝——是 GPU 盒专用、
-  延后落地的路径**（ADR-013，对应 MAJOR_VERSION_PLAN **T4**；ADR-013 内部记作 T3，
-  本文统一用 T4）：`--align {auto,none,whisperx}` 默认 `auto`（T4 默认化：GPU 即 whisperx），
-  仅 `[windows]` extra，对齐只润词级/显示时间戳、不改段落语义；显式请求但库
-  不可用（典型 Mac）时告警并自动回退 `none`。参考关系从"借鉴思想"升级为
-  "**未来在 GPU 路径真正采用其算法**"。
+- **Mac 不引入 wav2vec2 alignment 模型**：依赖更重、要 CUDA、且对中文支持参差；
+  Mac 锁 `faster-whisper==1.2.1` + CPU/int8 确定性（ADR-001），零新依赖哲学保住
+  golden 回归；Mac 路径只做「检测 + 路由」，对齐自动降级 `none`。
+- **真正的 WhisperX 强制对齐（~96% 精度）已在 GPU 盒落地**（ADR-028 + Spec 22，
+  对应 MAJOR_VERSION_PLAN **T4**；ADR-013 是其决策前身，内部曾记作 T3，本文统一
+  用 T4）：`--align {auto,none,whisperx}` 默认 `auto`（T4 默认化：GPU 即 whisperx），
+  仅 `[gpu]` extra（Windows/Linux+CUDA），对齐只润词级/显示时间戳、不改段落语义；
+  显式请求但库不可用（典型 Mac）时告警并自动回退 `none`。参考关系已从"借鉴思想"
+  升级为"**GPU 路径真正采用其算法**"——只借对齐模块，不换转写核心（ADR-028 决策 1）。
 
 ---
 
@@ -154,7 +155,7 @@
 | faster-whisper | CTranslate2/int8 确定性、`word_timestamps`、VAD | 高级对齐封装、GPU 浮点 | 确定性 > 极限质量；原生已够 |
 | Demucs | 人声分离（`--separate-vocals`） | —（直接依赖，T2 已过） | CPU/GPU 均可；见 Spec 19 / ADR-017 |
 | stable-ts | regroup 拆分思想（gap/length） | 依赖本身 | Spike 实测不兼容，自写最小实现 |
-| WhisperX | 词级对齐 + 42 字行宽 +「时间戳需外参照校验」哲学（ADR-012 声学 lane） | Mac 的 wav2vec2 alignment 模型；算法本体留 GPU 盒 **T4** 落地（ADR-013 延后，未实现） | 避免重依赖/中文参差；GPU 强制对齐（96%）待落地，Mac 只检测+路由 |
+| WhisperX | 词级对齐 + 42 字行宽 +「时间戳需外参照校验」哲学（ADR-012 声学 lane） | Mac 的 wav2vec2 alignment 模型；算法本体在 GPU 盒 **T4 已落地**（ADR-028，默认 `--align auto`） | 避免重依赖/中文参差；GPU 强制对齐（96%）已落地，Mac 只检测+路由 |
 | deep-translator | Google 无头兜底 + 重试 | 主翻译路径 | 质量不如 LLM agent |
 | OpenMontage/agent 流 | agent 即引擎、EXIT 6 交还控制权 | 具体 agent 框架 | 轻契约、不绑死 LLM SDK |
 | Voice-Pro | uv.lock、便携 ffmpeg、wheel 自带 CUDA、模型自愈 | WebUI、一站式堆功能 | E1–E4 已落地；见 RESEARCH-voice-pro.md |

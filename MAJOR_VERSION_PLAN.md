@@ -6,7 +6,7 @@
 > 修订：2026-08-25（对标研究 [Voice-Pro](docs/RESEARCH-voice-pro.md) 后新增 **E1-E4 环境确定性工程**为下一阶段最高优先级；固化「依赖与外部工具管理规则」§3.2；原 T3-T7 顺延）
 > 修订：2026-08-28（**T3 双轨翻译风格体系已落地**：ADR-027 + Spec 21，三轨 Persona 矩阵 + `--style` + 双轨输出，全部单测绿；**T4 WhisperX 强制声学对齐已落地**：ADR-028 + Spec 22，`--align whisperx` 词级时间戳精修，独立 pass + 独立缓存层 + 8GB 分步调度 + 优雅降级，全部单测绿）
 > 修订：2026-08-29（**T4 默认化**：`--align` 默认 `none` → `auto`，CUDA + whisperx 可用即自动 whisperx，否则降级 none；同步 AGENTS/README/Spec 22/ADR-013/references 口径）
-> 目标分支：`feat/v5-cuda-windows`
+> 目标分支：`feat/v5-cuda-windows`（已合并至 master）
 > 当前版本：`4.0.0` $\rightarrow$ 目标版本：`5.0.0`
 
 > **执行模型交接说明**：本文档是任务开发的唯一事实来源。E1-E4 为自包含任务（背景/动作/涉及文件/验收标准俱全），可直接执行无需额外上下文。执行前必读 [AGENTS.md](AGENTS.md) §1 红线表与本文档 §3.2 依赖规则。
@@ -46,13 +46,13 @@
 ```mermaid
 flowchart TD
     T1[T1. CUDA 设备抽象与 .env 工具链隔离<br/>✅ 已完成] --> T2[T2. 智能人声/伴奏分离预处理<br/>✅ 已完成 ADR-017]
-    T2 --> E1[E1. uv.lock 可复现安装<br/>🔒 下一阶段最高优先级]
-    E1 --> E2[E2. ffmpeg 自动下载便携版<br/>🔒 消灭全盘搜]
-    E2 --> E3[E3. 模型缓存校验与自愈]
-    E3 --> E4[E4. CUDA 解析 venv torch/lib 优先]
-    E4 --> T3[T3. 双轨翻译风格体系<br/>🎬 影视意译 / 📘 忠实直译]
-    T3 --> T4[T4. WhisperX 强制声学对齐<br/>⏱️ 解决极端声学漂移]
-    T4 --> T5[T5. 说话人分离 Diarization<br/>👥 pyannote 角色标签]
+    T2 --> E1[E1. uv.lock 可复现安装<br/>✅ 已完成 ADR-023]
+    E1 --> E2[E2. ffmpeg 自动下载便携版<br/>✅ 已完成 ADR-024]
+    E2 --> E3[E3. 模型缓存校验与自愈<br/>✅ 已完成 ADR-025]
+    E3 --> E4[E4. CUDA 解析 venv torch/lib 优先<br/>✅ 已完成 ADR-026]
+    E4 --> T3[T3. 双轨翻译风格体系<br/>✅ 已完成 ADR-027 🎬 影视意译 / 📘 忠实直译]
+    T3 --> T4[T4. WhisperX 强制声学对齐<br/>✅ 已完成 ADR-028 ⏱️ 解决极端声学漂移]
+    T4 --> T5[T5. 说话人分离 Diarization<br/>🔒 待落地 pyannote 角色标签]
     T5 --> T6[T6. 独立大模型直连引擎<br/>🤖 DeepSeek / OpenAI API / Ollama]
     T6 --> T7[T7. 批量常驻服务 & Web 校对看板<br/>🖥️ FastAPI + Inspector UI]
 ```

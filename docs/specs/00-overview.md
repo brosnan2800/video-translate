@@ -14,9 +14,10 @@ previously validated ad-hoc pipeline.
 >   (content-type routing, ADR-011);
 > - Alignment must be cross-checked against an **independent reference**
 >   (`ffmpeg silencedetect` measured silence), never self-asserted by whisper;
-> - True acoustic repair (forced alignment, 96% vs word-level 82%) depends on
->   WhisperX and is locked to GPU (MAJOR_VERSION_PLAN T3); the Mac path only
->   *detects + routes*, it does not *repair*.
+> - True acoustic repair (forced alignment, 96% vs word-level 82%) uses
+>   WhisperX wav2vec2 and is **already landed** (T4 / [ADR-028](adr/028-whisperx-alignment-pass.md),
+>   default `--align auto` on GPU); the Mac path only *detects + routes*
+>   (falls back to `none`), it does not *repair*.
 > Subtitle correctness has three orthogonal layers — **acoustic / content /
 > presentation** (Spec 18) — and must not be collapsed into one.
 > See ADR-012.
@@ -60,3 +61,4 @@ could not translate, for agent backfill).
 - Per-stage detail: `02-transcribe.md`, `03-translate.md`, `04-generate-srt.md`
 - CLI: `11-cli-v2.md` · Config: `06-config.md` · Gotchas: `07-gotchas.md`
 - Hardening (V7–V13): `16-fill-gaps.md` (V11 coverage audit) · `17-verify-align.md` (V12 zh/en index-drift guard) · `18-verify.md` (unified self-check: acoustic/content/presentation lanes, ADR-012)
+- V5 additions (T2/T3/T4 + E1–E4): `19-vocal-separation.md` (T2 demucs) · `20-env-readiness.md` (E1–E4 doctor) · `21-translation-styles.md` (T3 style tracks) · `22-whisperx-alignment.md` (T4 forced alignment) · `23-environment-location.md` (`uv run` entry)

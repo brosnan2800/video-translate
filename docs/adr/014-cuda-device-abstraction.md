@@ -2,7 +2,7 @@
 
 - **Status**: Accepted
 - **Date**: 2026-08-19
-- **关联**: ADR-001（CPU/int8 强制，本 ADR 撤销其硬编码部分）、ADR-013（WhisperX GPU 对齐，仍延后）、**ADR-026**（CUDA DLL 目录解析 venv torch/lib 优先，补充本 ADR 的 DLL 来源）、`MAJOR_VERSION_PLAN.md` T1
+- **关联**: ADR-001（CPU/int8 强制，本 ADR 撤销其硬编码部分）、ADR-013（WhisperX GPU 对齐，已由 ADR-028 落地）、**ADR-026**（CUDA DLL 目录解析 venv torch/lib 优先，补充本 ADR 的 DLL 来源）、`MAJOR_VERSION_PLAN.md` T1
 
 ## 背景
 
@@ -52,7 +52,7 @@ Mac 产物字节级不变。**
 - 正面：Windows GPU 盒开箱即用 CUDA（`device=auto` 自动命中）；Mac 完全无感；
   缓存指纹隔离 device 维度，杜绝跨设备缓存污染。
 - 负面 / 注意：本 ADR **只**做设备抽象（T1），**不**引入 WhisperX 对齐（那是
-  ADR-013 / T2，仍延后）。CUDA 路径的 OOM / cuDNN 冲突等风险仍在计划 §4，需在
+  ADR-013（对齐）/ T2（人声分离），均已落地）。CUDA 路径的 OOM / cuDNN 冲突等风险仍在计划 §4，需在
   Windows 盒实测。
 - `tools/dev/` 下的独立脚本（`step1_transcribe.py` 等）写死 `device="cpu"`，
   不属于主包、不随本 ADR 改动。

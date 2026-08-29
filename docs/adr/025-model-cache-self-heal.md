@@ -2,7 +2,7 @@
 
 - **Status**: Accepted（已落地，E3）
 - **Date**: 2026-08-25
-- **关联**: `MAJOR_VERSION_PLAN.md` E3、§3.2 R5、`TOOLCHAIN.md` §2.3、`docs/TOOLING.md` §3、ADR-013（WhisperX 对齐，延后）
+- **关联**: `MAJOR_VERSION_PLAN.md` E3、§3.2 R5、`TOOLCHAIN.md` §2.3、`docs/TOOLING.md` §3、ADR-013（WhisperX 对齐，已由 ADR-028 落地）
 - **落地**: `cli.py` 的 `_model_cached`、`cmd_setup` 自愈、`transcribe.py` 加载异常捕获、`EXIT_MISSING_DEP`
 
 ## 背景
