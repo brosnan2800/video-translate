@@ -133,3 +133,55 @@ def test_merge_max_chars_cli_flag(tmp_path):
     cfg = resolve_config({"merge_max_chars": 50}, cwd=str(tmp_path), env={})
     assert cfg.merge_max_chars == 50
     assert cfg._sources["merge_max_chars"] == "cli"
+
+
+# --- T4: alignment backend (Spec 22) ---
+
+
+def test_align_default_auto(tmp_path):
+    """T4 默认化: 未配置时 align 默认 'auto'（运行时在 GPU 主机解析为 whisperx）。"""
+    cfg = resolve_config(cwd=str(tmp_path), env={})
+    assert cfg.align == "auto"
+    assert cfg._sources.get("align", "default") == "default"
+
+
+def test_align_toml_override(tmp_path):
+    toml = tmp_path / ".video-translate.toml"
+    toml.write_text("[transcribe]\nalign = 'whisperx'\n", encoding="utf-8")
+    cfg = resolve_config(cwd=str(tmp_path), env={})
+    assert cfg.align == "whisperx"
+    assert cfg._sources["align"] == "toml"
+
+
+def test_align_env_overrides_toml(tmp_path):
+    toml = tmp_path / ".video-translate.toml"
+    toml.write_text("[transcribe]\nalign = 'whisperx'\n", encoding="utf-8")
+    cfg = resolve_config(cwd=str(tmp_path), env={"VT_ALIGN": "none"})
+    assert cfg.align == "none"
+    assert cfg._sources["align"] == "env"
+
+
+def test_align_cli_overrides_env_and_toml(tmp_path):
+    toml = tmp_path / ".video-translate.toml"
+    toml.write_text("[transcribe]\nalign = 'none'\n", encoding="utf-8")
+    cfg = resolve_config({"align": "whisperx"}, cwd=str(tmp_path),
+                         env={"VT_ALIGN": "none"})
+    assert cfg.align == "whisperx"
+    assert cfg._sources["align"] == "cli"
+
+
+def test_align_invalid_value_falls_back_auto(tmp_path, capsys):
+    """非法 align 值 -> 告警并回落 auto（不崩溃，铁律 2）。"""
+    cfg = resolve_config({"align": "bogus"}, cwd=str(tmp_path), env={})
+    assert cfg.align == "auto"
+    assert cfg._sources["align"] == "cli"  # was set via CLI then coerced
+    out = capsys.readouterr()
+    assert "align" in out.err.lower()
+
+
+def test_align_auto_explicit_accepted(tmp_path):
+    """显式 'auto' 合法，不告警不回落。"""
+    cfg = resolve_config({"align": "auto"}, cwd=str(tmp_path), env={})
+    assert cfg.align == "auto"
+    assert cfg._sources["align"] == "cli"
+

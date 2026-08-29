@@ -101,6 +101,7 @@ def test_init_toolchain_injects_ffmpeg_and_cuda(tmp_path, monkeypatch):
     ffmpeg_dir.mkdir()
     cuda_dir = tmp_path / "cuda"
     cuda_dir.mkdir()
+    (cuda_dir / "cublas64_12.dll").write_bytes(b"")  # must contain CUDA DLLs
 
     env_file = tmp_path / ".env"
     env_file.write_text(
@@ -152,11 +153,14 @@ def test_ensure_ffmpeg_zip_download_and_idempotent(tmp_path, monkeypatch):
     assert "VT_FFMPEG_DIR=" in env_local.read_text(encoding="utf-8")
 
 
-def test_ensure_ffmpeg_unsupported_platform(monkeypatch):
+def test_ensure_ffmpeg_unsupported_platform(monkeypatch, tmp_path):
     from video_translate.toolchain import ensure_ffmpeg
 
     monkeypatch.setattr("video_translate.toolchain.sys.platform", "freebsd")
-    assert ensure_ffmpeg(dest="tools/ffmpeg") is None
+    # Use a tmp dir, not a relative path: a relative "tools/ffmpeg" resolves
+    # against the repo root, where a real portable ffmpeg may already exist —
+    # ensure_ffmpeg would then short-circuit and return it instead of None.
+    assert ensure_ffmpeg(dest=str(tmp_path / "tools" / "ffmpeg")) is None
 
 
 def test_resolve_cuda_dir_venv_torch_first(monkeypatch, tmp_path):
@@ -167,6 +171,7 @@ def test_resolve_cuda_dir_venv_torch_first(monkeypatch, tmp_path):
 
     torch_lib = tmp_path / "lib"
     torch_lib.mkdir()
+    (torch_lib / "cublas64_12.dll").write_bytes(b"")  # must ship CUDA DLLs
 
     class _FakeSpec:
         submodule_search_locations = [str(tmp_path)]
@@ -192,6 +197,7 @@ def test_resolve_cuda_dir_explicit_override_wins(monkeypatch, tmp_path):
 
     explicit = tmp_path / "explicit_cuda"
     explicit.mkdir()
+    (explicit / "cublas64_12.dll").write_bytes(b"")  # must ship CUDA DLLs
 
     class _FakeSpec:
         submodule_search_locations = [str(tmp_path / "venv_torch")]
@@ -216,6 +222,66 @@ def test_resolve_cuda_dir_none_without_torch_or_env(monkeypatch):
     monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
     for k in ("VT_CUDA_DIR", "VT_TORCH_LIB_DIR", "CUDA_PATH"):
         monkeypatch.delenv(k, raising=False)
+
+    cuda_dir, source = toolchain._resolve_cuda_dir({})
+    assert cuda_dir is None
+    assert source is None
+
+
+def test_resolve_cuda_dir_system_path_does_not_outrank_venv_torch(monkeypatch, tmp_path):
+    """E4 regression: CUDA_PATH (system) must NOT outrank venv torch/lib.
+
+    The original implementation probed CUDA_PATH before the venv, so a stray
+    system CUDA_PATH hijacked the CUDA source even when the venv shipped its own
+    (build-matching) CUDA runtime — which is exactly the case E4 exists to fix.
+    """
+    import importlib
+
+    from video_translate import toolchain
+
+    venv_torch = tmp_path / "venv_torch"
+    torch_lib = venv_torch / "lib"
+    torch_lib.mkdir(parents=True)
+    (torch_lib / "cublas64_12.dll").write_bytes(b"")
+
+    system_cuda = tmp_path / "system_cuda"
+    system_bin = system_cuda / "bin"
+    system_bin.mkdir(parents=True)
+    (system_bin / "cublas64_12.dll").write_bytes(b"")
+
+    class _FakeSpec:
+        submodule_search_locations = [str(venv_torch)]
+
+    monkeypatch.setattr(
+        importlib.util, "find_spec",
+        lambda name: _FakeSpec() if name == "torch" else None,
+    )
+    monkeypatch.setenv("CUDA_PATH", str(system_cuda))
+    monkeypatch.delenv("VT_CUDA_DIR", raising=False)
+    monkeypatch.delenv("VT_TORCH_LIB_DIR", raising=False)
+
+    cuda_dir, source = toolchain._resolve_cuda_dir({})
+    assert source == "venv-torch"
+    assert cuda_dir == str(torch_lib)
+
+
+def test_resolve_cuda_dir_rejects_dir_without_cuda_dlls(monkeypatch, tmp_path):
+    """E4: a directory that merely exists is not a CUDA directory.
+
+    Real-world case that motivated this guard: CUDA_PATH=F:\\Program Files (a
+    generic software root) used to be injected into PATH and reported as the
+    CUDA source.
+    """
+    import importlib
+
+    from video_translate import toolchain
+
+    not_cuda = tmp_path / "not_cuda"
+    not_cuda.mkdir()
+
+    monkeypatch.setenv("VT_CUDA_DIR", str(not_cuda))
+    monkeypatch.setenv("CUDA_PATH", str(not_cuda))
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
 
     cuda_dir, source = toolchain._resolve_cuda_dir({})
     assert cuda_dir is None

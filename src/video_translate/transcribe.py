@@ -17,16 +17,21 @@ heavy library or the 3GB model.
 """
 from __future__ import annotations
 
+import gc
 import hashlib
 import json
 import os
 import shutil
+import sys
 from pathlib import Path
 from typing import Any
+
+import torch  # core dependency (T2/demucs); used for CUDA memory cleanup
 
 from .ffmpeg_utils import extract_chunk, probe_duration
 from .io_utils import load_json, load_json_default, save_json
 from .audio_profile import analyze_audio, route_vad_chunk
+from . import align as _align
 
 # Default device/compute_type — kept as module-level defaults for backward
 # compatibility, but no longer forced: transcribe_video/transcribe_window accept
@@ -262,6 +267,13 @@ def transcribe_video(
     vocal_sep_backend: str = "demucs",
     vocal_sep_model: str = "htdemucs",
     vocal_sep_input_hash: str | None = None,
+    # T4 (ADR-028 / Spec 22): forced-acoustic-alignment backend.
+    # "auto" (default, T4 默认化) -> whisperx when the host can run it (CUDA +
+    # whisperx installed), else none. "whisperx" forces it (macOS / not-installed
+    # gracefully falls back to none). "none" = no alignment, byte-identical to
+    # historical output. Does NOT alter the transcribe fingerprint — alignment
+    # is a separate cache layer.
+    align_backend: str = "auto",
     progress=print,
 ) -> str:
     """Transcribe `input_path` into `{outdir}/{base}.segments_en.json`.
@@ -320,6 +332,7 @@ def transcribe_video(
 
     model: WhisperModel | None = None
     chunk_lists: list[list[dict[str, Any]]] = []
+    detected_language: str | None = lang  # None -> auto-detected; pass to align
 
     for ci, cstart, cdur in plan:
         cjson = _chunk_json_path(outdir, base, ci, fp)
@@ -343,7 +356,7 @@ def transcribe_video(
                 chunk_vad = route_vad_chunk(cprof, cdur)
             except Exception:  # noqa: BLE001 - profiling failure -> safe bare default
                 chunk_vad = False
-        segs, _info = model.transcribe(
+        segs, info = model.transcribe(
             wav, language=lang, task="transcribe",
             beam_size=BEAM_SIZE, best_of=BEST_OF,
             condition_on_previous_text=CONDITION_ON_PREVIOUS_TEXT,
@@ -354,6 +367,13 @@ def transcribe_video(
             temperature=temperature or TEMPERATURE_FALLBACK,
             word_timestamps=True,   # V3: word-level timestamps for split + silence
         )
+        if info is not None and getattr(info, "language", None):
+            detected_language = info.language  # capture auto-detect for alignment
+            # Persist for resume: when all chunks are cached and the loop is
+            # skipped, detection never runs — this sidecar keeps the align
+            # fingerprint stable across re-runs (ADR-028 / Spec 22).
+            save_json(os.path.join(outdir, f"{base}.{fp}.detected_lang.json"),
+                      {"language": detected_language}, indent=0)
         chunk_segs = [
             _seg_to_dict(s, cstart)
             for s in segs
@@ -364,11 +384,120 @@ def transcribe_video(
         if os.path.exists(wav):
             os.remove(wav)
 
+    # --- T4 (ADR-028 / Spec 22): forced-acoustic-alignment pass ---
+    # Runs AFTER the transcription loop and BEFORE merge_chunks. Steps below keep
+    # the 8GB red line (Whisper released before wav2vec2 is loaded) and the
+    # independent alignment cache layer (no transcribe-fingerprint coupling).
+
+    # If the whole transcription was resumed (loop skipped), `detected_language`
+    # is still None — restore it from the sidecar so the align fingerprint and
+    # wav2vec2 model selection stay consistent with the original run.
+    if detected_language is None:
+        lang_sidecar = load_json_default(
+            os.path.join(outdir, f"{base}.{fp}.detected_lang.json"), None
+        )
+        if lang_sidecar and lang_sidecar.get("language"):
+            detected_language = lang_sidecar["language"]
+
+    if align_backend != "none":
+        align_backend = _resolve_align_backend(align_backend, progress)
+    if align_backend != "none":
+        # Release Whisper (8GB budget) before loading wav2vec2.
+        del model
+        model = None
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        align_fp = _align.align_fingerprint(fp, detected_language,
+                                            backend=align_backend)
+        for ci, cstart, cdur in plan:
+            acache = _align.align_cache_path(outdir, base, ci, align_fp)
+            cached = load_json_default(acache, None)
+            if cached is not None:
+                progress(f"[align skip] chunk {ci} already aligned")
+                chunk_lists[ci] = cached
+                continue
+            # Prefer the transcribed chunk cache (absolute timeline, +cstart).
+            chunk_segs = load_json_default(
+                _chunk_json_path(outdir, base, ci, fp), None
+            ) or chunk_lists[ci]
+            if not chunk_segs:
+                continue
+            # whisperx aligns in chunk-LOCAL time (0-based); subtract cstart.
+            local_segs = [
+                {**s, "start": round(s["start"] - cstart, 2),
+                 "end": round(s["end"] - cstart, 2),
+                 "words": [{"word": w["word"],
+                            "start": round(w["start"] - cstart, 2),
+                            "end": round(w["end"] - cstart, 2)}
+                           for w in s.get("words", [])]}
+                for s in chunk_segs
+            ]
+            wav = os.path.join(outdir, f"{base}.{fp}.chunk_{ci}.wav")
+            extract_chunk(_extract_src, wav, cstart, cdur)
+            try:
+                aligned_local = _align.align_segments(
+                    local_segs, wav, detected_language,
+                    align_backend=align_backend, progress=progress,
+                )
+                # Re-add cstart to land back on the absolute timeline.
+                aligned_abs = [
+                    {**s, "start": round(s["start"] + cstart, 2),
+                     "end": round(s["end"] + cstart, 2),
+                     "words": [{"word": w["word"],
+                                "start": round(w["start"] + cstart, 2),
+                                "end": round(w["end"] + cstart, 2)}
+                               for w in s.get("words", [])]}
+                    for s in aligned_local
+                ]
+                save_json(acache, aligned_abs, indent=0)
+                chunk_lists[ci] = aligned_abs
+                progress(f"[align done] chunk {ci} segs={len(aligned_abs)}")
+            finally:
+                if os.path.exists(wav):
+                    os.remove(wav)
+        # Final cleanup of the alignment model.
+        _align.release_align_memory()
+
     all_segs = merge_chunks(chunk_lists)
     out = os.path.join(outdir, f"{base}.segments_en.json")
     save_json(out, all_segs, indent=0)
     progress(f"[merge] total {len(all_segs)} segments -> {out}")
     return out
+
+
+def _resolve_align_backend(requested: str, progress=print) -> str:
+    """Resolve the effective alignment backend, applying graceful degradation
+    (铁律 2): explicit whisperx but unavailable -> warn + fall back to none;
+    default "auto" -> whisperx only on hosts that can actually run it.
+
+    Returns "none" when alignment cannot/should not run.
+    """
+    if requested == "none":
+        return "none"
+    if requested == "auto":
+        # T4 默认化: this is the DEFAULT — run whisperx only when the host can do
+        # it (CUDA + package), otherwise degrade silently (info, not a warning).
+        if _align.whisperx_available() and torch.cuda.is_available():
+            return "whisperx"
+        print("[align] auto: whisperx alignment unavailable on this host "
+              "(need NVIDIA CUDA + whisperx installed); using none.",
+              file=sys.stderr)
+        return "none"
+    if requested not in _align.ALIGN_BACKENDS:
+        print(f"[align] WARNING: unknown backend {requested!r}; "
+              f"falling back to none", file=sys.stderr)
+        return "none"
+    if not _align.whisperx_available():
+        print(
+            "[align] WARNING: --align whisperx requested but WhisperX is not "
+            "available (macOS / not installed). Falling back to none — run "
+            "`uv sync --extra gpu` on a CUDA machine to enable alignment.",
+            file=sys.stderr,
+        )
+        return "none"
+    return requested
 
 
 def _seg_to_dict(s, offset: float) -> dict[str, Any]:

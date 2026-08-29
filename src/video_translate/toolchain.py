@@ -188,38 +188,77 @@ def _check_cuda_support() -> tuple[bool, str]:
     return False, "No NVIDIA GPU / CUDA runtime detected (CPU fallback)"
 
 
+def _dir_has_cuda_dlls(path: str | Path) -> bool:
+    """True only when `path` actually holds CUDA runtime DLLs.
+
+    E4 guard: probing used to accept any directory that merely existed, so an
+    unrelated ``CUDA_PATH`` (e.g. ``F:\\Program Files``) was injected into PATH
+    and reported to `doctor` as the CUDA source. Require the DLLs themselves.
+    """
+    try:
+        names = {p.name.lower() for p in Path(path).iterdir() if p.is_file()}
+    except OSError:
+        return False
+    return any(
+        name.startswith(("cublas64_", "cudart64_", "cudnn64_", "cufft64_", "nvrtc64_"))
+        for name in names
+    )
+
+
 def _resolve_cuda_dir(merged: dict[str, str]) -> tuple[str | None, str | None]:
     """Resolve the CUDA / PyTorch lib directory (Milestone 3 / E4).
 
     Order (deterministic, no scattered caches):
-      ① venv torch/lib  — auto-detect torch shipped inside this venv
-      ② VT_CUDA_DIR / VT_TORCH_LIB_DIR — explicit override (highest priority)
-      ③ CUDA_PATH — system CUDA toolkit
+      ① VT_CUDA_DIR / VT_TORCH_LIB_DIR — explicit override: what the user
+         spelled out wins, we never second-guess a deliberate setting.
+      ② venv torch/lib — auto-detected; ships the CUDA runtime that exactly
+         matches this venv's torch build, so a fresh machine needs no config.
+      ③ CUDA_PATH — system CUDA toolkit, last resort.
 
-    Returns (dir, source_label). source_label ∈ {"venv-torch", "env", "system"}
+    Every candidate must actually contain CUDA DLLs — a directory that merely
+    exists is not a CUDA directory.
+
+    Returns (dir, source_label). source_label ∈ {"env", "venv-torch", "system"}
     so doctor can show where the directory came from; ``None`` means CPU fallback.
     """
-    # ② explicit override wins when actually present on disk.
-    for key, label in (("VT_CUDA_DIR", "env"), ("VT_TORCH_LIB_DIR", "env"),
-                       ("CUDA_PATH", "system")):
-        val = merged.get(key) or os.environ.get(key)
-        if val and os.path.isdir(val):
-            return val, label
+    def _validated(raw: str | None, label: str) -> tuple[str, str] | None:
+        if not raw:
+            return None
+        path = Path(raw)
+        if not path.is_dir():
+            return None
+        # A CUDA_PATH points at the toolkit root; its DLLs live in bin/.
+        cand = path / "bin" if (path / "bin").is_dir() else path
+        if _dir_has_cuda_dlls(cand):
+            return str(cand), label
+        if _dir_has_cuda_dlls(path):
+            return str(path), label
+        return None
 
-    # ① venv torch/lib — derived from the torch package installed in this venv.
+    # ① explicit override
+    for key in ("VT_CUDA_DIR", "VT_TORCH_LIB_DIR"):
+        hit = _validated(merged.get(key) or os.environ.get(key), "env")
+        if hit:
+            return hit
+
+    # ② venv torch/lib — derived from the torch package installed in this venv.
     try:
         import importlib.util
 
         spec = importlib.util.find_spec("torch")
         if spec and spec.submodule_search_locations:
-            torch_root = Path(spec.submodule_search_locations[0])
-            cand = torch_root / "lib"
-            if cand.is_dir():
-                return str(cand), "venv-torch"
+            cand = Path(spec.submodule_search_locations[0]) / "lib"
+            hit = _validated(str(cand), "venv-torch")
+            if hit:
+                return hit
     except Exception:  # noqa: BLE001
         pass
 
-    # ③ system CUDA_PATH already covered in the loop above (returns "system").
+    # ③ system CUDA toolkit
+    hit = _validated(merged.get("CUDA_PATH") or os.environ.get("CUDA_PATH"), "system")
+    if hit:
+        return hit
+
     return None, None
 
 
@@ -430,3 +469,152 @@ def ensure_ffmpeg(dest: str | Path = "tools/ffmpeg", *, proxy: str | None = None
 
     print(f"[ensure_ffmpeg] ready at {bin_dir}")
     return str(bin_dir)
+
+
+# --- alignment corpora (R4/R5: project-local, auto-provisioned, gitignored) ---
+# whisperx sentence-splits with nltk before aligning, so `punkt` / `punkt_tab`
+# must resolve. Without them `whisperx.align` raises a LookupError and the align
+# pass silently degrades to DTW timestamps — it looks like alignment ran, but
+# every timestamp stays exactly as faster-whisper produced it. Same treatment as
+# the Whisper weights (E3) and ffmpeg (E2): provisioned by `setup` into
+# <repo>/models/, never committed, never fetched ad hoc by hand or agent.
+_NLTK_RESOURCES = {
+    "punkt": "tokenizers/punkt",
+    "punkt_tab": "tokenizers/punkt_tab",
+    "averaged_perceptron_tagger": "taggers/averaged_perceptron_tagger",
+}
+
+
+def nltk_data_dir() -> Path:
+    """Project-local NLTK data dir (<repo>/models/nltk_data).
+
+    Derived from this file's location (src/video_translate/toolchain.py) so it
+    resolves regardless of the current working directory.
+    """
+    return Path(__file__).resolve().parent.parent.parent / "models" / "nltk_data"
+
+
+def _nltk_has(nltk_mod, resource: str) -> bool:
+    try:
+        nltk_mod.data.find(resource)
+        return True
+    except LookupError:
+        return False
+
+
+def register_nltk_path() -> str | None:
+    """Put the project-local NLTK dir on nltk's search path (idempotent).
+
+    Returns the path, or None when nltk is not installed. Every check and every
+    use of the corpora must go through this first — otherwise `doctor` reports
+    "corpora missing" while the align pass happily finds them (the path is only
+    registered as a side effect of running alignment).
+    """
+    try:
+        import nltk
+    except Exception:  # noqa: BLE001 - nltk only ships with the gpu extra
+        return None
+    target = str(nltk_data_dir())
+    if target not in nltk.data.path:
+        nltk.data.path.insert(0, target)
+    return target
+
+
+def nltk_data_ready() -> bool | None:
+    """True when every needed corpus resolves; None when nltk is not installed.
+
+    `None` (not False) distinguishes "alignment extra absent" from "corpora
+    missing" so doctor can print the right hint.
+    """
+    if register_nltk_path() is None:
+        return None
+    import nltk
+    return all(_nltk_has(nltk, res) for res in _NLTK_RESOURCES.values())
+
+
+def ensure_nltk_data(dest: str | Path | None = None) -> str | None:
+    """Download the NLTK corpora the alignment backend needs into <repo>/models/.
+
+    Idempotent: returns as soon as every corpus resolves. Never raises — a
+    failure here must not break `setup`; the align pass degrades gracefully.
+    """
+    try:
+        import nltk
+    except Exception:  # noqa: BLE001
+        return None
+
+    target = Path(dest) if dest else nltk_data_dir()
+    if str(target) not in nltk.data.path:
+        nltk.data.path.insert(0, str(target))
+
+    missing = [pkg for pkg, res in _NLTK_RESOURCES.items()
+               if not _nltk_has(nltk, res)]
+    if not missing:
+        print(f"[ensure_nltk_data] already present at {target}; skipping download.")
+        return str(target)
+
+    # nltk refuses to fetch through a proxy unless explicitly opted in (SSRF guard).
+    os.environ.setdefault("NLTK_ALLOW_PROXIED_URLOPEN", "1")
+    target.mkdir(parents=True, exist_ok=True)
+    fetched = 0
+    for pkg in missing:
+        print(f"[ensure_nltk_data] downloading {pkg} -> {target} ...")
+        try:
+            if nltk.download(pkg, download_dir=str(target)):
+                fetched += 1
+        except Exception as exc:  # noqa: BLE001
+            print(f"[ensure_nltk_data] WARNING: {pkg} failed: {exc}",
+                  file=sys.stderr)
+    return str(target) if fetched == len(missing) else None
+
+
+# ---------------------------------------------------------------------------
+# Command-entry determinism (ADR-029 / Spec 23)
+# ---------------------------------------------------------------------------
+# The project's runtime environment always lives at <repo>/.venv, managed by uv.
+# Every command must be launched through `uv run` (or an activated .venv) so the
+# interpreter is pinned to the project — never a stray system python that may
+# shadow the venv on PATH. `doctor` surfaces the entry source so a bare-python
+# launch is caught before it silently degrades (e.g. missing whisperx).
+
+
+def project_root() -> Path:
+    """Repo root, derived from this module's location (src/video_translate/).
+
+    Independent of the current working directory, matching ``nltk_data_dir()``.
+    """
+    return Path(__file__).resolve().parent.parent.parent
+
+
+def project_venv_dir(root_dir: str | Path | None = None) -> Path:
+    """The project virtualenv directory (<repo>/.venv), regardless of CWD."""
+    root = Path(root_dir) if root_dir else project_root()
+    return root / ".venv"
+
+
+def resolve_command_entry(root_dir: str | Path | None = None) -> tuple[str, str]:
+    """Determine how the CLI was launched (ADR-029 / Spec 23).
+
+    Returns ``(entry, interpreter)`` where entry ∈ {"uv-run", "venv", "bare"}:
+      - ``uv-run``  ``VIRTUAL_ENV`` points at this repo's ``.venv`` — the
+                     canonical launch (`uv run` and `.venv activate` both set it).
+      - ``venv``    ``sys.executable`` lives inside this repo's ``.venv`` but no
+                     ``VIRTUAL_ENV`` marker was seen.
+      - ``bare``    the interpreter is NOT the project venv (a system python or
+                     another project's env shadowing PATH). This is the drift
+                     the entry check exists to catch.
+
+    ``interpreter`` is the resolved ``sys.executable`` for the doctor line.
+    """
+    venv = project_venv_dir(root_dir).resolve()
+    interp = Path(sys.executable).resolve()
+    venv_env = os.environ.get("VIRTUAL_ENV")
+    if venv_env and os.path.normcase(str(venv)) == os.path.normcase(
+        str(Path(venv_env).resolve())
+    ):
+        return "uv-run", sys.executable
+    interp_norm = os.path.normcase(str(interp))
+    venv_norm = os.path.normcase(str(venv))
+    if interp_norm == venv_norm or interp_norm.startswith(venv_norm + os.sep):
+        return "venv", sys.executable
+    return "bare", sys.executable

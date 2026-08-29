@@ -24,11 +24,11 @@ from pathlib import Path
 from typing import Sequence
 
 from . import __version__
-from .config import DEFAULT_HF_CACHE, resolve_config
+from .config import DEFAULT_HF_CACHE, DEFAULT_PERSONA, resolve_config
 from .io_utils import load_json, save_json
 from .proxy import detect_proxy, setup_http_proxy
 from .audio_profile import analyze_audio
-from .toolchain import init_toolchain
+from .toolchain import init_toolchain, resolve_command_entry
 from .verify import (
     UNCOVERED_AUDIO, find_uncovered_speech, find_untranslated_latin_words,
     verify_acoustic, verify_presentation,
@@ -204,6 +204,17 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     else:
         print(f"  [INFO] env config   : default (no .env file loaded)")
 
+    # ADR-029 / Spec 23: command-entry determinism. A bare system python on
+    # PATH shadows the project venv and silently loses deps (e.g. whisperx),
+    # so doctor surfaces how this CLI was launched and how to fix it.
+    entry, interp = resolve_command_entry()
+    if entry == "bare":
+        print(f"  [WARN] entry       : BARE — interpreter NOT in project .venv")
+        print(f"                     interpreter: {interp}")
+        print(f"                     Fix: cd <repo> && uv run video-translate ... (Spec 23)")
+    else:
+        print(f"  [OK ] entry       : {entry} — project .venv ({interp})")
+
     checks = [
         ("ffmpeg", _has("ffmpeg")),
         ("ffprobe", _has("ffprobe")),
@@ -259,6 +270,31 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                   f"                    pip install -e .   (core dependency)")
     except Exception:
         print(f"  demucs         : probe failed — vocal separation unavailable")
+    # T4 / ADR-028 / Spec 22: forced-acoustic-alignment status (GPU-only extra)
+    nltk_missing = False
+    try:
+        from .align import whisperx_available
+        if whisperx_available():
+            # whisperx sentence-splits with nltk. Without those corpora the align
+            # pass degrades to DTW timestamps while still reporting success — the
+            # most expensive kind of silent no-op, so surface it explicitly.
+            from .toolchain import nltk_data_ready
+            if nltk_data_ready():
+                print(f"  whisperx      : OK — forced alignment available "
+                      f"(--align whisperx)")
+            else:
+                nltk_missing = True
+                print(f"  whisperx      : installed, but NLTK corpora MISSING — "
+                      f"alignment would silently degrade to DTW")
+        else:
+            _mac = sys.platform == "darwin"
+            _hint = ("(macOS has no CUDA; alignment unsupported)"
+                     if _mac else
+                     "not installed — enable with: uv sync --extra gpu "
+                     "(requires NVIDIA CUDA)")
+            print(f"  whisperx      : unavailable {_hint}")
+    except Exception:
+        print(f"  whisperx      : probe failed — forced alignment unavailable")
     print(f"  engine        : {cfg.engine}")
     print(f"  lang          : {'auto-detect' if cfg.lang is None else cfg.lang}")
 
@@ -324,6 +360,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print("\n  [FIX] ffmpeg/ffprobe missing. Run the deterministic auto-download:")
         print("        video-translate setup --ffmpeg")
         print("        (downloads a portable build into tools/ffmpeg, no manual install)")
+    if nltk_missing:
+        print("\n  [FIX] NLTK alignment corpora missing. Run:")
+        print("        video-translate setup --align")
+        print("        (downloads punkt/punkt_tab into models/nltk_data, no C:\\ cache)")
     if not _model_cached("large-v3"):
         print("\n  [FIX] large-v3 model missing. Run:")
         print("        make setup     # or: video-translate setup")
@@ -358,6 +398,17 @@ def cmd_setup(args: argparse.Namespace) -> int:
         # Make the freshly-downloaded ffmpeg available for the rest of this run.
         os.environ["PATH"] = str(bin_dir) + os.pathsep + os.environ.get("PATH", "")
         os.environ["VT_FFMPEG_DIR"] = str(bin_dir)
+
+    if getattr(args, "align", False):
+        from .toolchain import ensure_nltk_data
+        print("[setup] --align requested: ensuring NLTK alignment corpora...")
+        nltk_dir = ensure_nltk_data()
+        if nltk_dir is None:
+            print("[error] NLTK corpora unavailable. whisperx (and therefore nltk) "
+                  "ships with the [gpu] extra — install it with: "
+                  "uv sync --extra gpu", file=sys.stderr)
+            return EXIT_MISSING_DEP
+        print(f"[setup] nltk data ready at {nltk_dir}")
 
     if getattr(args, "no_model", False):
         print("[setup] --no-model set; skipping model download.")
@@ -494,7 +545,8 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
          "device": getattr(args, "device", None),
          "compute_type": getattr(args, "compute_type", None),
          "separate_vocals": getattr(args, "separate_vocals", None),
-         "demucs_model": getattr(args, "demucs_model", None)},
+         "demucs_model": getattr(args, "demucs_model", None),
+         "align": getattr(args, "align", None)},
         cwd=os.getcwd(),
     )
     cfg.model = _resolve_model_path(cfg.model)
@@ -521,6 +573,8 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
             vocal_sep_backend=_vsep_backend,
             vocal_sep_model=_vsep_model,
             vocal_sep_input_hash=_vsep_ihash,
+            # T4 (ADR-028 / Spec 22): forced-acoustic-alignment backend.
+            align_backend=cfg.align,
         )
         segs_path = os.path.join(outdir, f"{base}.segments_en.json")
         # ADR-012: compute the independent silence reference ONCE and share it
@@ -598,9 +652,10 @@ def cmd_translate(args: argparse.Namespace) -> int:
         if cfg.glossary:
             from .glossary import load_glossary
             glossary_text = load_glossary(cfg.glossary)
-        prepare_translate_task(segments, task_path, persona=cfg.persona,
+        prepare_translate_task(segments, task_path,
+                                persona=cfg.persona if cfg.persona != DEFAULT_PERSONA else None,
                                 glossary=glossary_text, source=cfg.source,
-                                full_transcript=cfg.full_transcript)
+                                full_transcript=cfg.full_transcript, style=cfg.style)
         base = _derive_base(segments)
         outdir = str(Path(out).parent)
         print(_AGENT_TRANSLATE_INSTRUCTIONS.format(
@@ -657,7 +712,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
         from .generate import generate_subtitles
         generate_subtitles(args.segments, args.zh, args.outdir, base=base,
                            gap=gap, min_dur=min_dur, offset=offset, tail=tail,
-                           flat=flat, prune_old=prune_old)
+                           flat=flat, prune_old=prune_old, style=args.style)
         return EXIT_OK
     except Exception as e:  # noqa: BLE001
         print(f"[error] generate failed: {e}", file=sys.stderr)
@@ -685,8 +740,10 @@ def cmd_run(args: argparse.Namespace) -> int:
          "engine": args.engine, "merge_max_chars": getattr(args, "merge_max_chars", None),
          "glossary": getattr(args, "glossary", None),
          "source": getattr(args, "source", None),
+         "style": getattr(args, "style", None),
          "device": getattr(args, "device", None),
-         "compute_type": getattr(args, "compute_type", None)},
+         "compute_type": getattr(args, "compute_type", None),
+         "align": getattr(args, "align", None)},
         cwd=os.getcwd(),
     )
 
@@ -706,6 +763,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             # T2 / ADR-017: forward the vocal-separation flags verbatim
             separate_vocals=getattr(args, "separate_vocals", False),
             demucs_model=getattr(args, "demucs_model", None),
+            # T4 (ADR-028 / Spec 22): forward alignment backend
+            align=cfg.align,
         ))
         if rc != EXIT_OK:
             return rc
@@ -716,9 +775,24 @@ def cmd_run(args: argparse.Namespace) -> int:
         if cfg.glossary:
             from .glossary import load_glossary
             glossary_text = load_glossary(cfg.glossary)
-        prepare_translate_task(segments, task, persona=cfg.persona,
+        # Multi-style: emit one task per style (suffixed filenames), else single.
+        persona_override = cfg.persona if cfg.persona != DEFAULT_PERSONA else None
+        if "," in cfg.style:
+            styles = [s.strip() for s in cfg.style.split(",") if s.strip()]
+            written = prepare_translate_task(
+                segments, None, persona=persona_override,
+                glossary=glossary_text, source=cfg.source,
+                full_transcript=cfg.full_transcript,
+                styles=styles, outdir=outdir, base=base)
+            for t in written:
+                print(_RUN_AWAITING_AGENT_INSTRUCTIONS.format(
+                    task=t, segments=segments,
+                    zh=os.path.join(outdir, f"{base}.{_style_of(t)}.zh_segments.json"),
+                    outdir=outdir, base=base))
+            return EXIT_AWAITING_AGENT
+        prepare_translate_task(segments, task, persona=persona_override,
                                 glossary=glossary_text, source=cfg.source,
-                                full_transcript=cfg.full_transcript)
+                                full_transcript=cfg.full_transcript, style=cfg.style)
         print(_RUN_AWAITING_AGENT_INSTRUCTIONS.format(
             task=task, segments=segments, zh=zh, outdir=outdir, base=base))
         return EXIT_AWAITING_AGENT
@@ -885,8 +959,9 @@ def cmd_backfill(args: argparse.Namespace) -> int:
     save_json(tmp_segs, pending, indent=0)
     task_path = os.path.join(outdir, f"{base}.backfill_task.json")
     from .translate import prepare_translate_task
-    prepare_translate_task(tmp_segs, task_path, persona=cfg.persona,
-                           index_key="index")
+    prepare_translate_task(tmp_segs, task_path,
+                           persona=cfg.persona if cfg.persona != DEFAULT_PERSONA else None,
+                           index_key="index", style=cfg.style)
     segs_hint = args.segments or "<segments_en.json>"
     print(_BACKFILL_INSTRUCTIONS.format(
         task=task_path, pending=args.pending, out=out,
@@ -943,6 +1018,19 @@ def _derive_base(segments_path: str) -> str:
         if name.endswith(suf):
             return name[: -len(suf)]
     return os.path.splitext(name)[0]
+
+
+def _style_of(task_path: str) -> str:
+    """Extract the style suffix from a `<base>.<style>.translate_task.json` path."""
+    name = os.path.basename(task_path)
+    for suf in (".translate_task.json", ".backfill_task.json"):
+        if name.endswith(suf):
+            name = name[: -len(suf)]
+            break
+    # name is now "<base>.<style>" or "<base>"
+    if "." in name:
+        return name.rsplit(".", 1)[1]
+    return "film"
 
 
 def _find_generate_opts(segments_path: str) -> dict | None:
@@ -1151,6 +1239,14 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--no-audit", action="store_true",
                    help="skip the coverage self-audit + gap recovery step after "
                         "transcription (audit runs by default)")
+    t.add_argument("--align", choices=["auto", "none", "whisperx"], default=None,
+                   help="(T4 / ADR-028 / Spec 22) forced-acoustic word alignment "
+                        "backend. 'auto' (default) = WhisperX wav2vec2 word-level "
+                        "timestamp refinement on hosts that can run it (NVIDIA CUDA + "
+                        "package), else none. 'whisperx' = force alignment (macOS / "
+                        "not-installed degrades to none). 'none' = no alignment, "
+                        "byte-identical to historical output. Override precedence: "
+                        "CLI > VT_ALIGN > [transcribe].align")
     t.set_defaults(func=cmd_transcribe)
 
     tr = sub.add_parser("translate", help="Translate segments_en.json -> zh_segments.json")
@@ -1168,6 +1264,10 @@ def build_parser() -> argparse.ArgumentParser:
     tr.add_argument("--source", default=None,
                     help="video provenance/背景 hint fed to the translator, e.g. "
                          "'电影《天国王朝》鲍德温四世与萨拉丁会面片段'")
+    tr.add_argument("--style", default=None,
+                    choices=["film", "literal", "bilingual_study"],
+                    help="translation style track: film (default, 影视二创) / "
+                         "literal (忠实直译) / bilingual_study (双语精读注记)")
     tr.set_defaults(func=cmd_translate)
 
     g = sub.add_parser("generate", help="Generate the four subtitle files")
@@ -1195,6 +1295,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="keep only the 2 newest versioned outputs in the subfolder")
     g.add_argument("--no-align-check", action="store_true",
                    help="skip the zh/en index-drift audit run before rendering")
+    g.add_argument("--style", default=None,
+                   choices=["film", "literal", "bilingual_study"],
+                   help="style suffix for output filenames (e.g. base.film.bilingual.srt); "
+                        "omit for the default single-track name")
     g.set_defaults(func=cmd_generate)
 
     r = sub.add_parser("run", help="Full pipeline: transcribe -> translate -> generate")
@@ -1238,6 +1342,10 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--no-audit", action="store_true",
                    help="skip the coverage self-audit + gap recovery step after "
                         "transcription (audit runs by default)")
+    r.add_argument("--align", choices=["auto", "none", "whisperx"], default=None,
+                   help="(T4 / ADR-028 / Spec 22) forced-acoustic word alignment "
+                        "backend. See 'transcribe --align'. 'auto' (default) runs "
+                        "whisperx on CUDA hosts; macOS / not-installed degrades to none.")
     r.add_argument("--src", default="en")
     r.add_argument("--tgt", default="zh-CN")
     r.add_argument("--engine", default=None, choices=["agent", "google"],
@@ -1254,6 +1362,10 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--source", default=None,
                    help="video provenance/背景 hint fed to the translator, e.g. "
                         "'电影《天国王朝》鲍德温四世与萨拉丁会面片段'")
+    r.add_argument("--style", default=None,
+                   choices=["film", "literal", "bilingual_study"],
+                   help="translation style track: film (default, 影视二创) / "
+                        "literal (忠实直译) / bilingual_study (双语精读注记)")
     r.add_argument("--flat", action="store_true",
                    help="legacy: write final outputs flat into --outdir (no per-video subfolder)")
     r.add_argument("--prune-old", action="store_true",
@@ -1296,6 +1408,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="quantization (default auto)")
     s.add_argument("--ffmpeg", action="store_true",
                    help="also download a portable FFmpeg into tools/ffmpeg (idempotent)")
+    s.add_argument("--align", action="store_true",
+                   help="also download the NLTK corpora the whisperx alignment "
+                        "backend needs into models/nltk_data (idempotent)")
     s.add_argument("--no-model", action="store_true",
                    help="skip model download (e.g. when only fetching FFmpeg)")
     s.add_argument("--proxy", default=None)
@@ -1339,6 +1454,9 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--base", default=None)
     b.add_argument("--agent-zh", default=None,
                    help="agent-filled zh JSON (triggers merge + generate)")
+    b.add_argument("--style", default=None,
+                   choices=["film", "literal", "bilingual_study"],
+                   help="translation style track for the backfill task persona")
     b.set_defaults(func=cmd_backfill)
 
     return p

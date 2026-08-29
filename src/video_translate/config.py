@@ -14,6 +14,7 @@ proxy defaults to None (auto-detect via proxy.detect_proxy). The literal
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -31,6 +32,59 @@ DEFAULT_PERSONA = (
     "你是一位资深中英字幕译者。遵循「信达雅」+ 口语感：忠实原意、表达自然、"
     "保留说话人语气与情绪。遇到俚语/文化梗用贴近中文口语的等价表达，不要直译。"
 )
+
+# --- T3 / ADR-027: 翻译风格三轨矩阵 ---
+# film：影视二创（默认，等价于历史 DEFAULT_PERSONA 基调）
+# literal：忠实直译，保真优先于流畅
+# bilingual_study：双语精读，直译为主 + 生僻词括号注记
+VALID_STYLES = ("film", "literal", "bilingual_study")
+
+
+@dataclass
+class StyleDef:
+    """单条翻译风格的完整定义。"""
+    persona: str
+    guidelines: list[str]
+
+
+STYLE_PERSONAS: dict[str, StyleDef] = {
+    "film": StyleDef(
+        persona=DEFAULT_PERSONA,
+        guidelines=[
+            "口语优先：用现代中文口语表达，避免书面腔与翻译腔。",
+            "意译优先：遇到英语 idiom / 文化梗，用中文观众能秒懂的等价说法，不要逐字直译。",
+            "保留语气：说话人的幽默、愤怒、迟疑、激动都要在译文里听得出来。",
+            "节奏感：字幕是给人『念出来』的，断句要顺口，单条控制在 1-2 个短句。",
+            "诗歌/歌词/rap：靠 source 字段引导（如『诗歌，需押韵与意象还原』），在信达雅基础上追求韵律。",
+        ],
+    ),
+    "literal": StyleDef(
+        persona=(
+            "你是一位严谨的技术/学术译者。你的首要目标是信息保真：译文必须忠实于"
+            "原文的逻辑结构、修饰关系与限定条件，绝不为流畅而省略或改写。"
+        ),
+        guidelines=[
+            "保真优先：准确传达原文意思，不增译、不减译、不意译掉限定条件。",
+            "结构对齐：尽量保留原文的句子结构与主谓宾顺序，便于逐句对照。",
+            "术语严谨：专有名词、学术/法律/技术术语严格忠实，必要时保留英文原词并加括号。",
+            "逻辑从句：定语从句、条件句、让步状语等修饰关系必须清晰可辨。",
+            "不口语化：除非原文就是口语，否则不要用俚语或过于随意的表达。",
+        ],
+    ),
+    "bilingual_study": StyleDef(
+        persona=(
+            "你是一位教学型双语译者。以『直译为主、辅以注记』的方式帮助中文读者精读"
+            "英文原文，兼顾可读性与学习价值。"
+        ),
+        guidelines=[
+            "直译为主：译文贴近原文结构与词义，便于回映英文。",
+            "生词注记：对生僻词、熟词生义、文化专有项，在译文后用括号补注（如：『bank（河岸，此处非银行）』）。",
+            "句式可回映：尽量让中文断句与英文句法对应，方便对照学习。",
+            "保留术语：专业术语首次出现可附英文原词。",
+            "不追求文采：清晰度与准确性高于修辞。",
+        ],
+    ),
+}
 
 
 @dataclass
@@ -62,6 +116,11 @@ class Config:
     # T2 (ADR-017 / Spec 19): vocal separation preprocessing
     separate_vocals: bool = False   # --separate-vocals / VT_SEPARATE_VOCALS
     demucs_model: str = "htdemucs"  # --demucs-model / VT_DEMUCS_MODEL
+    # T3 (ADR-027 / Spec 21): translation style track
+    style: str = "film"             # --style / VT_STYLE / [translate].style
+    # T4 (ADR-028 / Spec 22): forced-acoustic-alignment backend.
+    # "auto" (default, T4 默认化): whisperx when CUDA + whisperx available, else none.
+    align: str = "auto"             # --align / VT_ALIGN / [transcribe].align
     _sources: dict[str, str] = field(default_factory=dict, repr=False)
 
 
@@ -99,6 +158,21 @@ def _coerce_env(attr: str, raw: str) -> Any:
         return int(raw)
     if attr in _BOOL_ENV:
         return raw.strip().lower() in ("1", "true", "yes", "on")
+    if attr == "style":
+        val = raw.strip().lower()
+        if val not in VALID_STYLES:
+            raise ValueError(
+                f"invalid style '{raw}': must be one of {VALID_STYLES}"
+            )
+        return val
+    if attr == "align":
+        val = raw.strip().lower()
+        # T4 (Spec 22): invalid value -> warn + fall back to "auto" (never crash).
+        if val not in ("auto", "none", "whisperx"):
+            print(f"[config] WARNING: invalid VT_ALIGN '{raw}', "
+                  f"falling back to 'auto'", file=sys.stderr)
+            return "auto"
+        return val
     return raw
 
 
@@ -134,6 +208,8 @@ def resolve_config(
         "source": "VT_SOURCE", "full_transcript": "VT_FULL_TRANSCRIPT",
         "separate_vocals": "VT_SEPARATE_VOCALS",
         "demucs_model": "VT_DEMUCS_MODEL",
+        "style": "VT_STYLE",
+        "align": "VT_ALIGN",
     }
     for attr, envkey in env_map.items():
         if envkey in env and env[envkey]:
@@ -149,9 +225,21 @@ def resolve_config(
 
     # 3. CLI overrides (only non-None values)
     for k, v in (cli_overrides or {}).items():
-        if v is not None and hasattr(cfg, k):
-            setattr(cfg, k, v)
-            cfg._sources[k] = "cli"
+        if v is None or not hasattr(cfg, k):
+            continue
+        if k == "style":
+            if v not in VALID_STYLES:
+                raise ValueError(
+                    f"invalid style '{v}': must be one of {VALID_STYLES}"
+                )
+        if k == "align":
+            # T4 (Spec 22): invalid value -> warn + fall back to "auto".
+            if v not in ("auto", "none", "whisperx"):
+                print(f"[config] WARNING: invalid --align '{v}', "
+                      f"falling back to 'auto'", file=sys.stderr)
+                v = "auto"
+        setattr(cfg, k, v)
+        cfg._sources[k] = "cli"
 
     # Normalise lang="auto" -> None (auto-detect)
     if cfg.lang == "auto":
