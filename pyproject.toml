@@ -18,38 +18,61 @@ dependencies = [
     # active environment (no extra `.[audio]` step required). CUDA vs CPU torch
     # wheel is selected per-platform via [tool.uv.sources] below.
     "demucs>=4.0.1",
-    "torch>=2.5.1",
-    "torchaudio>=2.5.1",
+    # Pinned to the torch 2.8 line: the [gpu] extra (whisperx 3.8.x, Spec 22)
+    # requires `torch~=2.8.0`, and a single torch line keeps the default install
+    # and the GPU install on the same, verified wheel. CUDA vs CPU wheel is
+    # still selected per-platform via [tool.uv.sources] below.
+    "torch~=2.8.0",
+    "torchaudio~=2.8.0",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+# T4 (ADR-028 / Spec 22): forced-acoustic-alignment backend. whisperx supplies only
+# its wav2vec2 alignment capability — the transcription core stays faster-whisper
+# 1.2.1 (decision 1: borrow alignment, don't swap the core). GPU-only extra: excluded
+# on macOS (no CUDA → alignment unsupported there, 铁律 2: zero new deps on Mac).
+# 3.8.6 is the first line that supports Python 3.13 (`requires_python >=3.10,<3.14`)
+# and it relaxes ctranslate2 to >=4.5.0 (cp313 wheels exist). 3.3.6 capped at <3.13
+# and pinned ctranslate2==4.4.0 (cp310-cp312 only) — unusable on this project's
+# pinned interpreter (.python-version = 3.13.12). 3.8.2/3.8.3 are yanked upstream
+# (missing word timestamps for digits/symbols); 3.8.4+ is required.
+gpu = ["whisperx==3.8.6; sys_platform != 'darwin'"]
 
 [project.scripts]
 video-translate = "video_translate.cli:main"
 
 # Per-platform torch wheel selection (mirrors pyvideotrans's uv approach):
-# Windows/Linux pull the CUDA build, macOS pulls the CPU build. The CUDA index
-# points at the Tsinghua mirror so `uv sync` / `pip install` works in CN without
-# a proxy — no agent/human needs to pick a mirror at install time. CPU wheel stays
-# on the official index (small, and the mirror's cpu path is occasionally incomplete).
-# Requires `uv` for the sources routing (pip ignores [tool.uv.*] but the
-# PIP_EXTRA_INDEX_URL in TOOLCHAIN.md provides the same CN fallback for pip).
+# Windows/Linux pull the CUDA build, macOS pulls the CPU build. The CUDA build is
+# pinned to the cu128 index — the torch 2.8 line required by the [gpu] extra's
+# whisperx 3.8.x (Spec 22 / ADR-028). The index is declared here (R7) so `uv sync`
+# needs no agent/human picking a mirror at install time; CPU wheels stay on the
+# official index. Requires `uv` for the sources routing (pip ignores [tool.uv.*],
+# but PIP_EXTRA_INDEX_URL in TOOLCHAIN.md gives pip the same fallback).
+# `explicit = true` restricts each index to packages that name it in
+# [tool.uv.sources] below. Without it, these indexes also serve generic packages
+# (tqdm, numpy, typing-extensions...) at stale versions, and uv's
+# "first index that has the package wins" rule then shadows newer PyPI releases —
+# which deadlocks resolution (e.g. pyannote-pipeline needs tqdm>=4.67.1 while
+# the cu128 index only carries tqdm<=4.66.5). Explicit keeps PyPI authoritative
+# for everything except torch/torchaudio.
 [[tool.uv.index]]
-name = "pytorch-cu124"
-url = "https://download.pytorch.org/whl/cu124"
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [tool.uv.sources]
 torch = [
-    { index = "pytorch-cu124", marker = "sys_platform == 'win32' or sys_platform == 'linux'" },
+    { index = "pytorch-cu128", marker = "sys_platform == 'win32' or sys_platform == 'linux'" },
     { index = "pytorch-cpu",   marker = "sys_platform == 'darwin'" },
 ]
 torchaudio = [
-    { index = "pytorch-cu124", marker = "sys_platform == 'win32' or sys_platform == 'linux'" },
+    { index = "pytorch-cu128", marker = "sys_platform == 'win32' or sys_platform == 'linux'" },
     { index = "pytorch-cpu",   marker = "sys_platform == 'darwin'" },
 ]
 
