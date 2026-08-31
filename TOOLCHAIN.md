@@ -162,14 +162,28 @@ CLI 参数 / 系统运行时 os.environ  >  .env.local (本地私有)  >  .env.<
   - 如需在线拉取，在 `.env` 中设置 `HF_ENDPOINT=https://hf-mirror.com`，然后执行 `uv run video-translate setup`。
   - 无网络环境下，用户可从镜像源下载完整模型包并解压至项目根 `models/large-v3/`（必须含完整 `model.bin`）。
 
-### 2.4 Demucs 语音分离模型（htdemucs，约 400MB+，可选 T2 预处理）
-- **作用**：人声/伴奏分离（T2 层）。模型由 demucs 经 `torch.hub` 下载，默认会落到
-  `C:\Users\<user>\.cache\torch\hub\checkpoints\`（系统盘）——**本项目已改为项目本地优先**。
-- **项目本地优先（Milestone 3 后规范，零 C 盘）**：
-  - `vocal_sep.py` 在调用 demucs 前，把 `TORCH_HOME` 绑定到 `<repo>/models/torch`，
-    因此 htdemucs 权重**下载并缓存到 `<repo>/models/torch/`，完全不进 C 盘用户目录**。
+### 2.4 Demucs 语音分离模型（htdemucs，可选 T2 预处理）
+- **作用**：人声/伴奏分离（T2 层）。
+- **⚠ 下载后端有两代，落点由不同的环境变量决定**（ADR-032 / Spec 26）：
+  - **demucs 3.x**：经 `torch.hub` 下载，honor `TORCH_HOME` → 默认落到
+    `C:\Users\<user>\.cache\torch\hub\checkpoints\`（系统盘）；
+  - **demucs ≥ 4.0（本项目 `pyproject.toml` 钉 `demucs>=4.0.1`）**：经
+    **huggingface_hub** 下载，honor **`HF_HOME`** → 默认落到
+    `C:\Users\<user>\.cache\huggingface\hub\models--adefossez--HTDemucs\`（系统盘）。
+  - 历史 bug：早期只绑了 `TORCH_HOME`，对 demucs 4.x 是**空操作**，权重静默落 C 盘
+    而 doctor 仍报 OK（见 ADR-032「Bug 1 / Bug 2」）。
+- **项目本地优先（零 C 盘，当前实现）**：
+  - `vocal_sep.py::_bind_demucs_cache()` 在调用 demucs 前**同时绑定 `HF_HOME` 与
+    `TORCH_HOME`** 到 `<repo>/models/torch`，两代后端都覆盖；权重落在
+    `<repo>/models/torch/hub/...`，完全不进 C 盘用户目录。
+  - 无条件赋值（不是 only-when-unset），因此宿主上残留的系统缓存环境变量会被覆盖，
+    不会把 C 盘落点悄悄带回来。
   - 该行为对所有调用 `separate_vocals` 的路径自动生效，无需用户配置。
-- **仅当显式设了 `TORCH_HOME` 指向别处**才会改变落点；默认即项目内，符合 §6 规范。
+  - 选 `HF_HOME` 而非 `HF_HUB_CACHE`：前者与 `cli._hf_cache_dir()` 口径一致，避免
+    「下载落点」与「doctor 查找点」分叉。
+- **doctor 会真实检查该缓存**（ADR-032 Bug 2 修复）：`cli._demucs_model_cached()`
+  以 `demucs_cache_dir()` 为确定性查找根，报告 **完整 / 残缺（< 50MB）/ 缺失** 三态，
+  缺失或残缺时打印确定性修复命令。不得退回「只查 `import demucs`」的假绿灯。
 
 ### 2.5 依赖与 wheel 镜像（新增重依赖的标准做法）
 
@@ -309,13 +323,30 @@ uv run video-translate verify --segments videos/example.segments_en.json --zh vi
    才允许回退到系统用户目录；但**默认配置与 `setup` 流程必须把它们引回项目内**。
 
 ### 6.2 新增工具/依赖的标准套路
+- **代码层单一事实源（发现逻辑集中）**：任何外部工具二进制或依赖目录，**禁止在调用点散落 `shutil.which` / `os.environ.get("VT_*")` 现场发现**。统一在
+  `toolchain.py` 的 `ToolchainStatus` 增加字段，并在 `_TOOL_REGISTRY`（`ffmpeg`/`ffprobe`/`demucs`/`nvidia-smi`）
+  / `_DEP_REGISTRY`（`hf`/`whisper`/`htdemucs`/`nltk`）登记；所有调用点改用
+  `resolve_tool(name)` / `tool_available(name)` / `model_dir(kind)`。
+  `init_toolchain()` 启动时一次性解析全部并缓存，因此「前半段转写完、后半段验证找不到工具」
+  这类问题从根上消除（见 AGENTS.md「工具链解析（持久化）」红线，以及 `toolchain.resolve_tool`）。
 - **Python 依赖**：写进 `pyproject` 顶层 `dependencies`（见 §2.5），`make setup` 一条命令装齐，
   随 venv 落在 `<repo>/.venv/`，不进系统 Python（避免 demucs 飘到系统 Python 的历史问题）。
 - **需下载的模型/权重**：
   - 优先支持「项目根 `models/<name>/` 本地 drop-in」+「`setup` 下载到项目内」双路径（参照
     Whisper 的 `_resolve_model_path` / `_LOCAL_MODEL_DIR` 写法）。
-  - 若底层库走 `torch.hub` / `HF Hub`，在调用前**绑定 `TORCH_HOME` / `HF_HOME` 到
+  - 若底层库走 `torch.hub` / HF Hub，在调用前**绑定 `TORCH_HOME` / `HF_HOME` 到
     `<repo>/models/...`**（参照 `vocal_sep.py::_bind_demucs_cache`），而非依赖默认 C 盘路径。
+  - **⚠ 必须实测验证真实落点，禁止照抄注释或旧文档**（ADR-032 头号教训）：绑定了某个
+    环境变量 ≠ 它真的生效。底层库换代时会更换下载后端（`torch.hub` → `huggingface_hub`），
+    那一刻旧的绑定就退化成空操作，权重**静默**落到系统盘而无人察觉。改完必须到
+    `<repo>/models/` 下实际确认文件生成在哪里，并锁定为回归单测。
+  - **doctor 必须同步覆盖**：每新增一个模型，就在 `doctor` 增加一行缓存检查，走通用
+    闸门 `cli._find_weight_file()`（完整 / 残缺 / 缺失三态 + 确定性修复命令）。
+    「能力可用」声明必须建立在资产实际存在之上，**禁止只报「包装了 / 设备可用」**的
+    假绿灯（ADR-032 Bug 2）。
+  - **离线开关必须早于使用点**：`HF_HUB_OFFLINE` 之类的离线语义，必须设置在所有可能
+    触发网络请求的加载点**之前**（ADR-032 Bug 3：设置晚了，本机明明已有缓存却仍联网
+    HEAD 检查，无代理环境 5 次重试超时卡死）。
   - 下载逻辑必须**幂等**、**走代理**，残缺时自愈（见 §2.3 E3 规则）。
 - **需下载的工具（如 FFmpeg）**：实现 `ensure_*` 函数，按平台选源、解压到 `<repo>/tools/...`、
   写入 `.env.local`（gitignore），`doctor` 在缺失时提示确定性修复命令（见 §2.1 E2 规则）。

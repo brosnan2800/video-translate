@@ -138,7 +138,7 @@ video-translate doctor      # CUDA source: venv-torch
 | R3 | `uv.lock` 是依赖唯一事实来源，与 `pyproject` 成对变更 | 改依赖必重跑 `uv lock` |
 | R4 | 外部二进制（ffmpeg）不手动装、不进 git，统一 `setup --ffmpeg` 下载到 `tools/`（gitignore） | `video-translate setup --ffmpeg` |
 | R5 | 模型权重不进 git，**项目本地优先（零 C 盘）** 落 `<repo>/models/<name>/`；`HF_HOME` 仅回退覆盖；过完整性校验（E3） | `make setup` 拉模型到 `<repo>/models/` |
-| R6 | 新依赖准入清单：跨平台 / 缓存指纹 / 显存预算(8GB) / 等价实现 / lockfile 同步 | 每项写入对应任务 Spec |
+| R6 | 新依赖 / 新模型准入清单：跨平台 / 缓存指纹 / 显存预算(8GB) / 等价实现 / lockfile 同步 + **⑥ 新增模型落点必须项目内并实测验证**（绑 `TORCH_HOME` 还是 `HF_HOME` 取决于底层库**实际**用的下载后端，禁止照抄旧注释）+ **⑦ 新增模型必须同步 doctor 缓存检查（`_find_weight_file`）+ 三态单测** | 每项写入对应任务 Spec；**违反 ⑥⑦ 的真实事故见 [ADR-032](../adr/032-demucs-model-cache-locality.md)** |
 | R7 | 镜像/代理固化在配置，不靠临场决策 | PyPI/PyTorch 进 `[tool.uv.index]`；HF 进 `HF_ENDPOINT` |
 
 ---
@@ -154,6 +154,15 @@ video-translate doctor      # CUDA source: venv-torch
    - `tools/<tool>/` 加入 `.gitignore`（R4）。
    - `TOOLCHAIN.md` 的探测步骤收敛为「PATH → setup 自动下载」，删掉任何「全盘搜」步骤（E2 先例）。
 3. **模型权重**：默认落 `<repo>/models/<name>/`（零 C 盘），加 ≥ 下限的完整性校验 + 自愈（E3 先例，R5）。
+   - **落点必须实测验证，禁止照抄旧注释**：底层库走 `torch.hub` 就绑 `TORCH_HOME`，走
+     `huggingface_hub` 就绑 `HF_HOME`；库换代会更换下载后端，届时旧绑定退化为空操作 →
+     权重**静默**落 C 盘（ADR-032：demucs 4.x 由 torch.hub 换成 huggingface_hub，只绑
+     `TORCH_HOME` 完全无效）。参照 `vocal_sep.py::_bind_demucs_cache()` 现同时绑两者。
+   - **doctor 必须覆盖该模型**：统一走 `cli._find_weight_file()` 报
+     **完整 / 残缺 / 缺失** 三态并给出确定性修复命令；**禁止**「只查包能否 import /
+     设备是否可用」的假绿灯（ADR-032 Bug 2）。
+   - **离线开关早于使用点**：`HF_HUB_OFFLINE` 必须设置在所有会触发网络请求的加载点
+     之前（ADR-032 Bug 3）。
 4. **语料 / 数据资产**（如 whisperx 对齐所需的 NLTK `punkt` / `punkt_tab`）：
    落 `<repo>/models/nltk_data/`，`setup --align` 幂等下载，`doctor` 缺失即打印修复
    命令；**代码侧在调用前主动把该目录注册进库的搜索路径**（`register_nltk_path()`
@@ -165,7 +174,7 @@ video-translate doctor      # CUDA source: venv-torch
    `VT_CUDA_DIR` 作覆盖，其次才是系统 `CUDA_PATH`；每个候选项都必须**实际含有
    CUDA DLL** 才算命中（E4 先例 —— 否则 `CUDA_PATH=F:\Program Files` 这类无关
    目录会被当成 CUDA 目录）。
-6. **文档同步**：本专册 + `TOOLCHAIN.md` + `AGENTS.md` 红线表同步更新；跨平台降级路径必须写清。
+6. **文档同步**：本专册 + `TOOLCHAIN.md` + `.codebuddy/rules/operation-constraints.mdc`（harness 编码约束，每次对话注入）同步更新；跨平台降级路径必须写清。
 
 ---
 
@@ -184,3 +193,41 @@ pytest                # 全量绿（E2/E3/E4 均有 mock 单测覆盖，不真�
 - 对齐（T4）：`video-translate setup --align` 幂等可重复执行；`doctor` 显示
   `whisperx: OK`；**在没有 `NLTK_DATA` 环境变量时**对齐仍能自动定位项目内语料
   （不出现 LookupError —— 出现即意味着语料缺失导致对齐静默失效）。
+
+---
+
+## 8. 工具链发现单一事实源（代码层）+ harness 约束
+
+### 8.1 背景：为什么必须有中央配置（踩过的坑）
+早期实现里，工具 / 依赖的「发现逻辑」散落在调用点：
+- `ffmpeg_utils._resolve_binary` 每次调用都自己 `shutil.which(name)` 搜 PATH；
+- `vocal_sep.py` / `transcribe.py` / `toolchain.py` 三处各自 `shutil.which("nvidia-smi")`；
+- `cli.py::_hf_cache_dir` 现场读 `os.environ.get("HF_HOME")`。
+
+后果（已多次复现）：
+- **「前能后不能」**：走 `main()` 的命令（doctor/run）启动注入了 `.env.local` 的 PATH，前期能找着 ffmpeg；一旦某次工具调用绕过 `main()`（裸脚本直接 `import` 调分析 / 验证 / 分离，或换了启动目录），`.env.local` 不被加载、PATH 里没有 `tools/ffmpeg/bin`，流水线前半段转写完、后半段突然 `ffmpeg not found`。
+- **误报缺失**：现场读 env 会误判模型不在（如「要重下 Whisper」），且无法统一持久化、复用已缓存资产。
+
+### 8.2 修复：所有发现逻辑集中到 `toolchain.py`
+- 调用点统一从持久化配置 `_GLOBAL_TOOLCHAIN`（`ToolchainStatus`）取绝对路径；
+  `ffmpeg_utils._resolve_binary` 已强制读全局配置，不再 `shutil.which`。
+- `toolchain.py` 的 `ToolchainStatus` 加字段 + `_TOOL_REGISTRY` / `_DEP_REGISTRY` 登记所有
+  外部工具二进制（ffmpeg / ffprobe / demucs / nvidia-smi …）与依赖目录
+  （whisper / htdemucs / nltk / HF 缓存）。
+- `init_toolchain()` 锚定**仓库根目录**解析 `.env` / `.env.local`（不随 CWD 漂移），
+  启动解析一次并缓存；调用点一律 `resolve_tool()` / `tool_available()` / `model_dir()`。
+- 单测 `tests/test_toolchain.py` 固化（含绕过 `main()` 直接 `import` 仍能拿到绝对路径的用例）。
+
+### 8.3 约束已提升为 harness 硬规则（不只是文档）
+「禁止在调用点散落 `shutil.which` / `os.environ.get("VT_*")`；新增工具 / 依赖必须先登记
+中央配置」这条规则，已从 `AGENTS.md` 运行时红线表**移出**，落到 CodeBuddy 的 harness
+规则文件（从运行时红线表剥离，归入编码规范层）：
+
+> `.codebuddy/rules/operation-constraints.mdc` 第 3 条（`alwaysApply: true`，每次对话自动注入）
+
+它是**项目级硬约束**，对所有对话始终生效，新加工具若现场 `shutil.which` 会被 harness
+拦截，而不只是写在文档里供人参考。详见 `TOOLCHAIN.md` §6.2。
+
+### 8.4 给开发者的底线
+加任何外部工具 / 依赖：**先**在 `toolchain.py` 登记（字段 + registry），**再**在调用点用
+`resolve_tool()` / `model_dir()` 引用；禁止在调用点现场查找。完整套路见 §6。

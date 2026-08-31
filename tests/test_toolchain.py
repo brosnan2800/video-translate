@@ -10,10 +10,13 @@ from video_translate.toolchain import (
     get_platform_env_filename,
     init_toolchain,
     load_env,
+    model_dir,
     parse_dotenv_content,
     parse_dotenv_file,
     prepend_to_path,
     resolve_env_files,
+    resolve_tool,
+    tool_available,
 )
 
 
@@ -286,3 +289,34 @@ def test_resolve_cuda_dir_rejects_dir_without_cuda_dlls(monkeypatch, tmp_path):
     cuda_dir, source = toolchain._resolve_cuda_dir({})
     assert cuda_dir is None
     assert source is None
+
+
+def test_resolve_tool_reads_persisted_config(monkeypatch, tmp_path):
+    """All tool discovery must come from the cached ToolchainStatus, never a
+    fresh PATH search at the call site (red line: 工具链解析（持久化）)."""
+    ffmpeg_dir = tmp_path / "ffmpeg"
+    ffmpeg_dir.mkdir()
+    (ffmpeg_dir / "ffmpeg.exe").write_bytes(b"PE")
+    (ffmpeg_dir / "ffprobe.exe").write_bytes(b"PE")
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"VT_FFMPEG_DIR={ffmpeg_dir}\n", encoding="utf-8")
+
+    status = init_toolchain(root_dir=tmp_path, force=True)
+    # The cached absolute path is what callers get — not a bare name.
+    assert resolve_tool("ffmpeg") == status.ffmpeg_path
+    assert resolve_tool("ffmpeg").lower().endswith("ffmpeg.exe")
+    assert resolve_tool("ffprobe") == status.ffprobe_path
+    # Unknown tool falls back to bare name (shutil.which returns None).
+    assert resolve_tool("no-such-tool") == "no-such-tool"
+    assert tool_available("no-such-tool") is False
+
+
+def test_model_dir_returns_cached_dependency_dirs(monkeypatch, tmp_path):
+    """Dependency directories resolve once from the persisted config."""
+    init_toolchain(root_dir=tmp_path, force=True)
+    htdemucs = model_dir("htdemucs")
+    assert htdemucs is not None
+    assert htdemucs.replace("\\", "/").endswith("models/torch")
+    # Unknown dependency kind yields None — callers must not invent dirs.
+    assert model_dir("no-such-dep") is None

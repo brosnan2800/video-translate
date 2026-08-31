@@ -21,9 +21,10 @@ import gc
 import hashlib
 import json
 import os
-import shutil
 import sys
 from pathlib import Path
+
+from .toolchain import tool_available
 from typing import Any
 
 import torch  # core dependency (T2/demucs); used for CUDA memory cleanup
@@ -70,7 +71,7 @@ def _cuda_available() -> bool:
     Prefers ``nvidia-smi`` (no heavy import) and falls back to ``torch`` only
     if it is already installed. Never imports torch just to probe.
     """
-    if shutil.which("nvidia-smi"):
+    if tool_available("nvidia-smi"):
         return True
     try:
         import torch  # noqa: F401  # lazy, may be absent on CPU-only boxes

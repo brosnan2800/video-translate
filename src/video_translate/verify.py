@@ -280,3 +280,43 @@ def build_semantic_reread_task(
             "<index>: <'ok' | 'omit' | 'add' | 'wrong' | 'untranslated': reason>": "..."
         },
     }
+
+
+# Fidelity below this is a semantic breach (Gap B §4.3 / PIPELINE R10).
+SEMANTIC_FIDELITY_THRESHOLD = 0.8
+
+
+def parse_semantic_reread_result(res: Any) -> dict[str, Any]:
+    """Normalize an agent-written ``<base>.semantic_reread_result.json`` into a
+    machine-readable dict the content lane can gate on.
+
+    Accepted shapes (the agent may write any of them):
+      - ``{"fidelity": <0-1>, ...}``
+      - ``{"breached": <bool>, ...}``
+      - ``{<index>: "<status>", ...}``  -> fidelity = ok_count / total
+
+    Returns ``{"fidelity": float|None, "breached": bool, "detail": <raw>}``.
+    Anything unparseable is treated as breached (fail closed — never silently pass
+    a semantic check we couldn't read).
+    """
+    if not isinstance(res, dict):
+        return {"fidelity": None, "breached": True, "detail": {"error": "not a dict"}}
+    fid = res.get("fidelity")
+    if isinstance(fid, (int, float)) and not isinstance(fid, bool):
+        fid = float(fid)
+        return {"fidelity": fid, "breached": fid < SEMANTIC_FIDELITY_THRESHOLD,
+                "detail": res}
+    br = res.get("breached")
+    if isinstance(br, bool):
+        return {"fidelity": (0.0 if br else 1.0), "breached": br, "detail": res}
+    # index -> status map (e.g. {"0": "ok", "3": "omit"})
+    statuses = [str(v).split(":")[0].strip().lower()
+                for v in res.values() if isinstance(v, (str, int, float))]
+    if statuses:
+        ok = sum(1 for s in statuses if s in ("ok", "good", "pass"))
+        fid = ok / len(statuses) if statuses else 0.0
+        bad = any(s in ("omit", "add", "wrong", "untranslated", "bad", "fail")
+                  for s in statuses)
+        return {"fidelity": fid, "breached": bad or fid < SEMANTIC_FIDELITY_THRESHOLD,
+                "detail": res}
+    return {"fidelity": None, "breached": True, "detail": res}

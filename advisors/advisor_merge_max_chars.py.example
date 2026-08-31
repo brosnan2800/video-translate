@@ -1,0 +1,19 @@
+"""advisor_merge_max_chars — 断句字数上限建议（剪映单行上限 42）。
+
+CRITICAL=False：选错只影响观感，可重跑 generate 局部修复，不污染上游。
+"""
+from __future__ import annotations
+from typing import Any
+
+NAME = "merge_max_chars"
+CRITICAL = False
+FLAG = "--merge-max-chars"
+JIANYING_LIMIT = 42
+
+
+def advise(video: str) -> dict[str, Any]:
+    return {
+        "recommended": str(JIANYING_LIMIT),
+        "reason": f"剪映单行显示上限 {JIANYING_LIMIT} 字，超出会截断/换行破坏观感",
+        "detail": {"jianying_limit": JIANYING_LIMIT},
+    }

@@ -21,14 +21,19 @@ import os
 import shutil
 import sys
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 from . import __version__
 from .config import DEFAULT_HF_CACHE, DEFAULT_PERSONA, resolve_config
 from .io_utils import load_json, save_json
 from .proxy import detect_proxy, setup_http_proxy
 from .audio_profile import analyze_audio
-from .toolchain import init_toolchain, resolve_command_entry
+from .toolchain import (
+    init_toolchain,
+    resolve_command_entry,
+    resolve_tool,
+    get_toolchain_status,
+)
 from .verify import (
     UNCOVERED_AUDIO, find_uncovered_speech, find_untranslated_latin_words,
     verify_acoustic, verify_presentation,
@@ -49,11 +54,14 @@ EXIT_DOCTOR_FAIL = 7
 # --------------------------- helpers ---------------------------
 
 def _has(binary: str) -> bool:
+    p = resolve_tool(binary)
+    if p and os.path.isfile(p):
+        return True
     return shutil.which(binary) is not None
 
 
 def _hf_cache_dir() -> str:
-    return os.environ.get("HF_HOME", DEFAULT_HF_CACHE)
+    return get_toolchain_status().hf_cache_dir or DEFAULT_HF_CACHE
 
 
 # Milestone 3 / E3: a complete large-v3 model.bin is ~3.09 GB. A model.bin
@@ -92,6 +100,105 @@ def _model_cached(model_name: str = "large-v3", *, min_bytes: int | None = None)
                 if os.path.isfile(mbin) and os.path.getsize(mbin) >= min_bytes:
                     return True
     return False
+
+
+# ADR-032 / Spec 26 — a complete htdemucs weight file is ~84 MB (measured:
+# 955717e8.safetensors). Anything below this bound is a truncated download and
+# must be reported as NOT cached — same E3 self-heal philosophy as large-v3's
+# 2 GiB floor, just scaled to the actual artifact size.
+_DEMUCS_MODEL_MIN_BYTES = 50 * 1024 ** 2  # 50 MB
+# demucs 4.x ships weights as .safetensors; demucs 3.x as .pt. Accept both so
+# the check keeps working across a demucs downgrade.
+_DEMUCS_WEIGHT_SUFFIXES = (".safetensors", ".pt")
+
+
+def _find_weight_file(
+    roots: Sequence[str],
+    *,
+    suffixes: Sequence[str],
+    name_needle: str,
+    min_bytes: int,
+) -> tuple[bool, str]:
+    """Generic project-local weight lookup + completeness gate.
+
+    ADR-032 / Spec 26 — this is the anti-regression gate behind the rule
+    "doctor must cover every downloadable model". Any NEW model added to this
+    project must be wired into `doctor` through this helper: point it at the
+    model's project-local cache root and it reports complete / incomplete /
+    missing. That is what stops a future model from sitting on the C: drive —
+    or being absent entirely — while doctor still prints a green OK.
+
+    Matching is done against the FULL path, not just the filename, because
+    huggingface_hub stores weights under content-hash filenames
+    (e.g. ``955717e8.safetensors``) with the model name appearing only in a
+    parent directory (``models--adefossez--HTDemucs``).
+
+    The largest matching file wins: a partially-written sibling left behind by
+    an aborted download must not mask a complete copy elsewhere in the tree.
+
+    Returns ``(ok, path_or_reason)`` — concrete path when complete, else
+    ``"missing (...)"`` / ``"incomplete (...)"``.
+    """
+    needle = (name_needle or "").lower()
+    suffix_tuple = tuple(s.lower() for s in suffixes)
+    best: tuple[int, str] | None = None
+    for root in roots:
+        if not os.path.isdir(root):
+            continue
+        for dirpath, _dirnames, filenames in os.walk(root):
+            for fn in filenames:
+                if not fn.lower().endswith(suffix_tuple):
+                    continue
+                path = os.path.join(dirpath, fn)
+                if needle and needle not in path.lower():
+                    continue
+                try:
+                    size = os.path.getsize(path)
+                except OSError:
+                    continue
+                if best is None or size > best[0]:
+                    best = (size, path)
+
+    if best is None:
+        return False, f"missing (no {name_needle} weights under {', '.join(roots)})"
+    size, path = best
+    if size < min_bytes:
+        return False, f"incomplete ({size} bytes < {min_bytes} bytes) at {path}"
+    return True, path
+
+
+def _demucs_model_cached(
+    model_name: str = "htdemucs", *, min_bytes: int | None = None,
+) -> tuple[bool, str]:
+    """Is the Demucs model cached in-repo and file-complete?
+
+    ADR-032 / Spec 26 — doctor used to declare "vocal separation available" from
+    a bare ``import demucs`` probe plus the CUDA lane, so weights that were
+    missing — or that had silently landed on the C: drive — were never surfaced.
+    This inspects the actual cache instead.
+
+    The lookup root is ``demucs_cache_dir()``, a deterministic in-repo path, and
+    deliberately NOT ``_hf_cache_dir()``: the latter follows ``HF_HOME``, which a
+    user or another code path may point elsewhere, splitting the lookup location
+    from the download location.
+
+    Returns ``(cached_ok, path_or_reason)`` — the concrete weight path when
+    complete, else ``"missing (...)"`` / ``"incomplete (...)"`` so doctor can
+    print a deterministic fix command.
+    """
+    if min_bytes is None:
+        min_bytes = _DEMUCS_MODEL_MIN_BYTES
+    from .vocal_sep import demucs_cache_dir
+
+    root = demucs_cache_dir()
+    if not os.path.isdir(root):
+        return False, f"missing (cache dir {root} does not exist)"
+    return _find_weight_file(
+        [root],
+        suffixes=_DEMUCS_WEIGHT_SUFFIXES,
+        name_needle=model_name,
+        min_bytes=min_bytes,
+    )
 
 
 def _find_incomplete_model_bins(model_name: str = "large-v3") -> list[str]:
@@ -215,11 +322,20 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     else:
         print(f"  [OK ] entry       : {entry} — project .venv ({interp})")
 
+    # ADR-032 / Spec 26: report the REAL htdemucs cache, not just `import demucs`.
+    # Without this line doctor printed a green "vocal separation available" while
+    # the weights were missing or sitting in the C: drive user cache.
+    _demucs_ok, _demucs_where = _demucs_model_cached()
+    _demucs_label = (
+        "htdemucs model cached (project-local)" if _demucs_ok
+        else f"htdemucs model cached : {_demucs_where}"
+    )
     checks = [
         ("ffmpeg", _has("ffmpeg")),
         ("ffprobe", _has("ffprobe")),
         (f"HF cache dir ({_hf_cache_dir()})", os.path.isdir(_hf_cache_dir())),
         ("large-v3 model cached (reuse, no re-download)", _model_cached("large-v3")),
+        (_demucs_label, _demucs_ok),
     ]
     failed = False
     ffmpeg_missing = False
@@ -256,15 +372,25 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     except Exception:
         print(f"  deep-translator: NOT installed")
     # T2 / ADR-017: demucs status (vocal separation preprocessing, now a core dep)
+    # Spec 25 / ADR-031: report the LANE, not just "is there CUDA". doctor and
+    # the runtime share one route source, so this line can never contradict
+    # what `run` actually does.
     try:
-        from .vocal_sep import demucs_available
+        from .vocal_sep import demucs_available, resolve_vsep_route
         if demucs_available():
-            import torch as _torch  # type: ignore
-            _on_gpu = _cuda_available()
-            if _on_gpu:
-                print(f"  demucs (htdemucs): OK — GPU available (separate vocals --separate-vocals)")
+            _route = resolve_vsep_route()
+            if _route.can_separate:
+                print(f"  demucs (htdemucs): OK — CUDA lane ({_route.device}); "
+                      f"vocal separation available (--separate-vocals)")
+            elif _route.lane == "apple_silicon":
+                print(f"  demucs (htdemucs): Apple Silicon lane — vocal separation "
+                      f"TODO (not implemented; will skip, never runs on CPU)")
+            elif _route.lane == "cuda":
+                print(f"  demucs (htdemucs): NVIDIA GPU detected but CUDA NOT ready — "
+                      f"vocal separation will be skipped. Fix: make setup")
             else:
-                print(f"  demucs (htdemucs): CPU only — separation ~10x slower; GPU RECOMMENDED")
+                print(f"  demucs (htdemucs): CPU lane — vocal separation unsupported "
+                      f"(GPU-only capability)")
         else:
             print(f"  demucs         : not installed — install for vocal/BGM separation:\n"
                   f"                    pip install -e .   (core dependency)")
@@ -339,11 +465,20 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                     print(f"  note          : low silence fraction ({sf:.2f} < "
                           f"{CLEAN_SILENCE_FRACTION}) suggests continuous noise — "
                           f"consider --adaptive-vad for per-chunk routing")
-                # ADR-017 / T2: recommend --separate-vocals if continuous noise or heavy background
-                from .vocal_sep import demucs_available
+                # ADR-017 / T2: recommend --separate-vocals if continuous noise or
+                # heavy background. Spec 25: only recommend it on a lane that can
+                # actually host it — recommending a capability that will then be
+                # skipped is exactly the doctor/runtime mismatch the single route
+                # source exists to remove.
+                from .vocal_sep import demucs_available, resolve_vsep_route
                 if sf < CLEAN_SILENCE_FRACTION:
                     if demucs_available():
-                        print(f"  vocal separation: RECOMMENDED (--separate-vocals) — high density audio detected")
+                        _route2 = resolve_vsep_route()
+                        if _route2.can_separate:
+                            print(f"  vocal separation: RECOMMENDED (--separate-vocals) — high density audio detected")
+                        else:
+                            print(f"  vocal separation: recommended, but unavailable on "
+                                  f"this machine — {_route2.message}")
                     else:
                         print(f"  vocal separation: RECOMMENDED but demucs not installed (pip install -e .)")
             else:
@@ -353,9 +488,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     # Show the resolved FFmpeg bin dir (helps diagnose "ffmpeg MISS" cases) and,
     # when it is missing, point the user/Agent at the deterministic fix.
-    ffmpeg_dir = os.environ.get("VT_FFMPEG_DIR")
+    ffmpeg_dir = _tc.ffmpeg_path
     if ffmpeg_dir:
-        print(f"\n  ffmpeg dir    : {ffmpeg_dir}")
+        print(f"\n  ffmpeg dir    : {os.path.dirname(ffmpeg_dir)}")
     if ffmpeg_missing:
         print("\n  [FIX] ffmpeg/ffprobe missing. Run the deterministic auto-download:")
         print("        video-translate setup --ffmpeg")
@@ -366,6 +501,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print("        (downloads punkt/punkt_tab into models/nltk_data, no C:\\ cache)")
     if not _model_cached("large-v3"):
         print("\n  [FIX] large-v3 model missing. Run:")
+        print("        make setup     # or: video-translate setup")
+    if not _demucs_ok:
+        # ADR-032 / Spec 26: deterministic fix for a missing / truncated
+        # htdemucs download. The weights land in <repo>/models/torch, never the
+        # system user cache.
+        print("\n  [FIX] htdemucs model missing or incomplete. Run:")
         print("        make setup     # or: video-translate setup")
 
     if strict and failed:
@@ -482,12 +623,25 @@ def _vocal_sep_step(
     if not sep:
         return False, None, backend, dm_model, None
     # user explicitly asked for separation — probe & try
-    from .vocal_sep import demucs_available, separate_vocals, separate_fingerprint, _input_fingerprint
+    from .vocal_sep import (demucs_available, separate_vocals,
+                            separate_fingerprint, _input_fingerprint,
+                            resolve_vsep_route)
     if not demucs_available():
         print("[warn] --separate-vocals requested but 'demucs' package not installed.\n"
               "       To enable: pip install -e .   (core dependency)\n"
               "       (CPU fallback is very slow; GPU recommended).\n"
               "       Falling back to original audio.")
+        return False, None, backend, dm_model, None
+    # Spec 25 / ADR-031: the single route source decides whether this machine may
+    # host Demucs at all. Gating BEFORE any separation attempt is what rules out
+    # the historical silent CPU fallback (a minutes-long job that became an
+    # hour-long apparent hang) — and it can never contradict what doctor printed,
+    # because both consult the same route.
+    _sep_route = resolve_vsep_route()
+    if not _sep_route.can_separate:
+        print(f"[warn] --separate-vocals requested, but this machine cannot host "
+              f"Demucs: {_sep_route.message}\n"
+              f"       Skipping separation — falling back to original audio.")
         return False, None, backend, dm_model, None
     try:
         audio_source = separate_vocals(
@@ -546,6 +700,12 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
          "compute_type": getattr(args, "compute_type", None),
          "separate_vocals": getattr(args, "separate_vocals", None),
          "demucs_model": getattr(args, "demucs_model", None),
+         "gap_vocal_sep": getattr(args, "gap_vocal_sep", None),
+         "gap_vocal_sep_min_gap": getattr(args, "gap_vocal_sep_min_gap", None),
+         "gap_vocal_sep_energy_mean_db": getattr(args, "gap_vocal_sep_energy_mean_db", None),
+         "gap_vocal_sep_energy_max_db": getattr(args, "gap_vocal_sep_energy_max_db", None),
+         "gap_vocal_sep_no_speech_thr": getattr(args, "gap_vocal_sep_no_speech_thr", None),
+         "gap_vocal_sep_avg_logprob_thr": getattr(args, "gap_vocal_sep_avg_logprob_thr", None),
          "align": getattr(args, "align", None)},
         cwd=os.getcwd(),
     )
@@ -613,6 +773,13 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                 # T2 / Spec 19 §(B): recovery decodes from the SAME source as
                 # the main pass — either vocals.wav (if used) or original video.
                 audio_source=_audio_src,
+                # ADR-030 / Spec 24: optional hard-gap vocal separation recovery.
+                gap_vocal_sep=cfg.gap_vocal_sep,
+                gap_vocal_sep_min_gap=cfg.gap_vocal_sep_min_gap,
+                gap_vocal_sep_energy_mean_db=cfg.gap_vocal_sep_energy_mean_db,
+                gap_vocal_sep_energy_max_db=cfg.gap_vocal_sep_energy_max_db,
+                gap_vocal_sep_no_speech_thr=cfg.gap_vocal_sep_no_speech_thr,
+                gap_vocal_sep_avg_logprob_thr=cfg.gap_vocal_sep_avg_logprob_thr,
             )
             if recovered is not segs:
                 save_json(segs_path, recovered, indent=0)
@@ -713,6 +880,21 @@ def cmd_generate(args: argparse.Namespace) -> int:
         generate_subtitles(args.segments, args.zh, args.outdir, base=base,
                            gap=gap, min_dur=min_dur, offset=offset, tail=tail,
                            flat=flat, prune_old=prune_old, style=args.style)
+        # Gap B §4.2: generate 末尾自动跑 verify（声学/表现层），让"generate 完不 verify"
+        # 的漏步从静默埋雷变大声失败。仅当显式传 --video 时触发（verify_gate 的 auto_fix
+        # 内部调用 generate 不带 --video，避免恢复环自我阻塞）。
+        # 用 --no-semantic + --report-only：写报告 + 打印红线，但永不阻断 generate
+        # （真实硬闸门在 gates/verify_gate.py，由 make finish / make verify-fix 把关）。
+        video = getattr(args, "video", None)
+        if video is not None:
+            print("\n[generate] auto-verify (acoustic/presentation) ...", file=sys.stderr)
+            cmd_verify(argparse.Namespace(
+                segments=args.segments, zh=args.zh, video=video, strict=False,
+                noise="-30dB", d=0.3, opts=None, no_semantic=True,
+                semantic_out=None,
+                report=os.path.join("videos", f"{base}.verify_report.json"),
+                report_only=True,
+            ))
         return EXIT_OK
     except Exception as e:  # noqa: BLE001
         print(f"[error] generate failed: {e}", file=sys.stderr)
@@ -743,7 +925,15 @@ def cmd_run(args: argparse.Namespace) -> int:
          "style": getattr(args, "style", None),
          "device": getattr(args, "device", None),
          "compute_type": getattr(args, "compute_type", None),
-         "align": getattr(args, "align", None)},
+         "align": getattr(args, "align", None),
+         "separate_vocals": getattr(args, "separate_vocals", None),
+         "demucs_model": getattr(args, "demucs_model", None),
+         "gap_vocal_sep": getattr(args, "gap_vocal_sep", None),
+         "gap_vocal_sep_min_gap": getattr(args, "gap_vocal_sep_min_gap", None),
+         "gap_vocal_sep_energy_mean_db": getattr(args, "gap_vocal_sep_energy_mean_db", None),
+         "gap_vocal_sep_energy_max_db": getattr(args, "gap_vocal_sep_energy_max_db", None),
+         "gap_vocal_sep_no_speech_thr": getattr(args, "gap_vocal_sep_no_speech_thr", None),
+         "gap_vocal_sep_avg_logprob_thr": getattr(args, "gap_vocal_sep_avg_logprob_thr", None)},
         cwd=os.getcwd(),
     )
 
@@ -763,6 +953,13 @@ def cmd_run(args: argparse.Namespace) -> int:
             # T2 / ADR-017: forward the vocal-separation flags verbatim
             separate_vocals=getattr(args, "separate_vocals", False),
             demucs_model=getattr(args, "demucs_model", None),
+            # ADR-030 / Spec 24: forward hard-gap vocal separation flags
+            gap_vocal_sep=cfg.gap_vocal_sep,
+            gap_vocal_sep_min_gap=cfg.gap_vocal_sep_min_gap,
+            gap_vocal_sep_energy_mean_db=cfg.gap_vocal_sep_energy_mean_db,
+            gap_vocal_sep_energy_max_db=cfg.gap_vocal_sep_energy_max_db,
+            gap_vocal_sep_no_speech_thr=cfg.gap_vocal_sep_no_speech_thr,
+            gap_vocal_sep_avg_logprob_thr=cfg.gap_vocal_sep_avg_logprob_thr,
             # T4 (ADR-028 / Spec 22): forward alignment backend
             align=cfg.align,
         ))
@@ -1065,8 +1262,12 @@ def cmd_verify(args: argparse.Namespace) -> int:
     opts_path = getattr(args, "opts", None)
     semantic = not getattr(args, "no_semantic", False)  # ADR-016/V14: ON by default
     semantic_out = getattr(args, "semantic_out", None)
+    report_path = getattr(args, "report", None)    # Gap B: machine-readable 3-lane report
+    report_only = getattr(args, "report_only", False)  # Gap B: always exit 0 (just report)
 
     segments = load_json(segments_path)
+    ok_zh = True
+    align_ok = True
 
     # ---- Lane 1: acoustic -------------------------------------------------
     silences: list[tuple[float, float]] = []
@@ -1155,24 +1356,76 @@ def cmd_verify(args: argparse.Namespace) -> int:
         detail = it.get("detail") or f"start={it.get('start'):.2f}s"
         print(f"    - [{it['type']}] {detail}")
 
-    # ---- Lane 2b: semantic reread task (agent-side; CLI never calls an LLM) --
+    # ---- Lane 2b: semantic reread task + result consumption (Gap B §4.3) ----
+    semantic_reread: dict[str, Any] = {"fidelity": None, "breached": False, "result": None}
     if semantic and zh_path:
-        from .verify import build_semantic_reread_task
+        from .verify import build_semantic_reread_task, parse_semantic_reread_result
         zh = {int(k): v for k, v in load_json(zh_path).items()}
         task = build_semantic_reread_task(segments, zh)
-        out = semantic_out or os.path.join(
+        task_out = semantic_out or os.path.join(
             os.path.dirname(segments_path),
             _derive_base(segments_path) + ".semantic_reread_task.json",
         )
-        save_json(out, task, indent=2)
-        print(f"\n  semantic  : reread task written -> {out}")
+        save_json(task_out, task, indent=2)
+        print(f"\n  semantic  : reread task written -> {task_out}")
         print(f"              ({len(task['pairs'])} pairs) — agent rereads "
               f"each (en,zh) and flags omit/add/wrong")
+        # consume the agent's reread RESULT if present (fail-closed: missing -> breached)
+        result_out = os.path.join(
+            os.path.dirname(segments_path),
+            _derive_base(segments_path) + ".semantic_reread_result.json",
+        )
+        semantic_reread["result"] = result_out
+        if os.path.exists(result_out):
+            try:
+                semantic_reread.update(parse_semantic_reread_result(load_json(result_out)))
+                print(f"  semantic  : reread result consumed -> {result_out} "
+                      f"(fidelity={semantic_reread.get('fidelity')}, "
+                      f"breached={semantic_reread.get('breached')})")
+            except Exception as e:  # noqa: BLE001
+                semantic_reread["breached"] = True
+                semantic_reread["detail"] = f"parse fail: {e}"
+                print(f"  semantic  : result parse failed -> {e}", file=sys.stderr)
+        else:
+            # semantic reread explicitly ON but agent hasn't reread -> force breach
+            semantic_reread["breached"] = True
+            semantic_reread["note"] = "semantic_reread_result.json 缺失，强制人工补回读"
+            print("\n  semantic  : [BREACH] 未消费回读结果（result 缺失）→ 视为 breached",
+                  file=sys.stderr)
     elif semantic and not zh_path:
         print("\n  semantic  : skipped (needs --zh)")
 
-    if not any_flag:
+    # ---- machine-readable report (for gates/verify_gate.py) ----
+    report = {
+        "acoustic": {
+            "issues": acoustic_issues,
+            "uncovered_audio": [{"start": float(s), "end": float(e)} for (s, e) in uncovered],
+        },
+        "content": {
+            "coverage_drift": (not ok_zh) if zh_path else None,
+            "index_drift": (not align_ok) if zh_path else None,
+            "untranslated_latin": mixed,
+            "semantic_reread": semantic_reread,
+        },
+        "presentation": {"issues": presentation_issues},
+        "any_flag": bool(any_flag) or bool(semantic_reread.get("breached")),
+    }
+    if report_path:
+        try:
+            save_json(report_path, report, indent=2)
+            print(f"\n  report    : written -> {report_path}")
+        except Exception as e:  # noqa: BLE001
+            print(f"[warn] report write failed: {e}", file=sys.stderr)
+
+    if not any_flag and not semantic_reread.get("breached"):
         print("  => clean (no lane flagged)")
+    if report_only:
+        return EXIT_OK
+    # Gap B §4.1: hard red lines (acoustic uncovered / content drift / semantic)
+    # block by default; presentation warnings stay soft unless --strict.
+    hard_flag = bool(uncovered) or (content_flags > 0) or bool(semantic_reread.get("breached"))
+    if hard_flag:
+        return EXIT_RUNTIME
     if strict and any_flag:
         return EXIT_RUNTIME
     return EXIT_OK
@@ -1236,6 +1489,27 @@ def build_parser() -> argparse.ArgumentParser:
                    help="(T2) Demucs model to use when --separate-vocals is on "
                         "(default 'htdemucs'). Advanced: 'htdemucs_ft' for slightly "
                         "higher quality at ~2x the runtime.")
+    t.add_argument("--gap-vocal-sep", action="store_true",
+                   help="(ADR-030 / Spec 24) for large, high-energy gaps that the "
+                        "main transcription missed, run Demucs vocal separation on "
+                        "just that window and decode from the cleaned vocals. "
+                        "Useful for speech buried under laughter/applause/BGM. "
+                        "Default OFF; expensive, enable per-video when needed.")
+    t.add_argument("--gap-vocal-sep-min-gap", type=float, default=None,
+                   help="(Spec 24) minimum gap duration (s) to trigger gap-vocal-sep "
+                        "(default 5.0)")
+    t.add_argument("--gap-vocal-sep-energy-mean-db", type=float, default=None,
+                   help="(Spec 24) mean volume threshold (dB) for a gap to be considered "
+                        "high-energy (default -30.0)")
+    t.add_argument("--gap-vocal-sep-energy-max-db", type=float, default=None,
+                   help="(Spec 24) max volume threshold (dB) for a gap to be considered "
+                        "high-energy (default -10.0)")
+    t.add_argument("--gap-vocal-sep-no-speech-thr", type=float, default=None,
+                   help="(Spec 24) no_speech_prob threshold for gap-vocal-sep recovered "
+                        "segments; higher = stricter (default 0.5)")
+    t.add_argument("--gap-vocal-sep-avg-logprob-thr", type=float, default=None,
+                   help="(Spec 24) avg_logprob threshold for gap-vocal-sep recovered "
+                        "segments; higher = stricter (default -0.8)")
     t.add_argument("--no-audit", action="store_true",
                    help="skip the coverage self-audit + gap recovery step after "
                         "transcription (audit runs by default)")
@@ -1295,6 +1569,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="keep only the 2 newest versioned outputs in the subfolder")
     g.add_argument("--no-align-check", action="store_true",
                    help="skip the zh/en index-drift audit run before rendering")
+    g.add_argument("--video", default=None,
+                   help="source video path; when given, generate auto-runs the verify "
+                        "gate (acoustic/presentation) at the end so 'generate without "
+                        "verify' can no longer fail silently (Gap B §4.2)")
     g.add_argument("--style", default=None,
                    choices=["film", "literal", "bilingual_study"],
                    help="style suffix for output filenames (e.g. base.film.bilingual.srt); "
@@ -1339,6 +1617,18 @@ def build_parser() -> argparse.ArgumentParser:
                         "BEFORE transcription. See 'transcribe --separate-vocals'.")
     r.add_argument("--demucs-model", default=None,
                    help="(T2) advanced: override the Demucs model name (default htdemucs)")
+    r.add_argument("--gap-vocal-sep", action="store_true",
+                   help="(ADR-030 / Spec 24) see 'transcribe --gap-vocal-sep'")
+    r.add_argument("--gap-vocal-sep-min-gap", type=float, default=None,
+                   help="(Spec 24) see 'transcribe --gap-vocal-sep-min-gap'")
+    r.add_argument("--gap-vocal-sep-energy-mean-db", type=float, default=None,
+                   help="(Spec 24) see 'transcribe --gap-vocal-sep-energy-mean-db'")
+    r.add_argument("--gap-vocal-sep-energy-max-db", type=float, default=None,
+                   help="(Spec 24) see 'transcribe --gap-vocal-sep-energy-max-db'")
+    r.add_argument("--gap-vocal-sep-no-speech-thr", type=float, default=None,
+                   help="(Spec 24) see 'transcribe --gap-vocal-sep-no-speech-thr'")
+    r.add_argument("--gap-vocal-sep-avg-logprob-thr", type=float, default=None,
+                   help="(Spec 24) see 'transcribe --gap-vocal-sep-avg-logprob-thr'")
     r.add_argument("--no-audit", action="store_true",
                    help="skip the coverage self-audit + gap recovery step after "
                         "transcription (audit runs by default)")
@@ -1444,6 +1734,12 @@ def build_parser() -> argparse.ArgumentParser:
     v.add_argument("--semantic-out", default=None,
                    help="path for the semantic reread task JSON (default: next "
                         "to --segments as <base>.semantic_reread_task.json)")
+    v.add_argument("--report", default=None,
+                   help="path for the machine-readable 3-lane report JSON "
+                        "(default: next to --segments as <base>.verify_report.json); "
+                        "required by gates/verify_gate.py")
+    v.add_argument("--report-only", action="store_true",
+                   help="always exit 0 after writing the report (no gate blocking)")
     v.set_defaults(func=cmd_verify)
 
     b = sub.add_parser("backfill", help="Backfill agent_pending via the agent engine")

@@ -141,6 +141,16 @@ class ToolchainStatus:
     loaded_files: list[str] = field(default_factory=list)
     ffmpeg_path: str | None = None
     ffprobe_path: str | None = None
+    # Every external tool binary is resolved ONCE here (no ad-hoc shutil.which
+    # at call sites). Adding a tool: register it in _TOOL_REGISTRY below.
+    demucs_path: str | None = None
+    nvidia_smi_path: str | None = None
+    # Dependency / model directories, resolved ONCE from .env / VT_* (no ad-hoc
+    # os.environ.get at call sites). Adding a dependency: register in _DEP_REGISTRY.
+    hf_cache_dir: str | None = None
+    whisper_model_dir: str | None = None
+    htdemucs_cache_dir: str | None = None
+    nltk_data_dir: str | None = None
     cuda_dir: str | None = None
     cuda_source: str | None = None  # E4: "venv-torch" | "env" | "system" | None
     cuda_available: bool = False
@@ -152,6 +162,71 @@ class ToolchainStatus:
 
 
 _GLOBAL_TOOLCHAIN: ToolchainStatus | None = None
+
+
+# ---------------------------------------------------------------------------
+# Central tool / dependency registry — the SINGLE source of truth
+# ---------------------------------------------------------------------------
+# Every external tool binary and dependency directory MUST be resolved here,
+# ONCE, at init_toolchain() — never ad-hoc (shutil.which / os.environ.get) at a
+# call site. See AGENTS.md "工具链解析（持久化）" red line and TOOLCHAIN.md
+# "Adding a new tool". To add a tool/dependency:
+#   1. add its field to ToolchainStatus
+#   2. register it here (binary -> "<name>_path" / dependency -> dir field)
+#   3. call it via resolve_tool(name) / model_dir(kind)
+_DEFAULT_HF_CACHE = os.path.expanduser(os.path.join("~", ".cache", "huggingface"))
+
+# name (as invoked on the CLI) -> ToolchainStatus attribute holding its abs path
+_TOOL_REGISTRY: dict[str, str] = {
+    "ffmpeg": "ffmpeg_path",
+    "ffprobe": "ffprobe_path",
+    "demucs": "demucs_path",
+    "nvidia-smi": "nvidia_smi_path",
+}
+
+# dependency kind -> ToolchainStatus attribute holding its directory
+_DEP_REGISTRY: dict[str, str] = {
+    "hf": "hf_cache_dir",
+    "whisper": "whisper_model_dir",
+    "htdemucs": "htdemucs_cache_dir",
+    "nltk": "nltk_data_dir",
+}
+
+
+def resolve_tool(name: str) -> str:
+    """Return the absolute path of an external tool binary from the persisted
+    toolchain config (resolved once at startup).
+
+    This is the ONLY sanctioned way to locate a tool binary. It never lets a
+    caller do its own ``shutil.which`` — so a binary found at one pipeline stage
+    is never "lost" at a later stage (no per-call PATH/CWD search). Falls back
+    to ``shutil.which`` then the bare name only if the config has no entry.
+    """
+    status = get_toolchain_status()
+    attr = _TOOL_REGISTRY.get(name)
+    if attr:
+        val = getattr(status, attr)
+        if val:
+            return val
+    return shutil.which(name) or name
+
+
+def tool_available(name: str) -> bool:
+    """True when ``name`` resolves to a real binary (not the bare fallback name)."""
+    return resolve_tool(name) != name
+
+
+def model_dir(kind: str) -> str | None:
+    """Return the cached directory for a dependency/model (resolved once).
+
+    ``kind`` ∈ {"hf", "whisper", "htdemucs", "nltk"}. Returns ``None`` for an
+    unknown kind — callers must not invent dirs ad-hoc.
+    """
+    status = get_toolchain_status()
+    attr = _DEP_REGISTRY.get(kind)
+    if attr:
+        return getattr(status, attr)
+    return None
 
 
 def prepend_to_path(dir_path: str | Path) -> None:
@@ -277,8 +352,11 @@ def init_toolchain(
 
     status = ToolchainStatus()
 
-    # 1. Load .env hierarchy
-    merged, loaded_files = load_env(root_dir, override=force)
+    # 1. Load .env hierarchy.
+    # Anchor to the repo root (not cwd) so the toolchain config is a *fixed*
+    # file regardless of where the command is launched from — a plain `uv run`
+    # from a subdir still binds tools/ffmpeg/bin via .env(.local).
+    merged, loaded_files = load_env(root_dir or project_root(), override=force)
     status.loaded_files = loaded_files
 
     # 2. Inject FFmpeg directory if specified
@@ -310,9 +388,24 @@ def init_toolchain(
             except Exception:
                 pass
 
-    # 4. Probe binaries
+    # 4. Probe binaries (resolved ONCE; every caller reuses these via resolve_tool)
     status.ffmpeg_path = shutil.which("ffmpeg")
     status.ffprobe_path = shutil.which("ffprobe")
+    status.demucs_path = shutil.which("demucs")
+    status.nvidia_smi_path = shutil.which("nvidia-smi")
+
+    # 5. Resolve dependency / model directories (ONCE; callers use model_dir).
+    # Precedence mirrors the legacy env reads so behavior is unchanged — we only
+    # centralize WHERE the value comes from (no scattered os.environ.get).
+    status.hf_cache_dir = (
+        os.environ.get("VT_HF_CACHE_DIR")
+        or os.environ.get("HF_HOME")
+        or _DEFAULT_HF_CACHE
+    )
+    _models = project_root() / "models"
+    status.whisper_model_dir = str(_models)
+    status.htdemucs_cache_dir = str(_models / "torch")
+    status.nltk_data_dir = str(nltk_data_dir())
 
     # 5. Probe CUDA
     status.cuda_available, status.cuda_info = _check_cuda_support()

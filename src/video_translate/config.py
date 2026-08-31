@@ -116,6 +116,13 @@ class Config:
     # T2 (ADR-017 / Spec 19): vocal separation preprocessing
     separate_vocals: bool = False   # --separate-vocals / VT_SEPARATE_VOCALS
     demucs_model: str = "htdemucs"  # --demucs-model / VT_DEMUCS_MODEL
+    # ADR-030 / Spec 24: hard-gap vocal separation recovery
+    gap_vocal_sep: bool = False
+    gap_vocal_sep_min_gap: float = 5.0
+    gap_vocal_sep_energy_mean_db: float = -30.0
+    gap_vocal_sep_energy_max_db: float = -10.0
+    gap_vocal_sep_no_speech_thr: float = 0.5
+    gap_vocal_sep_avg_logprob_thr: float = -0.8
     # T3 (ADR-027 / Spec 21): translation style track
     style: str = "film"             # --style / VT_STYLE / [translate].style
     # T4 (ADR-028 / Spec 22): forced-acoustic-alignment backend.
@@ -146,9 +153,16 @@ def load_toml(path: str) -> dict[str, Any]:
     return flat
 
 
-_FLOAT_ENV = {"chunk", "merge_max_dur", "merge_max_gap"}
+_FLOAT_ENV = {
+    "chunk", "merge_max_dur", "merge_max_gap",
+    "gap_vocal_sep_min_gap",
+    "gap_vocal_sep_energy_mean_db",
+    "gap_vocal_sep_energy_max_db",
+    "gap_vocal_sep_no_speech_thr",
+    "gap_vocal_sep_avg_logprob_thr",
+}
 _INT_ENV = {"merge_max_chars"}
-_BOOL_ENV = {"merge_enabled", "full_transcript", "separate_vocals"}
+_BOOL_ENV = {"merge_enabled", "full_transcript", "separate_vocals", "gap_vocal_sep"}
 
 
 def _coerce_env(attr: str, raw: str) -> Any:
@@ -208,6 +222,12 @@ def resolve_config(
         "source": "VT_SOURCE", "full_transcript": "VT_FULL_TRANSCRIPT",
         "separate_vocals": "VT_SEPARATE_VOCALS",
         "demucs_model": "VT_DEMUCS_MODEL",
+        "gap_vocal_sep": "VT_GAP_VOCAL_SEP",
+        "gap_vocal_sep_min_gap": "VT_GAP_VOCAL_SEP_MIN_GAP",
+        "gap_vocal_sep_energy_mean_db": "VT_GAP_VOCAL_SEP_ENERGY_MEAN_DB",
+        "gap_vocal_sep_energy_max_db": "VT_GAP_VOCAL_SEP_ENERGY_MAX_DB",
+        "gap_vocal_sep_no_speech_thr": "VT_GAP_VOCAL_SEP_NO_SPEECH_THR",
+        "gap_vocal_sep_avg_logprob_thr": "VT_GAP_VOCAL_SEP_AVG_LOGPROB_THR",
         "style": "VT_STYLE",
         "align": "VT_ALIGN",
     }

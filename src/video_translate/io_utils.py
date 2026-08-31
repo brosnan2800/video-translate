@@ -58,6 +58,19 @@ def save_json(path: str, data: Any, *, indent: int | None = 2) -> None:
         raise
 
 
+def flush_print(*args: Any, **kwargs: Any) -> None:
+    """``print`` that always flushes.
+
+    Long-running stages (Demucs separation, Whisper decoding) emit progress only
+    once per window. When stdout is a pipe (IDE terminal, CI, redirect) Python
+    block-buffers those lines, so a healthy run looks frozen for tens of
+    minutes. Every pipeline ``progress`` callback defaults to this helper so
+    each stage boundary is visible the moment it happens.
+    """
+    kwargs.setdefault("flush", True)
+    print(*args, **kwargs)
+
+
 def write_text(path: str, text: str) -> None:
     """Atomically write UTF-8 text to `path`."""
     directory = os.path.dirname(os.path.abspath(path))

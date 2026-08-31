@@ -55,3 +55,66 @@ doctor:
 
 clean:
 	rm -rf .pytest_cache **/__pycache__ *.egg-info build dist
+
+# ----------------------- gate-kit pipeline (Gap B) -----------------------
+# 用法见 docs/PIPELINE.md。所有命令经 uv run，绝不裸 python/video-translate。
+# 注意：本地 PY := uv run python 保留给单测/脚本；gate-kit 用到的
+# `uv run video-translate` 入口单独定义为 VT，避免覆盖。
+VT   := uv run video-translate
+DECIDE := $(PY) gates/preflight_decision.py
+GATE  := $(PY) gates/gate.py
+CKPT  := $(PY) gates/checkpoint.py
+VGT   := $(PY) gates/verify_gate.py
+
+.PHONY: preflight decide-show decide confirm transcribe check-translate generate verify finish gate verify-fix verify-approve ci
+
+preflight:
+	$(VT) doctor
+	$(DECIDE) propose --base "$(BASE)" --video "$(VIDEO)"
+
+decide-show:
+	$(DECIDE) show --base "$(BASE)"
+
+decide:
+	$(DECIDE) set --base "$(BASE)" --item "$(ITEM)" --value "$(VALUE)"
+
+confirm:
+	$(DECIDE) confirm --base "$(BASE)"
+	$(CKPT) complete preflight --base "$(BASE)"
+
+transcribe:
+	$(DECIDE) assert --base "$(BASE)" --video "$(VIDEO)"
+	$(VT) run "$(VIDEO)" $$($(DECIDE) render-flags --base "$(BASE)")
+
+check-translate:
+	$(GATE) content --base "$(BASE)"
+
+generate:
+	$(VT) generate --segments "videos/$(BASE).segments_en.json" \
+	                 --zh "videos/$(BASE).zh_segments.json" \
+	                 --outdir videos --base "$(BASE)" --video "$(VIDEO)"
+
+verify:
+	$(GATE) all --base "$(BASE)" --video "$(VIDEO)"
+
+finish:
+	$(DECIDE) assert --base "$(BASE)" --video "$(VIDEO)"
+	$(CKPT) complete transcribe --base "$(BASE)"
+	$(GATE) content --base "$(BASE)"
+	$(VT) generate --segments "videos/$(BASE).segments_en.json" \
+	               --zh "videos/$(BASE).zh_segments.json" \
+	               --outdir videos --base "$(BASE)" --video "$(VIDEO)"
+	$(VGT) run --base "$(BASE)" --video "$(VIDEO)"
+	$(CKPT) complete verify --base "$(BASE)"
+
+gate:
+	$(GATE) all --base "$(BASE)" --video "$(VIDEO)"
+
+verify-fix:
+	$(VGT) run --base "$(BASE)" --video "$(VIDEO)" --auto-loop
+
+verify-approve:
+	$(CKPT) approve verify --base "$(BASE)"
+
+ci:
+	$(PY) -m pytest -q

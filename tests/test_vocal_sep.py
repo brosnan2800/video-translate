@@ -182,6 +182,104 @@ class TestGracefulFallbackWhenDemucsMissing:
         )
 
 
+class TestSeparateVocalsLaneGating:
+    """Spec 25 § 消费者行为 1 — separate_vocals 硬闸消费 route，绝不静默降级。"""
+
+    @staticmethod
+    def _route(lane, device, can_separate, message):
+        from video_translate.vocal_sep import VsepRoute
+        return VsepRoute(lane=lane, device=device,
+                         can_separate=can_separate, message=message)
+
+    @staticmethod
+    def _separate(tmp_path, route):
+        """Run separate_vocals with every heavy side effect stubbed out.
+
+        `_resample_to_16k_mono` returns False so the call ends right after the
+        demucs CLI is invoked — enough to assert the gate and the device arg.
+        """
+        from video_translate.vocal_sep import separate_vocals
+
+        vid = tmp_path / "v.mp4"
+        vid.write_bytes(b"0" * 1024)
+        with patch("video_translate.vocal_sep.demucs_available", return_value=True), \
+             patch("video_translate.vocal_sep.resolve_vsep_route", return_value=route), \
+             patch("video_translate.vocal_sep._bind_demucs_cache"), \
+             patch("video_translate.vocal_sep._extract_vocals_via_cli",
+                   return_value="/tmp/raw.wav") as mock_cli, \
+             patch("video_translate.vocal_sep._resample_to_16k_mono",
+                   return_value=False):
+            out = separate_vocals(str(vid), str(tmp_path), base="v",
+                                  progress=lambda *a, **k: None)
+        return out, mock_cli
+
+    def test_cuda_ready_invokes_demucs_with_cuda_device(self, tmp_path):
+        r = self._route("cuda", "cuda", True, "")
+        _out, mock_cli = self._separate(tmp_path, r)
+        mock_cli.assert_called_once()
+        assert mock_cli.call_args[0][3] == "cuda"
+
+    def test_cpu_lane_never_invokes_demucs(self, tmp_path):
+        r = self._route("cpu", None, False, "CPU 模式不支持人声分离（GPU-only）")
+        out, mock_cli = self._separate(tmp_path, r)
+        mock_cli.assert_not_called()
+        assert out is None
+
+    def test_apple_silicon_lane_never_invokes_demucs(self, tmp_path):
+        r = self._route("apple_silicon", None, False,
+                        "Apple Silicon 人声分离为待办（TODO），本期未实现")
+        out, mock_cli = self._separate(tmp_path, r)
+        mock_cli.assert_not_called()
+        assert out is None
+
+    def test_cuda_not_ready_never_invokes_demucs(self, tmp_path):
+        """红线：N 卡但 CUDA 未就绪时 demucs 绝不被调用（不会落到 CPU）。"""
+        r = self._route("cuda", None, False,
+                        "检测到 NVIDIA GPU 但 CUDA 未就绪，请运行 make setup")
+        out, mock_cli = self._separate(tmp_path, r)
+        mock_cli.assert_not_called()
+        assert out is None
+
+    def test_blocked_lane_reports_route_message(self, tmp_path):
+        """Spec 25 § 绝不静默 — 必须把 route.message 打给用户。"""
+        from video_translate.vocal_sep import separate_vocals
+
+        msg = "CPU 模式不支持人声分离（GPU-only）"
+        r = self._route("cpu", None, False, msg)
+        vid = tmp_path / "v.mp4"
+        vid.write_bytes(b"0" * 1024)
+        lines: list[str] = []
+        with patch("video_translate.vocal_sep.demucs_available", return_value=True), \
+             patch("video_translate.vocal_sep.resolve_vsep_route", return_value=r), \
+             patch("video_translate.vocal_sep._bind_demucs_cache"):
+            separate_vocals(str(vid), str(tmp_path), base="v", progress=lines.append)
+        assert any(msg in ln for ln in lines), (
+            f"route.message was never surfaced to the user: {lines}"
+        )
+
+    def test_cached_vocals_reused_regardless_of_lane(self, tmp_path):
+        """Spec 25 不变量 3 — 缓存命中不触发 Demucs，不受设备限制。"""
+        from video_translate.vocal_sep import (
+            separate_vocals, separate_fingerprint, vocals_wav_path,
+        )
+
+        vid = tmp_path / "v.mp4"
+        vid.write_bytes(b"0" * 1024)
+        fp = separate_fingerprint(str(vid))
+        cached = Path(vocals_wav_path(str(tmp_path), "v", fp))
+        cached.write_bytes(b"cached")
+
+        r = self._route("cpu", None, False, "CPU 模式不支持人声分离")
+        with patch("video_translate.vocal_sep.resolve_vsep_route", return_value=r), \
+             patch("video_translate.vocal_sep.probe_duration", return_value=1.0), \
+             patch("video_translate.vocal_sep.demucs_available", return_value=True), \
+             patch("video_translate.vocal_sep._extract_vocals_via_cli") as mock_cli:
+            out = separate_vocals(str(vid), str(tmp_path), base="v",
+                                  progress=lambda *a, **k: None)
+        mock_cli.assert_not_called()
+        assert out == str(cached)
+
+
 class TestTranscribeFingerprintIncludesSeparateVocals:
     """Spec 19 § Integration (A) — chunk fingerprint invariant.
 
@@ -243,8 +341,11 @@ class TestTranscribeFingerprintIncludesSeparateVocals:
 class TestDemucsCacheIsProjectLocal:
     """Project tooling rule: model weights must NOT land in C:\\ users cache.
 
-    Demucs downloads via torch.hub, which honors TORCH_HOME. We bind it to
-    <repo>/models/torch so htdemucs never hits C:\\Users\\...\\.cache\\torch.
+    ADR-032 / Spec 26: demucs >= 4.0 downloads via **huggingface_hub**, which
+    honors ``HF_HOME`` (NOT ``TORCH_HOME``). Binding only ``TORCH_HOME`` — the
+    original implementation — silently let the htdemucs weights land in
+    ``C:\\Users\\...\\.cache\\huggingface``, the exact violation this class
+    exists to prevent. Both download backends must now be bound.
     """
 
     def test_demucs_cache_dir_is_inside_repo(self):
@@ -260,6 +361,17 @@ class TestDemucsCacheIsProjectLocal:
         )
         assert "models" in cache.replace("\\", "/").split("/")
 
+    def test_cache_dir_never_points_at_user_dir(self):
+        """Zero-C-drive guard: the cache root must not be a system user dir."""
+        from video_translate import vocal_sep
+
+        cache = vocal_sep.demucs_cache_dir().replace("\\", "/").lower()
+        for marker in ("/users/", "c:/users", "\\users\\", "/home/"):
+            assert marker not in cache, (
+                f"Demucs cache {vocal_sep.demucs_cache_dir()!r} points at a "
+                f"system user directory — violates TOOLCHAIN §6 / R5."
+            )
+
     def test_bind_sets_torch_home_to_project_local(self, monkeypatch):
         from video_translate import vocal_sep
 
@@ -267,6 +379,56 @@ class TestDemucsCacheIsProjectLocal:
         vocal_sep._bind_demucs_cache()
         assert os.environ["TORCH_HOME"] == vocal_sep.demucs_cache_dir()
         assert os.path.isdir(os.environ["TORCH_HOME"])
+
+    def test_bind_sets_hf_home_to_project_local(self, monkeypatch):
+        """ADR-032 Bug 1: demucs 4.x goes through huggingface_hub -> HF_HOME.
+
+        This is THE regression that let htdemucs land on the C: drive. Without
+        HF_HOME bound, huggingface_hub writes to ~/.cache/huggingface.
+        """
+        from video_translate import vocal_sep
+
+        monkeypatch.delenv("HF_HOME", raising=False)
+        vocal_sep._bind_demucs_cache()
+        assert os.environ["HF_HOME"] == vocal_sep.demucs_cache_dir()
+        assert os.path.isdir(os.environ["HF_HOME"])
+
+    def test_bind_binds_both_download_backends(self, monkeypatch):
+        """Cover demucs 4.x (huggingface_hub) AND 3.x (torch.hub) alike."""
+        from video_translate import vocal_sep
+
+        monkeypatch.delenv("HF_HOME", raising=False)
+        monkeypatch.delenv("TORCH_HOME", raising=False)
+        vocal_sep._bind_demucs_cache()
+        cache = vocal_sep.demucs_cache_dir()
+        assert os.environ["HF_HOME"] == cache
+        assert os.environ["TORCH_HOME"] == cache
+
+    def test_bind_overrides_preexisting_system_cache_env(self, monkeypatch):
+        """A pre-set system cache dir must be overridden, not respected.
+
+        Otherwise a stale HF_HOME on the machine silently re-introduces the
+        C:-drive landing spot.
+        """
+        from video_translate import vocal_sep
+
+        monkeypatch.setenv("HF_HOME", "C:/Users/someone/.cache/huggingface")
+        monkeypatch.setenv("TORCH_HOME", "C:/Users/someone/.cache/torch")
+        vocal_sep._bind_demucs_cache()
+        cache = vocal_sep.demucs_cache_dir()
+        assert os.environ["HF_HOME"] == cache
+        assert os.environ["TORCH_HOME"] == cache
+
+    def test_bind_is_idempotent(self, monkeypatch):
+        from video_translate import vocal_sep
+
+        monkeypatch.delenv("HF_HOME", raising=False)
+        monkeypatch.delenv("TORCH_HOME", raising=False)
+        vocal_sep._bind_demucs_cache()
+        first = (os.environ["HF_HOME"], os.environ["TORCH_HOME"])
+        vocal_sep._bind_demucs_cache()
+        second = (os.environ["HF_HOME"], os.environ["TORCH_HOME"])
+        assert first == second
 
 
 @pytest.mark.slow

@@ -10,14 +10,37 @@ import subprocess
 
 
 def _resolve_binary(name: str) -> str:
-    """Resolve ffmpeg/ffprobe to an absolute path when on PATH (toolchain injects
-    ``tools/ffmpeg/bin``), else return the bare name so subprocess searches PATH.
+    """Resolve ffmpeg/ffprobe to the **persisted, absolute** tool path.
 
-    This makes direct calls (e.g. ``analyze_audio`` from a plain script, bypassing
-    the CLI's ``init_toolchain``) resolve the portable build instead of raising
-    FileNotFoundError. Command *construction* stays pure (unit-tested); resolution
-    happens only at execution time.
+    Single source of truth: the toolchain config (``init_toolchain`` /
+    ``get_toolchain_status``). It is resolved **once** at startup from
+    ``.env(.local)`` / ``VT_FFMPEG_DIR`` (E2) and cached in
+    ``_GLOBAL_TOOLCHAIN``. Every downstream tool call reuses that exact absolute
+    path, so a binary found at one pipeline stage is never "lost" at a later
+    stage — no per-call ``PATH`` search, no dependence on the current working
+    directory.
+
+    This also makes direct calls (e.g. ``analyze_audio`` / ``verify`` from a
+    plain script that bypasses the CLI's ``init_toolchain``) self-heal: the
+    first resolution auto-loads the ``.env(.local)`` config and binds the
+    portable build, instead of raising FileNotFoundError. Command *construction*
+    stays pure (unit-tested); resolution happens only at execution time.
+
+    Fallback chain (preserves system-PATH / bare-script usability):
+      1. cached toolchain status path (absolute — preferred)
+      2. ``shutil.which(name)`` — system-installed ffmpeg on PATH
+      3. bare name — subprocess searches PATH at exec time
     """
+    try:
+        from .toolchain import get_toolchain_status
+
+        status = get_toolchain_status()
+        if name == "ffmpeg" and status.ffmpeg_path:
+            return status.ffmpeg_path
+        if name == "ffprobe" and status.ffprobe_path:
+            return status.ffprobe_path
+    except Exception:  # noqa: BLE001 - never let resolution crash a tool call
+        pass
     return shutil.which(name) or name
 
 

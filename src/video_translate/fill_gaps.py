@@ -45,6 +45,7 @@ import tempfile
 from typing import Any
 
 from .ffmpeg_utils import extract_chunk, probe_duration
+from .io_utils import flush_print
 from .transcribe import (
     BEAM_SIZE, BEST_OF, resolve_device,
     CONDITION_ON_PREVIOUS_TEXT, REPETITION_PENALTY,
@@ -397,7 +398,14 @@ def fill_gaps(
     # (Spec 19 Invariant #4) — the acoustic-fact reference is always the
     # original unmodified audio, never the cleaned source.
     audio_source: str | None = None,
-    progress=print,
+    # ADR-030 / Spec 24: optional hard-gap vocal separation recovery.
+    gap_vocal_sep: bool = False,
+    gap_vocal_sep_min_gap: float = 5.0,
+    gap_vocal_sep_energy_mean_db: float = -30.0,
+    gap_vocal_sep_energy_max_db: float = -10.0,
+    gap_vocal_sep_no_speech_thr: float = 0.5,
+    gap_vocal_sep_avg_logprob_thr: float = -0.8,
+    progress=flush_print,
 ) -> list[dict[str, Any]]:
     """Audit `segments` for dropped speech in `input_path` and recover it.
 
@@ -461,12 +469,51 @@ def fill_gaps(
     progress(f"[audit] {len(holes)} hole(s) >= {min_gap}s + "
              f"{len(collapsed)} collapsed segment(s) to probe")
 
-    # 2) force-decode each suspect window, drop echoes, splice real speech back
+    # ADR-032 / Spec 26: bind the offline-first policy BEFORE anything that can
+    # reach the network. gap-vocal-sep loads Demucs via huggingface_hub and
+    # WhisperModel is constructed further down; both must resolve from local
+    # caches only. Setting this AFTER those load points let huggingface_hub
+    # issue network HEAD probes and hang in a 5x retry loop on proxy-less
+    # machines — even though the model was already cached locally.
     os.environ.setdefault("HF_HUB_OFFLINE", "1")
+
+    # ADR-030 / Spec 24: optional hard-gap vocal separation recovery.
+    # Run BEFORE loading Whisper so Demucs and Whisper never share GPU memory.
+    gap_vocals_map: dict[tuple[float, float], str] = {}
+    if gap_vocal_sep and holes:
+        from .gap_vocal_sep import recover_hard_gaps
+        gap_vocals_map = recover_hard_gaps(
+            input_path, segments, holes,
+            min_gap=gap_vocal_sep_min_gap,
+            energy_mean_db=gap_vocal_sep_energy_mean_db,
+            energy_max_db=gap_vocal_sep_energy_max_db,
+            audio_source=audio_source,
+            progress=progress,
+        )
+        if gap_vocals_map:
+            progress(f"[gap-vocal-sep] {len(gap_vocals_map)} hard gap(s) will decode from vocals")
+
+    # 2) force-decode each suspect window, drop echoes, splice real speech back
+    # (HF_HUB_OFFLINE is already bound earlier — see ADR-032 / Spec 26.)
     dev, ct = resolve_device(device, compute_type)
     from faster_whisper import WhisperModel
     model = WhisperModel(model_name, device=dev, compute_type=ct,
                          cpu_threads=threads)
+
+    # ADR-030 / Spec 24: decode hard gaps from cleaned vocals with strict guard.
+    hard_gap_inserts: list[dict[str, Any]] = []
+    if gap_vocals_map:
+        from .gap_vocal_sep import _decode_gap_vocals
+        hard_gap_inserts = _decode_gap_vocals(
+            gap_vocals_map,
+            model=model,
+            lang=lang,
+            segments=segments,
+            no_speech_thr=gap_vocal_sep_no_speech_thr,
+            avg_logprob_thr=gap_vocal_sep_avg_logprob_thr,
+            progress=progress,
+        )
+        progress(f"[gap-vocal-sep] hard gaps recovered {len(hard_gap_inserts)} segment(s)")
 
     def _decode_once(gs: float, ge: float, pad: float,
                      dedupe_pool: list[dict[str, Any]],
@@ -584,8 +631,12 @@ def fill_gaps(
         return merged
 
     inserts: list[dict[str, Any]] = []
+    hard_gaps_set: set[tuple[float, float]] = set(gap_vocals_map.keys())
 
     for (gs, ge) in holes:
+        if (gs, ge) in hard_gaps_set:
+            # ADR-030 / Spec 24: this hole is handled by gap-vocal-sep above.
+            continue
         if (ge - gs) > _SUBWIN:
             # ADR-016 (T2b): slice very wide holes for reliable recall
             recovered = _probe_long_hole(gs, ge, segments)
@@ -628,8 +679,8 @@ def fill_gaps(
             progress(f"[audit] collapse {gs:.1f}->{ge:.1f}s: no extra speech — "
                      f"kept original")
 
-    merged = [s for i, s in enumerate(segments) if i not in drop] + inserts
+    merged = [s for i, s in enumerate(segments) if i not in drop] + inserts + hard_gap_inserts
     merged.sort(key=lambda x: float(x["start"]))
-    progress(f"[audit] +{len(inserts)} recovered / -{len(drop)} collapsed -> "
-             f"{len(merged)} total")
+    progress(f"[audit] +{len(inserts)} recovered / -{len(drop)} collapsed / "
+             f"+{len(hard_gap_inserts)} gap-vocal-sep -> {len(merged)} total")
     return merged

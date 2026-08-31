@@ -16,13 +16,18 @@ import gc
 import hashlib
 import json
 import os
+import platform
 import shlex
 import subprocess
 import sys
+import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
 from .ffmpeg_utils import probe_duration
+from .toolchain import resolve_tool, tool_available
+from .io_utils import flush_print
 
 # ---------------------------------------------------------------------------
 # Lazy backend probe (NOTHING import demucs/torch at module toplevel)
@@ -31,11 +36,19 @@ from .ffmpeg_utils import probe_duration
 _DEMUCS_AVAILABLE_CACHE: bool | None = None
 
 
-# Project-local cache for the Demucs vocal-separation model (htdemucs, ~400 MB+).
-# Demucs downloads its weights via torch.hub, which honors TORCH_HOME. We point
-# TORCH_HOME at <repo>/models/torch so the weight NEVER lands in the user's
-# C:\Users\...\ cache (project tooling rule: no artifacts in the system drive's
-# user dir). See TOOLCHAIN.md §6.
+# Project-local cache for the Demucs vocal-separation model (htdemucs).
+#
+# ADR-032 / Spec 26 — TWO download backends must be bound, not one:
+#   * demucs >= 4.0 (what pyproject pins: ``demucs>=4.0.1``) downloads via
+#     **huggingface_hub**, which honors HF_HOME — weights land in
+#     ``HF_HOME/hub/models--adefossez--HTDemucs/``.
+#   * demucs 3.x downloads via **torch.hub**, which honors TORCH_HOME — weights
+#     land in ``TORCH_HOME/hub/checkpoints/``.
+#
+# The original implementation bound ONLY TORCH_HOME, on the assumption that
+# Demucs used torch.hub. With demucs 4.x that was a no-op: the htdemucs weights
+# silently landed in C:\Users\...\.cache\huggingface — exactly the system-drive
+# artifact this rule exists to prevent (TOOLCHAIN §6 / MAJOR_VERSION_PLAN R5).
 _REPO_ROOT = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 )
@@ -49,11 +62,18 @@ def demucs_cache_dir() -> str:
 
 
 def _bind_demucs_cache() -> None:
-    """Point torch.hub (used by Demucs) at the project-local cache dir.
+    """Point BOTH Demucs download backends at the project-local cache dir.
 
-    Sets TORCH_HOME for the current process only — the htdemucs weights then
-    download into <repo>/models/torch instead of C:\\Users\\...\\.cache\\torch.
+    ADR-032 / Spec 26 — sets ``HF_HOME`` (huggingface_hub, demucs >= 4.0) and
+    ``TORCH_HOME`` (torch.hub, demucs 3.x) for the current process, so the
+    htdemucs weights land in ``<repo>/models/torch`` instead of
+    ``C:\\Users\\...\\.cache\\{huggingface,torch}``.
+
+    Both are assigned unconditionally rather than only-when-unset: a stale
+    system-cache env var on the host must be overridden, otherwise the C:-drive
+    landing spot is silently re-introduced. Idempotent.
     """
+    os.environ["HF_HOME"] = _DEMUCS_CACHE_DIR
     os.environ["TORCH_HOME"] = _DEMUCS_CACHE_DIR
     os.makedirs(_DEMUCS_CACHE_DIR, exist_ok=True)
 
@@ -130,18 +150,149 @@ def vocals_wav_path(outdir: str, base: str, fp: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _auto_device() -> str:
-    """Pick cuda if the runtime has a working CUDA device, else cpu."""
+# ---------------------------------------------------------------------------
+# Three-lane vocal separation route (ADR-031 / Spec 25)
+# ---------------------------------------------------------------------------
+# Demucs used to pick its device with a single binary choice: cuda if torch saw
+# a CUDA device, else cpu. That caused two distinct failures:
+#
+#   * a machine with an NVIDIA card whose torch was installed as a CPU wheel
+#     silently ran Demucs on the CPU — a window that takes seconds on CUDA
+#     takes close to an hour on CPU, which is indistinguishable from a hang;
+#   * plugging that hole with "no CUDA => never run Demucs" then lumped three
+#     genuinely different machines (NVIDIA / Apple Silicon / plain CPU) into a
+#     single disabled branch, permanently disabling separation on Apple Silicon.
+#
+# The route below separates the two questions that used to be conflated:
+#
+#   HARDWARE — what kind of machine is this?  (never depends on torch)
+#   RUNTIME  — is this machine's GPU stack usable right now?
+#
+# and evaluates them in an order that makes the red line structural: once an
+# NVIDIA card is detected, the Apple Silicon / CPU lanes are never consulted, so
+# a broken CUDA install can only ever yield "not ready" — never a downgrade.
+
+VSEP_LANE_CUDA = "cuda"
+VSEP_LANE_APPLE_SILICON = "apple_silicon"
+VSEP_LANE_CPU = "cpu"
+
+
+@dataclass(frozen=True)
+class VsepRoute:
+    """Immutable result of the vocal-separation lane decision (Spec 25).
+
+    lane
+        "cuda" | "apple_silicon" | "cpu" — the hardware lane.
+    device
+        "cuda" or None — the value handed to ``demucs -d``. None whenever the
+        lane must not run Demucs at all.
+    can_separate
+        Whether Demucs may run on this machine right now.
+    message
+        Why it cannot (empty when ``can_separate``). Consumers MUST print it —
+        silent degradation is precisely what this design exists to prevent.
+    """
+
+    lane: str
+    device: str | None
+    can_separate: bool
+    message: str
+
+
+# Cached: the route is consulted by both the CLI gate and ``separate_vocals``,
+# and re-probing would re-import torch (a heavy, avoidable cost).
+_vsep_route_cache: VsepRoute | None = None
+
+
+def _is_nvidia_hardware() -> bool:
+    """True when an NVIDIA card is present (nvidia-smi reachable on PATH).
+
+    Deliberately torch-independent: a broken or CPU-only torch install must not
+    be able to make an NVIDIA machine look like a CPU machine.
+    """
+    return tool_available("nvidia-smi")
+
+
+def _is_apple_silicon() -> bool:
+    """True on Apple Silicon (darwin + arm64).
+
+    Intel Macs (darwin + x86_64) and Linux arm64 are NOT Apple Silicon — they
+    fall through to the CPU lane. A Rosetta interpreter also reports x86_64,
+    which is correct: its torch build cannot reach MPS either.
+    """
+    return sys.platform == "darwin" and platform.machine() == "arm64"
+
+
+def _torch_cuda_ready() -> bool:
+    """True only when torch is importable AND reports a usable CUDA device.
+
+    Never raises — a missing or broken torch simply means "not ready".
+    """
     try:
-        import torch  # lazy — keeps base CLI importable without a heavy torch import
+        import torch  # lazy — keeps base CLI importable without a heavy import
     except Exception:
-        return "cpu"
+        return False
     try:
-        if torch.cuda.is_available() and torch.cuda.device_count() > 0:
-            return "cuda"
+        return bool(torch.cuda.is_available() and torch.cuda.device_count() > 0)
     except Exception:
-        pass
-    return "cpu"
+        return False
+
+
+def resolve_vsep_route() -> VsepRoute:
+    """Decide which vocal-separation lane this machine belongs to (Spec 25).
+
+    Evaluation order is the red-line guarantee: NVIDIA hardware is probed FIRST
+    and locks the lane in. An NVIDIA machine whose CUDA stack is broken can
+    therefore only ever report "not ready" — it can never be re-classified as
+    Apple Silicon or CPU and then run Demucs on CPU/MPS.
+
+    The result is cached for the process lifetime.
+    """
+    global _vsep_route_cache
+    if _vsep_route_cache is not None:
+        return _vsep_route_cache
+
+    if _is_nvidia_hardware():
+        route = (
+            VsepRoute(lane=VSEP_LANE_CUDA, device="cuda",
+                      can_separate=True, message="")
+            if _torch_cuda_ready()
+            else VsepRoute(
+                lane=VSEP_LANE_CUDA,
+                device=None,
+                can_separate=False,
+                message=(
+                    "检测到 NVIDIA GPU，但 CUDA 运行时未就绪"
+                    "（torch 装成了 CPU wheel，或环境还没初始化）。"
+                    "请运行 `make setup` —— uv sync 会自动安装 CUDA 版 torch。"
+                    "人声分离绝不会降级到 CPU 执行。"
+                ),
+            )
+        )
+    elif _is_apple_silicon():
+        route = VsepRoute(
+            lane=VSEP_LANE_APPLE_SILICON,
+            device=None,
+            can_separate=False,
+            message=(
+                "Apple Silicon 上的人声分离目前是待办（TODO）：MPS 与 CUDA 是"
+                "两套独立后端，且 htdemucs 在 MPS 上未必比 CPU 快，本期未实现。"
+                "不会降级到 CPU 执行。"
+            ),
+        )
+    else:
+        route = VsepRoute(
+            lane=VSEP_LANE_CPU,
+            device=None,
+            can_separate=False,
+            message=(
+                "本机是纯 CPU 环境，不支持人声分离"
+                "（Demucs 属 GPU-only 能力）。"
+            ),
+        )
+
+    _vsep_route_cache = route
+    return route
 
 
 def _extract_vocals_via_cli(
@@ -161,9 +312,9 @@ def _extract_vocals_via_cli(
     Returns abs path to the DEMUCS-PRODUCED wav (raw sr, usually 44100 stereo),
     or None on failure.
     """
-    demucs_bin = shutil_which("demucs")
-    if demucs_bin is None:
+    if not tool_available("demucs"):
         return None
+    demucs_bin = resolve_tool("demucs")
     out_tmp = Path(tmpdir) / "demucs_out"
     out_tmp.mkdir(parents=True, exist_ok=True)
     name = Path(input_path).stem
@@ -175,10 +326,16 @@ def _extract_vocals_via_cli(
         "-o", str(out_tmp),
         input_path,
     ]
+    # Stream Demucs' own output instead of capturing it. A separation can take
+    # minutes per window; swallowing its progress made healthy runs look frozen
+    # (the terminal showed one line and then nothing until the window finished).
+    started = time.monotonic()
     try:
-        subprocess.run(cmd, check=True, capture_output=True, timeout=None)
+        subprocess.run(cmd, check=True, timeout=None)
     except Exception:
         return None
+    finally:
+        flush_print(f"[vsep] demucs finished in {time.monotonic() - started:.1f}s")
     # Convention: demucs -o dir/ input → dir/{model}/{stem}/{name}.wav
     produced = out_tmp / model_name / name / "vocals.wav"
     if not produced.is_file():
@@ -186,15 +343,9 @@ def _extract_vocals_via_cli(
     return str(produced)
 
 
-def shutil_which(exe: str) -> str | None:
-    """Small shutil.which wrapper for test patching."""
-    import shutil
-    return shutil.which(exe)
-
-
 def _resample_to_16k_mono(src: str, dst: str) -> bool:
     """FFmpeg resample to 16kHz mono WAV (Whisper expected input format)."""
-    ffmpeg_bin = os.environ.get("VT_FFMPEG") or _which_or_ffmpeg("ffmpeg")
+    ffmpeg_bin = resolve_tool("ffmpeg")
     if not ffmpeg_bin:
         return False
     cmd = [
@@ -210,11 +361,6 @@ def _resample_to_16k_mono(src: str, dst: str) -> bool:
     return Path(dst).is_file()
 
 
-def _which_or_ffmpeg(name: str) -> str:
-    import shutil
-    return shutil.which(name) or name
-
-
 def separate_vocals(
     input_path: str,
     outdir: str,
@@ -223,7 +369,7 @@ def separate_vocals(
     backend: str = "demucs",
     model_name: str = "htdemucs",
     device: str = "auto",
-    progress: Callable[..., None] = print,
+    progress: Callable[..., None] = flush_print,
 ) -> str | None:
     """Separate vocals from input, cache to ``{outdir}/{base}.{fp}.vocals.wav``.
 
@@ -276,11 +422,33 @@ def separate_vocals(
     if not demucs_available():
         return None  # graceful fallback (Spec 19 invariant #5)
 
-    # Bind Demucs' torch.hub model download to the project-local cache so the
-    # htdemucs weights land in <repo>/models/torch, never C:\Users\...\.cache.
+    # Bind Demucs' model download (huggingface_hub on 4.x, torch.hub on 3.x) to
+    # the project-local cache so the htdemucs weights land in <repo>/models/torch,
+    # never C:\Users\...\.cache. See ADR-032 / Spec 26.
     _bind_demucs_cache()
 
-    dev = device if device and device != "auto" else _auto_device()
+    # Hard gate (Spec 25 / ADR-031): Demucs runs only on a lane that can host
+    # it. Every other lane refuses loudly and returns None so the caller falls
+    # back to the original audio — the old "silently pick cpu" behaviour turned
+    # a minutes-long job into an hour-long apparent hang.
+    route = resolve_vsep_route()
+    if not route.can_separate:
+        progress(f"[vsep] vocal separation unavailable: {route.message} "
+                 "Skipping separation — falling back to the original audio.")
+        return None
+    dev = route.device
+    if not dev:
+        # Defensive: can_separate=True always carries a device. Keeps the type
+        # checker honest without weakening the gate above.
+        progress("[vsep] internal error: route allows separation but carries no "
+                 "device; skipping separation.")
+        return None
+    if device and device != "auto" and device != dev:
+        # The lane route is the single truth source (Spec 25). Honouring a
+        # caller-supplied device that contradicts it would re-open the
+        # silent-CPU-downgrade hole, so it is ignored rather than applied.
+        progress(f"[vsep] ignoring requested device {device!r}: this machine's "
+                 f"route mandates {dev!r}.")
     progress(f"[vsep] separating vocals with {backend}/{model_name} ({dev}) …")
 
     # We use a temp dir for demucs's raw multi-channel output, then resample
