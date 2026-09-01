@@ -459,6 +459,28 @@ def _require_ffmpeg() -> int | None:
     return None
 
 
+def _gate_vsep(args: argparse.Namespace, message: str, guidance: str) -> bool:
+    """Control-plane hard-stop for an explicit vsep request (裁决一).
+
+    --separate-vocals is EXPLICIT. When demucs is unavailable the request
+    cannot be honored → raise ``GateFail`` (cli.main → exit 8) with repair
+    guidance, unless ``--allow-degrade`` explicitly opts out (then warn and
+    degrade, so automation/CI can still proceed — the reason is still
+    recorded in the state file).
+
+    Returns True when the caller should *degrade* (… and use original audio),
+    False when the gate hard-stops (the caller must not continue past this).
+    """
+    if getattr(args, "allow_degrade", False):
+        print(
+            f"[warn] {message} --allow-degrade set; proceeding on the original "
+            f"audio (reason recorded in state)",
+            file=sys.stderr,
+        )
+        return True
+    raise GateFail(message, guidance)
+
+
 def _vocal_sep_step(
     args: argparse.Namespace, cfg, input_path: str, outdir: str, base: str,
 ) -> tuple[bool, str | None, str, str, str | None]:
@@ -466,6 +488,11 @@ def _vocal_sep_step(
 
     Spec 19 / ADR-017 §5: we MUST run demucs FIRST, release ALL demucs GPU
     memory, THEN start Whisper — otherwise two big models on an 8GB card OOM.
+
+    Control plane 裁决一: --separate-vocals is an EXPLICIT request. When demucs
+    is not installed the request cannot be honored — hard-stop (GateFail →
+    exit 8) with repair guidance, unless --allow-degrade explicitly opts out
+    (then warn + fall back, reason recorded in state).
 
     Returns:
       (do_separate_was_requested_flag,
@@ -486,10 +513,16 @@ def _vocal_sep_step(
     # user explicitly asked for separation — probe & try
     from .vocal_sep import demucs_available, separate_vocals, separate_fingerprint, _input_fingerprint
     if not demucs_available():
-        print("[warn] --separate-vocals requested but 'demucs' package not installed.\n"
-              "       To enable: pip install -e .   (core dependency)\n"
-              "       (CPU fallback is very slow; GPU recommended).\n"
-              "       Falling back to original audio.")
+        # _gate_vsep raises GateFail (→ exit 8) unless --allow-degrade set.
+        _gate_vsep(
+            args,
+            "--separate-vocals requires the demucs package, which is not "
+            "installed. Explicit requests are never silently degraded — the "
+            "whole point of vsep is preventing strong-BGM hallucinations.",
+            "Run `uv sync` (`pip install -e .` fallback). To skip separation "
+            "and proceed on the original audio, drop --separate-vocals or "
+            "explicitly bypass with --allow-degrade.",
+        )
         return False, None, backend, dm_model, None
     try:
         audio_source = separate_vocals(
@@ -577,6 +610,7 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
             vocal_sep_input_hash=_vsep_ihash,
             # T4 (ADR-028 / Spec 22): forced-acoustic-alignment backend.
             align_backend=cfg.align,
+            align_allow_degrade=getattr(args, "allow_degrade", False),
         )
         segs_path = os.path.join(outdir, f"{base}.segments_en.json")
         # ADR-012: compute the independent silence reference ONCE and share it
@@ -767,6 +801,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             demucs_model=getattr(args, "demucs_model", None),
             # T4 (ADR-028 / Spec 22): forward alignment backend
             align=cfg.align,
+            allow_degrade=getattr(args, "allow_degrade", False),
         ))
         if rc != EXIT_OK:
             return rc
@@ -886,9 +921,14 @@ def cmd_resegment(args: argparse.Namespace) -> int:
                     "to produce it. Falling back to original video audio."
                 )
         else:
-            print(
-                "[warn] --separate-vocals requested but 'demucs' package not "
-                "installed; falling back to original video audio."
+            # 裁决一: explicit --separate-vocals on resegment + demucs missing
+            # => hard-stop (exit 8) unless --allow-degrade explicitly opts out.
+            _gate_vsep(
+                args,
+                "--separate-vocals requested on resegment but the demucs "
+                "package is not installed.",
+                "Run `uv sync` (`pip install -e .` fallback), or drop "
+                "--separate-vocals / explicitly bypass with --allow-degrade.",
             )
 
     from .transcribe import transcribe_window
@@ -1246,9 +1286,15 @@ def build_parser() -> argparse.ArgumentParser:
                         "backend. 'auto' (default) = WhisperX wav2vec2 word-level "
                         "timestamp refinement on hosts that can run it (NVIDIA CUDA + "
                         "package), else none. 'whisperx' = force alignment (macOS / "
-                        "not-installed degrades to none). 'none' = no alignment, "
-                        "byte-identical to historical output. Override precedence: "
-                        "CLI > VT_ALIGN > [transcribe].align")
+                        "not-installed hard-stops unless --allow-degrade). 'none' = "
+                        "no alignment, byte-identical to historical output. "
+                        "Override precedence: CLI > VT_ALIGN > [transcribe].align")
+    t.add_argument("--allow-degrade", action="store_true",
+                   help="(control plane 裁决一 escape hatch) explicitly permit "
+                        "degradation of an EXPLICIT request --align whisperx or "
+                        "--separate-vocals when the tool is unavailable, instead "
+                        "of hard-stopping with exit 8. The reason is recorded in "
+                        "<base>.vt_state.json.")
     t.set_defaults(func=cmd_transcribe)
 
     tr = sub.add_parser("translate", help="Translate segments_en.json -> zh_segments.json")
@@ -1348,6 +1394,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="(T4 / ADR-028 / Spec 22) forced-acoustic word alignment "
                         "backend. See 'transcribe --align'. 'auto' (default) runs "
                         "whisperx on CUDA hosts; macOS / not-installed degrades to none.")
+    r.add_argument("--allow-degrade", action="store_true",
+                   help="(control plane 裁决一 escape hatch) explicitly permit "
+                        "degradation of --align whisperx / --separate-vocals when "
+                        "unavailable, instead of exit 8 (reason recorded in state).")
     r.add_argument("--src", default="en")
     r.add_argument("--tgt", default="zh-CN")
     r.add_argument("--engine", default=None, choices=["agent", "google"],
@@ -1399,6 +1449,10 @@ def build_parser() -> argparse.ArgumentParser:
     rs.add_argument("--demucs-model", default=None,
                     help="(T2) Demucs model name (default htdemucs); must match "
                          "the model used to produce the cached vocals.wav")
+    rs.add_argument("--allow-degrade", action="store_true",
+                    help="(control plane 裁决一 escape hatch) explicitly permit "
+                         "degradation of --separate-vocals when demucs is "
+                         "unavailable, instead of exit 8 (reason recorded in state).")
     rs.set_defaults(func=cmd_resegment)
 
     s = sub.add_parser("setup", help="Check/download the HF model (reuse if cached)")

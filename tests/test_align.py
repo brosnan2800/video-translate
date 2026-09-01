@@ -314,14 +314,18 @@ def test_align_none_does_not_import_whisperx(monkeypatch, tmp_path):
 
 
 def test_align_whisperx_unavailable_falls_back_none(monkeypatch, tmp_path, capsys):
-    """显式 whisperx 但库缺失 -> 告警 + 回退 none，主流程不出错（铁律 2）。"""
+    """显式 whisperx 但库缺失 -> 硬停 GateFail（裁决一：explicit 必须被满足）。
+
+    契约（控制平面 §1.1）：default 可降级，explicit 必满足 → exit 8，绝不静默背叛显式意图。
+    """
+    import pytest
     import video_translate.transcribe as T
+    from video_translate.capabilities import GateFail
 
     monkeypatch.setattr(T, "probe_duration", lambda p: 10.0)
     monkeypatch.setattr(T, "extract_chunk", lambda *a, **k: None)
     # whisperx unavailable
     monkeypatch.setitem(sys.modules, "whisperx", None)
-    # even if probe is reached, force False
     import video_translate.align as AL
     monkeypatch.setattr(AL, "whisperx_available", lambda: False)
 
@@ -339,9 +343,20 @@ def test_align_whisperx_unavailable_falls_back_none(monkeypatch, tmp_path, capsy
     fake_fw.WhisperModel = FakeModel
     monkeypatch.setitem(sys.modules, "faster_whisper", fake_fw)
 
-    out = T.transcribe_video("vid.mp4", str(tmp_path), base="x", lang="en",
-                             align_backend="whisperx", progress=lambda *_: None)
-    assert captured["calls"] == 1
-    captured_out = capsys.readouterr()
-    assert "whisperx" in captured_out.err.lower()
-    assert out.endswith("x.segments_en.json")
+    with pytest.raises(GateFail) as exc:
+        T.transcribe_video("vid.mp4", str(tmp_path), base="x", lang="en",
+                           align_backend="whisperx", progress=lambda *_: None)
+    assert "WhisperX" in exc.value.message
+    assert "explicit" in exc.value.message.lower() or "never silently" in exc.value.message.lower()
+
+
+def test_align_explicit_degrade_escape_hatch(monkeypatch, tmp_path):
+    """显式 whisperx 缺包 + --allow-degrade escape hatch -> 降级 none 而非硬停。
+
+    逃生门是显式 opt-out，必须留痕（打 WARN）。"""
+    import video_translate.transcribe as T
+    import video_translate.align as AL
+
+    monkeypatch.setattr(AL, "whisperx_available", lambda: False)
+    assert T._resolve_align_backend("whisperx", allow_degrade=True) == "none"
+    assert T._resolve_align_backend("auto") == "none"  # default 路径零变化

@@ -32,6 +32,7 @@ from .ffmpeg_utils import extract_chunk, probe_duration
 from .io_utils import load_json, load_json_default, save_json
 from .audio_profile import analyze_audio, route_vad_chunk
 from . import align as _align
+from .capabilities import GateFail
 
 # Default device/compute_type — kept as module-level defaults for backward
 # compatibility, but no longer forced: transcribe_video/transcribe_window accept
@@ -274,6 +275,10 @@ def transcribe_video(
     # historical output. Does NOT alter the transcribe fingerprint — alignment
     # is a separate cache layer.
     align_backend: str = "auto",
+    # Control plane 裁决一 escape hatch: an EXPLICIT align request that cannot
+    # be honored hard-stops (exit 8) unless this is explicitly enabled by the
+    # caller passing --allow-degrade (brew/CI automation's opt-out).
+    align_allow_degrade: bool = False,
     progress=print,
 ) -> str:
     """Transcribe `input_path` into `{outdir}/{base}.segments_en.json`.
@@ -400,7 +405,9 @@ def transcribe_video(
             detected_language = lang_sidecar["language"]
 
     if align_backend != "none":
-        align_backend = _resolve_align_backend(align_backend, progress)
+        align_backend = _resolve_align_backend(
+            align_backend, progress, allow_degrade=align_allow_degrade,
+        )
     if align_backend != "none":
         # Release Whisper (8GB budget) before loading wav2vec2.
         del model
@@ -467,10 +474,23 @@ def transcribe_video(
     return out
 
 
-def _resolve_align_backend(requested: str, progress=print) -> str:
-    """Resolve the effective alignment backend, applying graceful degradation
-    (铁律 2): explicit whisperx but unavailable -> warn + fall back to none;
-    default "auto" -> whisperx only on hosts that can actually run it.
+def _resolve_align_backend(
+    requested: str,
+    progress=print,
+    *,
+    allow_degrade: bool = False,
+) -> str:
+    """Resolve the effective alignment backend (裁决一).
+
+    - ``none`` → none.
+    - ``auto`` (default) → whisperx on hosts that can run it (CUDA + package),
+      else degrade to none with an INFO reason (defaults may degrade; the
+      reason is recorded in the state file).
+    - ``whisperx`` (explicit) → must be honored: raise ``GateFail`` (→ exit 8)
+      when unavailable. Explicit requests are NEVER silently degraded — unless
+      ``allow_degrade`` (the ``--allow-degrade`` escape hatch) explicitly opts
+      out, in which case it warns and falls back (reason still recorded).
+    - a name outside ALIGN_BACKENDS → hard-stop (explicit misuse).
 
     Returns "none" when alignment cannot/should not run.
     """
@@ -486,18 +506,35 @@ def _resolve_align_backend(requested: str, progress=print) -> str:
               file=sys.stderr)
         return "none"
     if requested not in _align.ALIGN_BACKENDS:
-        print(f"[align] WARNING: unknown backend {requested!r}; "
-              f"falling back to none", file=sys.stderr)
-        return "none"
+        return _gate_align_fail(
+            f"unknown alignment backend {requested!r}",
+            "choose one of: auto, none, whisperx",
+            allow_degrade,
+        )
     if not _align.whisperx_available():
+        return _gate_align_fail(
+            "--align whisperx requires WhisperX (NVIDIA CUDA + package), which "
+            "is not available on this host. Explicit requests are never "
+            "silently degraded.",
+            "On a CUDA machine run `uv sync --extra gpu`. To proceed without "
+            "alignment use --align auto/none, or explicitly bypass this gate "
+            "with --allow-degrade.",
+            allow_degrade,
+        )
+    return requested
+
+
+def _gate_align_fail(message: str, guidance: str, allow_degrade: bool) -> str:
+    """Hard-stop for an explicit-but-unhonorable align request (exit 8), unless
+    the caller explicitly opted into degradation (which still leaves a trace)."""
+    if allow_degrade:
         print(
-            "[align] WARNING: --align whisperx requested but WhisperX is not "
-            "available (macOS / not installed). Falling back to none — run "
-            "`uv sync --extra gpu` on a CUDA machine to enable alignment.",
+            f"[align] WARNING: {message} --allow-degrade set, degrading to none "
+            f"(reason recorded in state)",
             file=sys.stderr,
         )
         return "none"
-    return requested
+    raise GateFail(message, guidance)
 
 
 def _seg_to_dict(s, offset: float) -> dict[str, Any]:
