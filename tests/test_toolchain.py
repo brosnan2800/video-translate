@@ -286,3 +286,41 @@ def test_resolve_cuda_dir_rejects_dir_without_cuda_dlls(monkeypatch, tmp_path):
     cuda_dir, source = toolchain._resolve_cuda_dir({})
     assert cuda_dir is None
     assert source is None
+
+
+# ---------------------------------------------------------------------------
+# Tool registry (control plane §2.3)
+# ---------------------------------------------------------------------------
+
+def _fake_exe(bin_dir, name: str) -> Path:
+    exe = name + (".exe" if os.name == "nt" else "")
+    p = bin_dir / exe
+    p.write_bytes(b"MZ")
+    return p
+
+
+def test_resolve_tool_returns_persisted_abs_path(tmp_path):
+    """Control plane §2.3: resolve_tool uses the persisted toolchain path, not
+    a fresh ad-hoc PATH search — a binary found at stage A is never lost at
+    stage B."""
+    from video_translate.toolchain import resolve_tool, tool_available
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = _fake_exe(bin_dir, "ffmpeg")
+    _fake_exe(bin_dir, "ffprobe")
+    (tmp_path / ".env").write_text(
+        f"VT_FFMPEG_DIR={bin_dir}\n", encoding="utf-8"
+    )
+
+    status = init_toolchain(root_dir=tmp_path, force=True)
+    assert status.ffmpeg_path  # resolved once at init
+    # Windows: shutil.which normalizes the extension to PATHEXT's uppercase .EXE
+    assert os.path.normcase(resolve_tool("ffmpeg")) == os.path.normcase(str(fake))
+    assert tool_available("ffmpeg") is True
+
+
+def test_tool_available_false_for_unknown_or_missing():
+    from video_translate.toolchain import tool_available
+
+    assert tool_available("this-tool-definitely-does-not-exist") is False

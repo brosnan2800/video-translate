@@ -277,8 +277,11 @@ def init_toolchain(
 
     status = ToolchainStatus()
 
-    # 1. Load .env hierarchy
-    merged, loaded_files = load_env(root_dir, override=force)
+    # 1. Load .env hierarchy.
+    # Anchor to the repo root (not cwd) so the toolchain config is a *fixed*
+    # file regardless of where the command is launched from — a plain `uv run`
+    # from a subdir still binds tools/ffmpeg/bin via .env(.local).
+    merged, loaded_files = load_env(root_dir or project_root(), override=force)
     status.loaded_files = loaded_files
 
     # 2. Inject FFmpeg directory if specified
@@ -341,6 +344,49 @@ def get_toolchain_status() -> ToolchainStatus:
     if _GLOBAL_TOOLCHAIN is None:
         return init_toolchain()
     return _GLOBAL_TOOLCHAIN
+
+
+# ---------------------------------------------------------------------------
+# Tool binary registry (control plane: eliminate tool-resolve loss, §2.3)
+# ---------------------------------------------------------------------------
+# Every external tool binary is resolved ONCE here (no ad-hoc `shutil.which`
+# at call sites). `init_toolchain()` fills the absolute paths into
+# ToolchainStatus; `resolve_tool()` is the ONLY sanctioned way to locate a
+# binary. A tool found at one pipeline stage is therefore never "lost" at a
+# later stage — no per-call PATH search, no dependence on the current working
+# directory. Adding a tool: register its `ToolchainStatus` attribute here.
+_TOOL_REGISTRY: dict[str, str] = {
+    "ffmpeg": "ffmpeg_path",
+    "ffprobe": "ffprobe_path",
+}
+
+
+def resolve_tool(name: str) -> str:
+    """Return the absolute path of an external tool binary, resolved once.
+
+    Prefers the persisted absolute path from the toolchain config
+    (``init_toolchain`` / ``get_toolchain_status``, which lazy-initializes so a
+    direct library call that bypasses the CLI's ``main()`` self-heals), then
+    falls back to ``shutil.which(name)``, then the bare name (subprocess
+    searches PATH at exec time). Never raises — matching the historical
+    resilience of the old resolver.
+    """
+    status = get_toolchain_status()
+    attr = _TOOL_REGISTRY.get(name)
+    if attr:
+        val = getattr(status, attr)
+        if val:
+            return val
+    return shutil.which(name) or name
+
+
+def tool_available(name: str) -> bool:
+    """True when ``name`` resolves to a real binary (not the bare fallback).
+
+    Used by the capability gates (``capabilities.py`` / Phase 0) to decide
+    hard-stop (exit 8 / missing-dep) instead of silent degradation.
+    """
+    return resolve_tool(name) != name
 
 
 # ---------------------------------------------------------------------------
