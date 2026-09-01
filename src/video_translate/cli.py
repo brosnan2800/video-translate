@@ -656,6 +656,7 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
             )
             if recovered is not segs:
                 save_json(segs_path, recovered, indent=0)
+        _record_transcribe_stage(segs_path, video=input_path)
         return EXIT_OK
     except Exception as e:  # noqa: BLE001
         msg = str(e).lower()
@@ -700,6 +701,7 @@ def cmd_translate(args: argparse.Namespace) -> int:
         outdir = str(Path(out).parent)
         print(_AGENT_TRANSLATE_INSTRUCTIONS.format(
             task=task_path, segments=segments, out=out, outdir=outdir, base=base))
+        _print_pipeline_next(outdir, base)
         return EXIT_AWAITING_AGENT
 
     # google engine (headless fallback) — the ONLY path that needs a proxy
@@ -796,6 +798,77 @@ def _enforce_generate_gate(
         pass
 
 
+def _record_transcribe_stage(segs_path: str, video: str | None = None) -> None:
+    """Transcription 完成落盘（control plane 静默点 1/3）：state 链位置 + 段指纹。
+
+    ``transcribe.segments_sha`` is the anchor the generate stale-translation
+    gate compares against. Best-effort: a state failure never blocks the
+    pipeline (gates only depend on the artifact files themselves).
+    """
+    try:
+        from . import state as vt_state
+        outdir = os.path.dirname(os.path.abspath(segs_path)) or "."
+        base = _derive_base(segs_path)
+        st = vt_state.ensure_state(outdir, base, video=video)
+        vt_state.set_stage(st, "translate")
+        vt_state.record_stage(st, "transcribe", status="ok",
+                              segments_sha=vt_state.segment_sha(segs_path),
+                              n_segments=len(load_json(segs_path)))
+        vt_state.save(outdir, base, st)
+    except Exception:  # noqa: BLE001 - state is an enhancement, never a gate
+        pass
+
+
+def _record_run_decisions(args: argparse.Namespace, segments_path: str) -> None:
+    """Record run-level decisions with origin grading (裁决一 / 静默点 1).
+
+    Explicit flags become ``origin="explicit"``; defaults stay visible as
+    ``origin="default"`` instead of being transient doctor prints.
+    """
+    try:
+        from . import state as vt_state
+        outdir = os.path.dirname(os.path.abspath(segments_path)) or "."
+        base = _derive_base(segments_path)
+        st = vt_state.ensure_state(outdir, base)
+
+        def dec(key: str, value: object, default: object) -> None:
+            vt_state.record_decision(
+                st, key, value,
+                origin="explicit" if value != default else "default")
+
+        dec("engine", getattr(args, "engine", None), None)
+        dec("style", getattr(args, "style", None), None)
+        dec("align", getattr(args, "align", None), None)
+        dec("separate_vocals", bool(getattr(args, "separate_vocals", False)), False)
+        dec("vad", bool(getattr(args, "vad", False)), False)
+        dec("adaptive_vad", bool(getattr(args, "adaptive_vad", False)), False)
+        vt_state.save(outdir, base, st)
+    except Exception:  # noqa: BLE001 - state is an enhancement, never a gate
+        pass
+
+
+def _record_generate_stage(segments_path: str, outdir: str,
+                           base: str, style: object = None) -> None:
+    """Generate 完成落盘：generate ok + translate 指纹锚（generate 所校验的段）。"""
+    try:
+        from . import state as vt_state
+        st = vt_state.ensure_state(outdir, base)
+        vt_state.set_stage(st, "verify")
+        vt_state.record_stage(st, "generate", status="ok", style=style)
+        vt_state.record_stage(st, "translate", status="ok",
+                              segments_sha=vt_state.segment_sha(segments_path))
+        vt_state.save(outdir, base, st)
+    except Exception:  # noqa: BLE001 - state is an enhancement, never a gate
+        pass
+
+
+def _print_pipeline_next(outdir: str, base: str,
+                         video: str | None = None) -> None:
+    """Append the NEXT block at every collaboration stop (run/generate tails)."""
+    from .pipeline import build_ctx, render_next, resolve_position
+    print(render_next(resolve_position(build_ctx(outdir, base, video=video))))
+
+
 def cmd_generate(args: argparse.Namespace) -> int:
     base = args.base or _derive_base(args.segments)
     gap = getattr(args, "gap", 0.0) or 0.0
@@ -825,6 +898,9 @@ def cmd_generate(args: argparse.Namespace) -> int:
         generate_subtitles(args.segments, args.zh, args.outdir, base=base,
                            gap=gap, min_dur=min_dur, offset=offset, tail=tail,
                            flat=flat, prune_old=prune_old, style=args.style)
+        _record_generate_stage(args.segments, str(outdir), base,
+                               style=getattr(args, "style", None))
+        _print_pipeline_next(str(outdir), base)
         return EXIT_OK
     except Exception as e:  # noqa: BLE001
         print(f"[error] generate failed: {e}", file=sys.stderr)
@@ -881,6 +957,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         ))
         if rc != EXIT_OK:
             return rc
+    _record_run_decisions(args, segments)
 
     if cfg.engine == "agent" and "translate" not in skip:
         from .translate import prepare_translate_task
@@ -902,12 +979,14 @@ def cmd_run(args: argparse.Namespace) -> int:
                     task=t, segments=segments,
                     zh=os.path.join(outdir, f"{base}.{_style_of(t)}.zh_segments.json"),
                     outdir=outdir, base=base))
+            _print_pipeline_next(outdir, base, video=input_path)
             return EXIT_AWAITING_AGENT
         prepare_translate_task(segments, task, persona=persona_override,
                                 glossary=glossary_text, source=cfg.source,
                                 full_transcript=cfg.full_transcript, style=cfg.style)
         print(_RUN_AWAITING_AGENT_INSTRUCTIONS.format(
             task=task, segments=segments, zh=zh, outdir=outdir, base=base))
+        _print_pipeline_next(outdir, base, video=input_path)
         return EXIT_AWAITING_AGENT
 
     if "translate" not in skip:
@@ -1212,6 +1291,43 @@ def _verify_state_hook(segments_path: str, status: str) -> None:
         vt_state.save(outdir, base, st)
     except Exception:  # noqa: BLE001 - state is an enhancement, never a gate
         pass
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    """Show where the pipeline stands and the single next action (S2).
+
+    Reads the per-base state file when present and falls back to on-disk
+    artifacts for legacy directories. ``--json`` emits a machine-parseable
+    position blob (agents read this instead of prose).
+    """
+    from .pipeline import build_ctx, discover_bases, render_next, resolve_position
+    outdir = args.outdir
+    bases = [args.base] if args.base else discover_bases(outdir)
+    if not bases:
+        if args.json:
+            print(render_next({
+                "base": None, "outdir": outdir, "current_stage": "preflight",
+                "done": False, "pending_agent": False, "verify_status": None,
+                "artifacts": {}, "next_action": {
+                    "stage": "preflight",
+                    "title": "环境自检 (doctor)",
+                    "cli": "uv run video-translate doctor",
+                    "stop_point": False, "why": "no pipeline artifacts yet",
+                    "pending_agent": False, "blocked_by": []},
+            }, as_json=True))
+        else:
+            print(f"[status] no pipeline artifacts under {outdir} — start "
+                  "with `uv run video-translate run <video>` (doctor first "
+                  "per AGENTS.md).")
+        return EXIT_OK
+    if args.base is None and len(bases) > 1:
+        print(f"[status] multiple bases found ({', '.join(bases[:5])}…); "
+              f"showing the most recent: {bases[0]} (pass --base to pick)",
+              file=sys.stderr)
+    ctx = build_ctx(outdir, bases[0], video=getattr(args, "video", None))
+    pos = resolve_position(ctx)
+    print(render_next(pos, as_json=args.json))
+    return EXIT_OK
 
 
 def _reread_all_ok(result_path: str) -> bool:
@@ -1685,6 +1801,19 @@ def build_parser() -> argparse.ArgumentParser:
                    help="optional video path: also compute an audio profile and a "
                         "VAD routing recommendation (ADR-012)")
     d.set_defaults(func=cmd_doctor)
+
+    s = sub.add_parser("status", help="Show pipeline position and the next "
+                                        "action (control plane state machine)")
+    s.add_argument("--base", default=None,
+                   help="pipeline base name (default: auto-discover the most "
+                        "recent <base>.segments_en.json under --outdir)")
+    s.add_argument("--outdir", default="videos",
+                   help="artifact directory (default: videos)")
+    s.add_argument("--video", default=None,
+                   help="source video path, when known")
+    s.add_argument("--json", action="store_true",
+                   help="machine-parseable position JSON (agents)")
+    s.set_defaults(func=cmd_status)
 
     v = sub.add_parser("verify", help="Self-check gate: acoustic/content/presentation lanes (Spec 18)")
     v.add_argument("--segments", required=True, help="path to segments_en.json")
