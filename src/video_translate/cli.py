@@ -35,6 +35,7 @@ from .verify import (
 )
 from .translate import validate_zh
 from .verify_align import report as align_report
+from .capabilities import GateFail
 
 EXIT_OK = 0
 EXIT_RUNTIME = 1
@@ -44,6 +45,7 @@ EXIT_PROXY = 4
 EXIT_KILLED = 5
 EXIT_AWAITING_AGENT = 6
 EXIT_DOCTOR_FAIL = 7
+EXIT_GATE_FAIL = 8  # control plane: an explicit decision could not be honored
 
 
 # --------------------------- helpers ---------------------------
@@ -1466,7 +1468,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     init_toolchain()
     parser = build_parser()
     args = parser.parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except GateFail as e:
+        # Control plane (§1.1 裁决一): an explicit request could not be
+        # honored. Print the deterministic repair guidance and hard-stop —
+        # never silently degrade an explicit intent.
+        print(f"[gate-fail] {e.message}", file=sys.stderr)
+        if e.guidance:
+            print(f"  Fix: {e.guidance}", file=sys.stderr)
+        return EXIT_GATE_FAIL
 
 
 if __name__ == "__main__":
