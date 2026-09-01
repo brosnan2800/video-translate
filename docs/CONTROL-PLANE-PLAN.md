@@ -285,7 +285,7 @@ EXIT_GATE_FAIL = 8   # 闸门拦截：显式能力缺失 / 覆盖不足 / 段数
 - [x] 意图闸（explicit 缺能力 → exit 8）+ `state.py` + generate 前置闸完工，契约测试绿 + 基线零回归（cp Steps 1–5）
 - [x] `pipeline_def` / `pipeline.py`（<400 行）/ `status` 子命令 / NEXT 块（`--json` 可解析）完工（cp Steps 7–8）
 - [x] verify 收口（strict 默认 / 缺参拒跑 / 画像失败即红）+ semantic 消费闭环 + AGENTS.md 双职责分离（§1.4）+ Makefile 移除（cp Steps 6/9）
-- [ ] 全量 `uv run pytest` 绿；`uv run video-translate doctor` 全绿（cp Step 10 终验）
+- [x] 全量 `uv run pytest` 绿（416 passed / 12 skipped，基线 333 零回归）；`uv run video-translate doctor` 全绿（cp Step 10 终验，2026-09-01）
 
 ---
 
