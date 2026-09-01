@@ -11,17 +11,17 @@
 ```
 新 clone 项目
    │
-   ├─ make setup            ← ① uv sync（依赖，uv.lock 固化）+ ② 预拉 Whisper 模型到 <repo>/models/
+   ├─ uv run video-translate setup            ← ① uv sync（依赖，uv.lock 固化）+ ② 预拉 Whisper 模型到 <repo>/models/
    │
-   ├─ make doctor           ← 全绿校验：ffmpeg / CUDA·CPU / 模型缓存
+   ├─ uv run video-translate doctor           ← 全绿校验：ffmpeg / CUDA·CPU / 模型缓存
    │     ├─ ffmpeg [MISS]  → video-translate setup --ffmpeg   （E2 自动下载便携版，非全盘搜）
-   │     ├─ 模型  [MISS]   → make setup / video-translate setup（E3 完整性校验 + 残缺自愈）
+   │     ├─ 模型  [MISS]   → uv run video-translate setup / video-translate setup（E3 完整性校验 + 残缺自愈）
    │     └─ CUDA 来源标注   → venv-torch / env / none           （E4 自动探测 venv torch/lib）
    │
    └─ video-translate run <视频>   ← 转写（本地，不触网）→ 等待 Agent 翻译 → 生成字幕
 ```
 
-**关键原则**：环境必须一步到位、禁止自由发挥配环境（见 `AGENTS.md` Phase 0）。所有就绪动作统一走 `make setup` / `setup --ffmpeg`，**不散落缓存、不全盘搜、不手动改路径**。
+**关键原则**：环境必须一步到位、禁止自由发挥配环境（见 `AGENTS.md` Phase 0）。所有就绪动作统一走 `uv run video-translate setup` / `setup --ffmpeg`，**不散落缓存、不全盘搜、不手动改路径**。
 
 ---
 
@@ -29,13 +29,13 @@
 
 ### 1.1 任务定义（来自 MAJOR_VERSION_PLAN E1）
 - **问题**：仓库无 lockfile，换机安装存在版本飘移；「依赖装错环境 / 装成 CPU 版」红线事故无法根治。
-- **验收**：新 clone `make setup` 一次成功；`uv lock --check` 通过；Win/Linux 装出 `+cu124` torch，macOS 装出 CPU torch；全量 pytest 绿。
+- **验收**：新 clone `uv run video-translate setup` 一次成功；`uv lock --check` 通过；Win/Linux 装出 `+cu124` torch，macOS 装出 CPU torch；全量 pytest 绿。
 
 ### 1.2 落地实现
 | 项 | 落点 | 说明 |
 |---|---|---|
 | lockfile | `uv.lock`（仓库根，已提交，不 gitignore） | `uv` 生成；任何 `pyproject` 依赖变更必须同 commit 重跑 `uv lock` |
-| 安装主路径 | `Makefile` 的 `setup` 目标 = `uv sync --extra dev`（缺 dev 时回退 `uv sync`） | 未装 `uv` 时自动回退 `pip install -e .` 并打印安装指引 |
+| 安装主路径 | `uv run video-translate setup`（内部走 `uv sync --extra dev`，缺 dev 时回退 `uv sync`） | 未装 `uv` 时自动回退 `pip install -e .` 并打印安装指引 |
 | 镜像索引 | `pyproject.toml` 的 `[tool.uv.index]`（清华 cu124）+ `[tool.uv.sources]`（按平台选 wheel） | CUDA wheel 只走镜像，绝不裸装（R2） |
 | 文档口径 | `TOOLCHAIN.md` §2.5 + `README.md` Quickstart | 统一为「uv sync 标准、pip 兜底」 |
 
@@ -58,7 +58,7 @@ python -c "import torch; print(torch.__version__)"   # Win/Linux 应含 +cu124
 ## 2. E2 — ffmpeg 自动下载便携版（消灭「全盘搜」）【P0】
 
 ### 2.1 任务定义（来自 MAJOR_VERSION_PLAN E2）
-- **问题**：旧协议「全盘搜 C:/D:/E:/F: 找 ffmpeg.exe」是最不确定的步骤，`make setup` 也不覆盖 ffmpeg。
+- **问题**：旧协议「全盘搜 C:/D:/E:/F: 找 ffmpeg.exe」是最不确定的步骤，`uv run video-translate setup` 也不覆盖 ffmpeg。
 - **验收**：无 ffmpeg PATH 的环境跑 `setup --ffmpeg` 后 `doctor` 全绿；单测覆盖下载 mock / 解压 / `.env.local` 写入 / 幂等。
 
 ### 2.2 落地实现
@@ -96,7 +96,7 @@ video-translate doctor             # 确认 ffmpeg/ffprobe [OK]
 
 ### 3.3 操作
 ```bash
-make setup                              # 预拉模型到 <repo>/models/（断点可重跑，自愈残缺）
+uv run video-translate setup                              # 预拉模型到 <repo>/models/（断点可重跑，自愈残缺）
 video-translate setup                   # 同上
 # 若 run 报「模型加载失败」：
 video-translate setup                   # 自愈重下
@@ -137,7 +137,7 @@ video-translate doctor      # CUDA source: venv-torch
 | R2 | CUDA wheel 只走镜像索引，绝不裸装；索引版本须与 `pyproject` 一致（当前 **cu128** / torch 2.8 线） | `uv sync` / `pip install --index-url …cu128/` |
 | R3 | `uv.lock` 是依赖唯一事实来源，与 `pyproject` 成对变更 | 改依赖必重跑 `uv lock` |
 | R4 | 外部二进制（ffmpeg）不手动装、不进 git，统一 `setup --ffmpeg` 下载到 `tools/`（gitignore） | `video-translate setup --ffmpeg` |
-| R5 | 模型权重不进 git，**项目本地优先（零 C 盘）** 落 `<repo>/models/<name>/`；`HF_HOME` 仅回退覆盖；过完整性校验（E3） | `make setup` 拉模型到 `<repo>/models/` |
+| R5 | 模型权重不进 git，**项目本地优先（零 C 盘）** 落 `<repo>/models/<name>/`；`HF_HOME` 仅回退覆盖；过完整性校验（E3） | `uv run video-translate setup` 拉模型到 `<repo>/models/` |
 | R6 | 新依赖准入清单：跨平台 / 缓存指纹 / 显存预算(8GB) / 等价实现 / lockfile 同步 | 每项写入对应任务 Spec |
 | R7 | 镜像/代理固化在配置，不靠临场决策 | PyPI/PyTorch 进 `[tool.uv.index]`；HF 进 `HF_ENDPOINT` |
 
@@ -172,7 +172,7 @@ video-translate doctor      # CUDA source: venv-torch
 ## 7. 验证清单（CI / 人工）
 
 ```bash
-make setup            # uv sync + 模型预拉，一次成功
+uv run video-translate setup            # uv sync + 模型预拉，一次成功
 uv lock --check       # 0 退出
 video-translate doctor  # ffmpeg [OK] / CUDA source: venv-torch / 模型 [OK] / whisperx OK
 pytest                # 全量绿（E2/E3/E4 均有 mock 单测覆盖，不真联网/不真下 3GB）

@@ -28,8 +28,8 @@
 
 | | 位置 | 安装 | 谁需要 |
 |---|---|---|---|
-| 运行时（生产） | `pyproject` 顶层 `[project.dependencies]` | `make setup` / `uv sync` / `pip install -e .` | 所有用户 |
-| 开发依赖 | `[project.optional-dependencies].dev`（pytest 等） | `make install-dev` / `pip install -e ".[dev]"` | 贡献者/跑测试 |
+| 运行时（生产） | `pyproject` 顶层 `[project.dependencies]` | `uv run video-translate setup` / `uv sync` / `pip install -e .` | 所有用户 |
+| 开发依赖 | `[project.optional-dependencies].dev`（pytest 等） | `uv sync --extra dev` / `pip install -e ".[dev]"` | 贡献者/跑测试 |
 | GPU 对齐（T4） | `[project.optional-dependencies].gpu`（whisperx，仅 Windows/Linux+CUDA） | `uv sync --extra gpu`（macOS 自动排除，零新依赖） | GPU 用户（`--align` 默认 `auto`，装好后自动启用 whisperx） |
 
 **形态维度**：当前「源码即产品」——用户是 Agent + 开发者，同一台机器同一 `.venv`，dev 与 prod 靠下面的目录隔离而非独立部署；传统打包分发（PyInstaller 单 exe，见 `MAJOR_VERSION_PLAN.md` §5）为远期规划，启动前无需强分离。
@@ -38,7 +38,7 @@
 
 ```
 git 跟踪   ：src/ tests/ docs/ pyproject.toml uv.lock   ← 代码与锁定（可 Review）
-gitignore  ：.venv/            ← 环境（可随时删掉重建，make setup 几分钟）
+gitignore  ：.venv/            ← 环境（可随时删掉重建，uv run video-translate setup 几分钟）
              .env*             ← 机器配置（本机私有）
              videos/ outputs/  ← 用户数据（永不被安装/卸载/清理触碰）
              models/ tools/    ← 大资产（模型权重/便携 ffmpeg，可再生）
@@ -49,11 +49,11 @@ gitignore  ：.venv/            ← 环境（可随时删掉重建，make setup 
 ```
 ① 先决条件：Python ≥ 3.10（唯一人工步骤；uv 未装见 https://docs.astral.sh/uv/getting-started/installation/）；
             ffmpeg 待 E2 落地后可 setup --ffmpeg 自动
-② git clone && make setup      # uv sync 依赖（uv.lock 固化，按平台自动选源）+ 模型（项目根 models/，零 C 盘，E3 后带自愈）
+② git clone && uv run video-translate setup      # uv sync 依赖（uv.lock 固化，按平台自动选源）+ 模型（项目根 models/，零 C 盘，E3 后带自愈）
 ③ cp .env.<platform>.example .env.<platform>  # 填本机差异项（E4 后 CUDA 通常免填）
-④ make doctor                  # 全绿才算就绪（实际命令：uv run video-translate doctor）
+④ uv run video-translate doctor                  # 全绿才算就绪（实际命令：uv run video-translate doctor）
 ⑤ Agent 按 AGENTS.md 状态机开工（run → exit 6 → 翻译 → generate → verify）
-故障恢复：删 .venv 重跑 make setup（数据无损）
+故障恢复：删 .venv 重跑 uv run video-translate setup（数据无损）
 ```
 
 ---
@@ -184,10 +184,10 @@ CLI 参数 / 系统运行时 os.environ  >  .env.local (本地私有)  >  .env.<
 - ❌ 不要放进 `[project.optional-dependencies]` 的 extra（如旧 `[audio]`），否则
   默认 `pip install -e .` 不装它。
 - ✅ 直接写在 `dependencies = [...]` 里；`requirements.txt` 同步保留（去掉 OPTIONAL 注释）。
-- 安装只跑一条命令：`make setup`（默认 `uv sync`，uv 不可用时回退 `pip install -e .`），**不依赖任何额外动作**。
+- 安装只跑一条命令：`uv run video-translate setup`（默认 `uv sync`，uv 不可用时回退 `pip install -e .`），**不依赖任何额外动作**。
 
 **规则 2：CUDA wheel 必须走镜像索引，绝不裸装**
-- ✅ **首选 `make setup` / `uv sync`**：认 `pyproject` 的 `[[tool.uv.sources]]`，按平台 marker 自动
+- ✅ **首选 `uv run video-translate setup` / `uv sync`**：认 `pyproject` 的 `[[tool.uv.sources]]`，按平台 marker 自动
   选 wheel（Windows/Linux→官方 `cu128`，macOS→官方 `cpu`）。
 - ✅ **用 pip 兜底时**必须显式指定索引（pip 不读 `[tool.uv.*]`，版本须与 `pyproject` 一致）：
   ```powershell
@@ -294,7 +294,7 @@ uv run video-translate verify --segments videos/example.segments_en.json --zh vi
 ### 6.1 总原则
 1. **一切可再生的重量级产物（模型权重、下载的工具链、第三方缓存）都落在仓库目录内**，
    通过 `.gitignore` 排除，可随项目拷贝、不污染系统、不依赖某台机器的用户目录。
-2. **落点统一约定**（空环境首次 `make setup` 后的最终状态，Windows）：
+2. **落点统一约定**（空环境首次 `uv run video-translate setup` 后的最终状态，Windows）：
 
    | 组件 | 落点 | 说明 |
    |---|---|---|
@@ -309,7 +309,7 @@ uv run video-translate verify --segments videos/example.segments_en.json --zh vi
    才允许回退到系统用户目录；但**默认配置与 `setup` 流程必须把它们引回项目内**。
 
 ### 6.2 新增工具/依赖的标准套路
-- **Python 依赖**：写进 `pyproject` 顶层 `dependencies`（见 §2.5），`make setup` 一条命令装齐，
+- **Python 依赖**：写进 `pyproject` 顶层 `dependencies`（见 §2.5），`uv run video-translate setup` 一条命令装齐，
   随 venv 落在 `<repo>/.venv/`，不进系统 Python（避免 demucs 飘到系统 Python 的历史问题）。
 - **需下载的模型/权重**：
   - 优先支持「项目根 `models/<name>/` 本地 drop-in」+「`setup` 下载到项目内」双路径（参照
@@ -340,7 +340,7 @@ uv run video-translate doctor
 
 > 本节是**本机历史实况快照**，仅供排障参考。E2/E4 落地后，PATH 注入由
 > `init_toolchain` 在程序启动时**自动完成，无需手动执行**。新机器不要照抄本节
-> 路径，统一走 `make setup` + `uv run video-translate setup --ffmpeg`（见
+> 路径，统一走 `uv run video-translate setup` + `uv run video-translate setup --ffmpeg`（见
 > [docs/TOOLING.md](docs/TOOLING.md)）。
 
 ### A.1 FFmpeg / FFprobe
@@ -369,7 +369,7 @@ CUDA 12.x）会命中 GPU。**E4 后 CUDA 库目录解析顺序（自动，无�
 
 **曾经栽过的坑**（历史）：E4 之前借外部项目 `torch\lib` 目录，PATH 漏加会报
 `Could not load library cublas64_12.dll`。E4 已根治——CUDA 运行时随 venv 内
-torch wheel 一起安装，`make setup` 后即就位。
+torch wheel 一起安装，`uv run video-translate setup` 后即就位。
 
 验证 GPU 可用：
 

@@ -3,13 +3,17 @@
 You are an AI agent asked to turn a video into bilingual (zh/en) subtitles using
 this project. Follow this protocol. It is tool-agnostic (WorkBuddy, Claude Code,
 Cursor, Cline, plain shell). **Do not reinvent the pipeline** — the rules below
-encode resume-safety, proxy correctness, the agent-as-engine translation step,
-and three-lane output verification.
+encode resume-safety, proxy correctness, the control-plane state machine (flow
+progression lives in code, [ADR-030](docs/adr/030-control-plane.md)), the
+agent-as-engine translation step, and strict three-lane verification. Your role
+is **Agent-as-Translator** (翻译 + 语义回读)，流程推进与闸门由代码状态机负责。
 
 Read order: this file → [`TOOLCHAIN.md`](TOOLCHAIN.md) for environment setup →
 [`docs/TOOLING.md`](docs/TOOLING.md) for tool/dependency management (E1–E4) →
 [`docs/specs/00-overview.md`](docs/specs/00-overview.md) for behavior →
-[`docs/adr/`](docs/adr) for architectural rationale.
+[`docs/adr/030-control-plane.md`](docs/adr/030-control-plane.md) for the state
+machine (exit codes / `status` / NEXT blocks) → [`docs/adr/`](docs/adr) for the
+full architectural rationale.
 
 ---
 
@@ -64,9 +68,17 @@ Read order: this file → [`TOOLCHAIN.md`](TOOLCHAIN.md) for environment setup �
 
 ---
 
-## 3. 标准执行状态机 (Standard Execution Flow)
+## 3. 标准执行状态机 (Control-Plane Client Interface)
 
-### Phase 0: 探测与确认 (Preflight)
+> **流程推进收归代码状态机**（[ADR-030](docs/adr/030-control-plane.md)）：阶段顺序、
+> 闸门、修复指引全部由代码执行与输出。Agent 的职责 = **翻译（Phase 2）+ 语义回读**，
+> 其余只做「按状态机的指示跑命令」。不知道该干什么时，问状态机，不要凭记忆编排：
+> ```bash
+> uv run video-translate status            # 你在哪 / 缺什么 / 下一步（人读）
+> uv run video-translate status --json     # 机器可解析（agent 读这个）
+> ```
+
+### Phase 0: 环境就绪 (Preflight — 一次性协议)
 
 > **环境必须一步到位，禁止自由发挥配环境。** 绝不允许 Agent 自行把 FFmpeg / 模型 / 工具链散落缓存到各处。所有环境就绪动作统一走确定入口（命令一律 `uv run`，恒定位项目 `.venv`，[Spec 23](docs/specs/23-environment-location.md)）：
 > ```bash
@@ -74,43 +86,28 @@ Read order: this file → [`TOOLCHAIN.md`](TOOLCHAIN.md) for environment setup �
 > uv run video-translate setup    # 一键装齐：uv sync 依赖 + 预拉 large-v3 模型（约 3GB）
 > uv run video-translate doctor   # 校验：命令入口 entry / FFmpeg / CUDA·CPU / 模型缓存 全绿才继续
 > ```
-> `uv run video-translate setup` 默认走 `uv sync`（`uv.lock` 固化版本，跨机可复现）；未装 uv 时先按官方 installer 安装（Windows `irm https://astral.sh/uv/install.ps1 | iex`；macOS/Linux `curl -LsSf https://astral.sh/uv/install.sh | sh`），见 [TOOLCHAIN.md](TOOLCHAIN.md) §1.3。若因网络/代理失败，参考 [`TOOLCHAIN.md`](TOOLCHAIN.md) 配置代理与镜像，再重跑，**不要**手动到处下载或改路径。
+> 未装 uv 时先按官方 installer 安装（Windows `irm https://astral.sh/uv/install.ps1 | iex`；macOS/Linux `curl -LsSf https://astral.sh/uv/install.sh | sh`），见 [TOOLCHAIN.md](TOOLCHAIN.md) §1.3。模型 `[MISS]` → 重跑 `setup` 预拉；FFmpeg / ffprobe `[MISS]` → `uv run video-translate setup --ffmpeg` 自动下载便携版。**不要**手动到处下载、改 `.env` 假设模型配置、或全盘搜（E2 已消灭「全盘搜」）。
 
 1. **定位视频**：优先查找 `videos/` 目录；若为空或多文件，与用户确认目标视频。
-2. **环境自检（先 `uv run video-translate setup` 再 `uv run video-translate doctor`）**：
-   ```bash
-   uv run video-translate doctor
-   ```
-   检查命令入口（`entry: uv-run` / `venv` 才正确）、FFmpeg、CUDA / CPU 设备、模型缓存是否就绪。模型显示 `[MISS]` 时先跑 `uv run video-translate setup` 预拉，**不要**去改 `.env` 假设那是模型配置。若 FFmpeg / ffprobe 显示 `[MISS]`，运行 `uv run video-translate setup --ffmpeg` 自动下载便携版，**不要**全盘搜或手动安装（E2 已消灭「全盘搜」这一步）。
-3. **音频画像、VAD 与人声分离确认**：
-   ```bash
-   uv run video-translate doctor --video "videos/<video.mp4>"
-   ```
-   - 检查推荐的 VAD 模式（裸跑 / `--vad` / `--adaptive-vad`）。
-   - 若提示 `vocal separation: RECOMMENDED (--separate-vocals)` 或已知视频含强 BGM/多杂音，在 Phase 1 运行时追加 `--separate-vocals`。
+2. **跑 `doctor`（含 `--video`）看环境与音频画像**：doctor 给出的 VAD / 人声分离建议
+   **不再由 agent 重演决策**——`run` 时显式传参（以 origin=explicit 落盘）或直接用默认
+   （自动路由，落盘 origin=default）。全部决策与默认值记录在 `<base>.vt_state.json` 的
+   `decisions` 字段，随时可查；显式选择缺能力时意图闸会硬停（exit 8），见 §3.5。
 
 ---
 
-### Phase 1: 转写与出题 (Transcribe & Emit Task)
-执行转写流水线（默认使用 Agent 引擎）：
+### Phase 1: 转写（状态机推进）
 ```bash
-# 标准运行
+# 标准运行（doctor 建议自动路由；显式 flag = origin explicit 落盘）
 uv run video-translate run "videos/<video.mp4>"
 
-# 强 BGM / 伴奏 / 噪音场景（经 doctor 推荐或人工判断）
+# 强 BGM / 伴奏 / 噪音场景（doctor 推荐 RECOMMENDED 时）
 uv run video-translate run "videos/<video.mp4>" --separate-vocals
 ```
-- 转写采用分块可续跑设计（`chunk_N.json` 自动断点恢复）。
-- **强制声学对齐（T4，默认 `auto`）**：CUDA + whisperx 可用时自动跑 WhisperX 词级时间戳精修
-  （独立缓存层，不重转写；Mac/未装静默降级 `none`）。显式 `--align none` 关闭，`--align whisperx`
-  强制（不可用则告警回退）。**对齐后段边界会被收紧、merge 可能改变段数 → Phase 2 必须重译**。
-- 转写 + 断句合并 + 漏音补洞完成后，生成 `<base>.translate_task.json`（默认 `film` 风格）。
-- **翻译风格（T3 / ADR-027）**：用 `--style {film,literal,bilingual_study}` 选择翻译人设
-  与守则。`film`（默认，影视二创口语感）/`literal`（忠实直译，学术/技术/法律保真优先）/
-  `bilingual_study`（双语精读，生僻词括号注记）。多风格 `--style film,literal` 一次生成
-  多份任务文件（`<base>.film.translate_task.json` 等）。显式 `--persona`/`VT_PERSONA`
-  覆盖风格预设人设。
-- **程序主动返回 Exit Code 6 (`[AWAITING_AGENT]`) 挂起，等待 Agent 翻译。**
+- 分块可续跑设计（`chunk_N.json` 自动断点恢复）；**显式 `--separate-vocals` 但 demucs 未装 = exit 8 硬停**（不再静默回退原音频），按指引 `uv sync` 后重跑。
+- **强制声学对齐（T4，默认 `auto`）**：CUDA + whisperx 可用即走 WhisperX 词级时间戳精修（独立缓存层，不重转写）；Mac/未装自动降级 `none`（降级原因落盘 `decisions.align.resolved`）。**显式 `--align whisperx` 而包不可用 = exit 8**；`--align none` 仍是历史字节级路径（golden 保护）。**对齐后段数可能变（实测 40→42）→ 转写完成后必须重译**（generate 闸门会拦陈旧翻译）。
+- 转写 + 断句合并 + 漏音补洞完成后：生成 `<base>.translate_task.json`，状态链推进至 `translate` 停点，尾部打印 **[NEXT] 块**（`--json` 机器可解析），返回 **Exit Code 6 (`[AWAITING_AGENT]`)** —— 这是正常停点，不是错误，勿重试。
+- **翻译风格（T3 / ADR-027）**：`--style {film,literal,bilingual_study}` 选择翻译人设与守则（默认 `film` 影视二创口语感；`literal` 忠实直译；`bilingual_study` 双语精读）。多风格 `--style film,literal` 一次生成多份任务文件（`<base>.film.translate_task.json` 等）。显式 `--persona`/`VT_PERSONA` 覆盖风格预设人设。
 
 ---
 
@@ -129,7 +126,7 @@ uv run video-translate run "videos/<video.mp4>" --separate-vocals
 
 ---
 
-### Phase 3: 字幕生成 (Generate)
+### Phase 3: 字幕生成（enforce 闸门内置）
 ```bash
 uv run video-translate generate \
     --segments "videos/<base>.segments_en.json" \
@@ -141,26 +138,78 @@ uv run video-translate generate \
     --zh "videos/<base>.literal.zh_segments.json" \
     --outdir "videos" --base "<base>" --style literal
 ```
-- 自动运行 `verify_align` 索引对齐检查（防错行）。
-- 输出 4 个核心产物（`.bilingual.srt`、`.zh.srt`、`.en.srt`、`.txt`）。
-- 落地于独立的 `<base>/` 子目录，并自动处理 `_vN` 版本递增以规避剪映导入缓存。
-- `--style <name>` 会让输出文件名带 `.{style}` 后缀（如 `<base>.literal.bilingual.srt`）；
-  省略则保持默认 `<base>.bilingual.srt`（向后兼容）。
+- **前置闸门（exit 8 硬停）**：zh 覆盖率 < 100%、en/zh 段数不匹配、`verify_align` 索引漂移、
+  状态链 `segments_sha` 陈旧（对齐后忘重译）→ 一律**拒绝生成**并给出修复指引。这是 40→42 段
+  错行事故的机器防线，不要绕过；确需降级才显式传逃生门 `--allow-degrade`。
+- 输出 4 个核心产物（`.bilingual.srt`、`.zh.srt`、`.en.srt`、`.txt`）；落地于独立的 `<base>/`
+  子目录，自动 `_vN` 版本递增以规避剪映导入缓存；`--style <name>` 让输出文件名带
+  `.{style}` 后缀。成功后尾部同样打印 [NEXT] 块（下一步 = verify）。
 
 ---
 
-### Phase 4: 门禁自检与交付 (Verify & Deliver)
-运行三 Lane 统一门禁检查（[Spec 18](docs/specs/18-verify.md)）：
+### Phase 4: 门禁自检与交付 (Verify — strict 默认)
 ```bash
 uv run video-translate verify \
     --segments "videos/<base>.segments_en.json" \
     --zh "videos/<base>.zh_segments.json" \
     --video "videos/<video.mp4>"
 ```
-1. **声学 Lane**：对照 `silencedetect` 检查静音重叠与漏检 (`uncovered-audio`)。
-2. **内容 Lane**：检查行数覆盖、索引漂移、未翻译英文残留，并生成 `<base>.semantic_reread_task.json` 供 Agent 结合邻居语境快速回读标记。
+- `--zh` / `--video` **必填**（缺失 = exit 2 拒跑）：verify 必须跑全 lane，局部自检不允许冒充通过。
+- **strict 默认**：任一 lane 红灯 = **exit 8**；报告模式才用 `--no-strict` 显式逃生。
+1. **声学 Lane**：对照 `silencedetect` 检查静音重叠与漏检 (`uncovered-audio`)；**画像失败 / 探测异常 = 红灯**（不再 skip 或吞异常）。
+2. **内容 Lane**：行数覆盖、索引漂移、未翻译英文残留，并生成 `<base>.semantic_reread_task.json` 供 Agent 结合邻居语境快速回读标记。
 3. **表现 Lane**：检查显示窗口参数完整性。
-4. **交付**：向用户汇报最终字幕路径，剪映导入主文件为 `<base>.bilingual.srt`。
+4. **语义回读闭环**：verify 会消费 `<base>.semantic_reread_result.json`——存在且含非 ok 判定 = 红灯；**缺失则重挂 task 并置状态 `pending_agent`**（已产出的 SRT 不撤回，但状态链不显示「完成」）。
+5. **交付**：全绿后向用户汇报最终字幕路径，剪映导入主文件为 `<base>.bilingual.srt`。
+
+---
+
+### 3.5 状态机速查 (Control-Plane Cheat Sheet)
+
+**退出码（0–8）**：
+
+| 码 | 常量 | 含义 | Agent 该做什么 |
+|---|---|---|---|
+| 0 | `EXIT_OK` | 成功 | 按 [NEXT] 块走下一步 |
+| 1 | `EXIT_RUNTIME` | 运行时错误 | 读 stderr；用 `status` 查进度；**勿删缓存** |
+| 2 | `EXIT_ARGS` | 参数错误（如 verify 缺 `--zh`/`--video`） | 补齐参数重跑 |
+| 3 | `EXIT_MISSING_DEP` | 依赖缺失（模型残缺等） | 跟指引 `uv run video-translate setup` |
+| 4 | `EXIT_PROXY` | 代理不可用 | 查代理配置（[TOOLCHAIN.md](TOOLCHAIN.md)） |
+| 5 | `EXIT_KILLED` | 进程被杀（OOM/手动终止） | 断点缓存仍在，直接重跑 |
+| 6 | `EXIT_AWAITING_AGENT` | **停点 A**：转写完成，等翻译 | 进 Phase 2 翻译；**正常停点，勿重试 run** |
+| 7 | `EXIT_DOCTOR_FAIL` | doctor 自检不过 | 按 doctor 输出修环境 |
+| 8 | `EXIT_GATE_FAIL` | **闸门拦截**（意图闸 / generate 前置 / verify strict） | 读修复指引；确需降级才显式传逃生门 |
+
+**`status --json` 示例**（字段稳定，机器可解析）：
+
+```json
+{
+  "base": "demo",
+  "current_stage": "translate",
+  "done": false,
+  "pending_agent": true,
+  "next_action": {
+    "stage": "translate",
+    "stop_point": true,
+    "cli": "(agent) 翻译 <base>.translate_task.json -> <base>.zh_segments.json (100% 覆盖全部 index)",
+    "blocked_by": []
+  },
+  "artifacts": { "segments": "videos/demo.segments_en.json", "zh": null, "srt": null },
+  "verify_status": null
+}
+```
+
+**[NEXT] 块**：`run` / `generate` 尾部输出 `[NEXT] stage=<id>` + `do: <命令>`，是状态机给出的
+**唯一下一步**；`[NEXT] stage=translate (STOP POINT — awaiting agent)` 即停点 A。
+
+**`pending_agent` 处理**：语义回读未完成。Agent 读 `<base>.semantic_reread_task.json`，逐对
+(en, zh) 标记 `ok / omit / add / wrong / untranslated`，写入
+`<base>.semantic_reread_result.json`（`{"<index>": "<verdict>: <reason>", ...}`），再跑
+`verify` 即消费并解除 pending。**不回写 SRT、不改时间戳。**
+
+**`<base>.vt_state.json`**：状态链落盘（`decisions` 决策含 origin、`stages` 各阶段 status +
+segments_sha 指纹、capabilities 快照）。**只读参考，禁止手改**；损坏会被自动从产物文件重建，
+删除亦无害——闸门只依赖产物文件本身（segments/zh），不依赖 state（防绕过原则）。
 
 ---
 
@@ -197,4 +246,5 @@ uv run video-translate resegment --segments "<base>.segments_en.json" --video "<
 
 - **断点续跑原则**：严禁在排查问题时删除 `chunk_*.json` 或 `segments_raw.json`。若只需重跑翻译与生成，使用 `run --skip transcribe`。
 - **环境隔离详情**：参见 [`TOOLCHAIN.md`](TOOLCHAIN.md)。
+- **控制平面详情**：状态机 / 闸门 / 退出码参见 [ADR-030](docs/adr/030-control-plane.md) 与 [`docs/CONTROL-PLANE-PLAN.md`](docs/CONTROL-PLANE-PLAN.md)；`Makefile` 入口已移除（与红线 R7 一致：一切命令 `uv run` 前缀，编排不设第二软约束）。
 - **历史演进与技术案例**：参见 [`docs/HISTORY.md`](docs/HISTORY.md) 与 [`docs/POSTMORTEM-JamieFoxx.md`](docs/POSTMORTEM-JamieFoxx.md)。
