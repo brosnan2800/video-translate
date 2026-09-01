@@ -920,6 +920,10 @@ def cmd_run(args: argparse.Namespace) -> int:
     input_path = args.input
     outdir = args.outdir or _default_outdir(input_path)
     base = args.base or _default_base(input_path)
+    # ADR-031 D8: a fresh `run` resets the verify retry counter (local re-runs
+    # like resegment/generate must NOT reset — only a full pipeline run counts).
+    from .state import reset_verify_attempts
+    reset_verify_attempts(outdir, base)
     segments = os.path.join(outdir, f"{base}.segments_en.json")
     zh = os.path.join(outdir, f"{base}.zh_segments.json")
     pending = os.path.join(outdir, f"{base}.agent_pending.json")
@@ -1315,7 +1319,12 @@ def _verify_state_hook(segments_path: str, status: str) -> None:
         base = _derive_base(segments_path)
         st = vt_state.ensure_state(outdir, base)
         vt_state.set_stage(st, "verify")
+        # ADR-031 D8: record_stage overwrites the verify entry — preserve the
+        # attempts counter that increment_verify_attempts set earlier.
+        prev_attempts = st.get("stages", {}).get("verify", {}).get("attempts")
         vt_state.record_stage(st, "verify", status=status)
+        if prev_attempts is not None:
+            st.setdefault("stages", {}).setdefault("verify", {})["attempts"] = prev_attempts
         vt_state.save(outdir, base, st)
     except Exception:  # noqa: BLE001 - state is an enhancement, never a gate
         pass
@@ -1436,6 +1445,18 @@ def cmd_verify(args: argparse.Namespace) -> int:
               "execute every lane (acoustic/content/presentation); a partial "
               "self-check would read as a pass.", file=sys.stderr)
         return EXIT_ARGS
+
+    # ---- ADR-031 D8: retry counting + circuit-breaker -------------------------
+    from .state import MAX_VERIFY_ATTEMPTS, increment_verify_attempts
+    outdir = os.path.dirname(os.path.abspath(segments_path)) or "."
+    base = _derive_base(segments_path)
+    attempts = increment_verify_attempts(outdir, base)
+    print(f"[verify] attempt {attempts}/{MAX_VERIFY_ATTEMPTS}", flush=True)
+    if attempts > MAX_VERIFY_ATTEMPTS:
+        # circuit-breaker: force report-only mode on the 3rd+ attempt
+        strict = False
+        print("[verify] retry limit reached — switching to report-only mode "
+              "(problems listed below; please review manually).", flush=True)
 
     segments = load_json(segments_path)
 

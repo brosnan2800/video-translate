@@ -1,4 +1,4 @@
-"""ADR-031 D1/D2 — resegment 产出守卫与 origin 标记。
+"""ADR-031 D1/D2/D8 — resegment 产出守卫与 origin 标记 / verify retry counting。
 
 kathy_meta_vlog 事故：resegment 轮 1 解码出 "We'll be right back."
 (no_speech_prob=0.90625) 直接拼接进字幕——fill_gaps 的恢复段守卫
@@ -108,3 +108,40 @@ def test_resegment_guard_overlap_signal(tmp_path, monkeypatch):
     assert cmd_resegment(args) == EXIT_OK
     merged = json.loads(p.read_text(encoding="utf-8"))
     assert len(merged) == 1                     # rider 与 kept [0,1] 重叠 0.2s -> 丢弃
+
+
+# --------------------------- D8: verify retry reset ----------------------
+
+def test_resegment_resets_verify_attempts_on_new_run(tmp_path, monkeypatch):
+    """`resegment` 不应重置 verify.attempts（局部重跑不清零计数）。
+
+    kathy_meta_vlog 教训：3 轮 resegment→generate→verify，第 3 轮仍残 6 窗。
+    若 resegment 重置计数，就是绕开 D8 circuit-breaker —— 必须禁止。
+    """
+    import video_translate.state as vt_state
+    # 模拟前两次 verify 已累积
+    vt_state.increment_verify_attempts(str(tmp_path), "demo")  # 1
+    vt_state.increment_verify_attempts(str(tmp_path), "demo")  # 2
+    assert vt_state.load(str(tmp_path), "demo")["stages"]["verify"]["attempts"] == 2
+
+    # resegment后计数不应归零
+    rc, merged = _run_resegment(
+        tmp_path, monkeypatch,
+        [_seg("Clean.", 2.0, 3.0, nsp=0.1)])
+    st2 = vt_state.load(str(tmp_path), "demo")
+    assert st2["stages"]["verify"]["attempts"] == 2  # 未重置
+
+
+def test_run_command_resets_verify_attempts(tmp_path, monkeypatch):
+    """模拟 run 重置计数器（完整流水线重跑 = 新任务）。"""
+    import video_translate.state as vt_state
+    # 设置计数到 5（模拟多次 verify）
+    for _ in range(5):
+        vt_state.increment_verify_attempts(str(tmp_path), "demo")
+    assert vt_state.load(str(tmp_path), "demo")["stages"]["verify"]["attempts"] == 5
+
+    # 模拟 run 重置
+    vt_state.reset_verify_attempts(str(tmp_path), "demo")
+
+    st3 = vt_state.load(str(tmp_path), "demo")
+    assert st3["stages"]["verify"]["attempts"] == 0

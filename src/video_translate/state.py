@@ -230,13 +230,53 @@ def ensure_state(
         return existing
     prior_video = None
     prior_decisions: dict[str, Any] | None = None
+    prior_verify_attempts: int | None = None   # ADR-031 D8: preserve during rebuild
     if isinstance(existing, dict) and existing:
         prior_video = existing.get("video")
         dec = existing.get("decisions")
         if isinstance(dec, dict) and dec:
             prior_decisions = dec
+        v = existing.get("stages", {}).get("verify", {})
+        if isinstance(v, dict):
+            prior_verify_attempts = v.get("attempts")
     st = rebuild_state(outdir, base, video=video or prior_video)
     if prior_decisions:
         st["decisions"] = prior_decisions
+    if prior_verify_attempts is not None:
+        st.setdefault("stages", {}).setdefault("verify", {})["attempts"] = prior_verify_attempts
     save(outdir, base, st)
     return st
+
+
+# ---------------------------------------------------------------------------
+# ADR-031 D8: verify retry counting (circuit-breaker)
+# ---------------------------------------------------------------------------
+
+MAX_VERIFY_ATTEMPTS = 2  # ADR-031 D8: 2 repair cycles, then circuit-breaker.
+
+
+def increment_verify_attempts(outdir: str | Path, base: str) -> int:
+    """Increment and persist ``stages.verify.attempts``; returns new value.
+
+    Called at the top of ``cmd_verify``. The counter is part of *state*
+    (enhancement only); the real gate still comes from segments+zh files.
+    """
+    st = ensure_state(outdir, base)
+    st.setdefault("stages", {}).setdefault("verify", {})
+    st["stages"]["verify"]["attempts"] = (
+        st["stages"]["verify"].get("attempts", 0) + 1
+    )
+    save(outdir, base, st)
+    return st["stages"]["verify"]["attempts"]
+
+
+def reset_verify_attempts(outdir: str | Path, base: str) -> None:
+    """Reset ``stages.verify.attempts`` to 0 (called by ``run`` / full pipeline).
+
+    Local re-runs (``resegment``, ``generate``) must **not** reset — only a
+    fresh ``run`` counts as a new translation task.
+    """
+    st = ensure_state(outdir, base)
+    st.setdefault("stages", {}).setdefault("verify", {})
+    st["stages"]["verify"]["attempts"] = 0
+    save(outdir, base, st)

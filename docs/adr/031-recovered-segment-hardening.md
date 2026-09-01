@@ -88,7 +88,44 @@ rebuild 前先 `load()`；已有 state 携带 dict 型 `decisions`（及 `video`
 - `tests/test_state_chain.py`（追加）：stale sha rebuild 保留 decisions / 缺失重建
   decisions 为空。
 
-## 后果
+### D8 — verify 重试次数限制 + P0→P1 批准门 (P1/P2)
+
+> **动因**：过去的修复迭代常达到 5-8 次 verify 才清，Agent 陷入「修 fix 的 fix」的
+> 本地局部最优振荡，每次还要从 state 里猜当前是第几次。kathy_meta_vlog 本次
+> ADR-031 修复就经历了 3 轮 resegment→generate→verify，第 3 轮仍残 6 窗不可收。
+
+**策略**：
+- **计数器**：`stages.verify.attempts` in `vt_state.json`，每次 `cmd_verify` 调用 +1。
+- **重置**：`run`（完整流水线）重置为 0；`generate`/`resegment`（局部重跑）**不重置**。
+- **行为**：
+  | 次数 | strict 模式 | exit 码 |
+  |---|---|---|
+  | 1–2 | strict 默认，红灯 exit 8 | 8 |
+  | 3+ | **强制降级报告模式**（打印问题列表，NOT gate 失败） | 0 |
+- 强制降级在**代码层**实现（`cmd_verify` 内部计数+降级），Agent 无法绕过 —— 符合
+  「闸门只依赖产物文件，state 是增强」的原则：计数器是增强，真正的 gate 判
+  据仍来自 segments_en.json / zh_segments.json。
+
+**P0→P1 批准门**：P0（守卫补丁）完成后，Agent 打印变更摘要 + ADR/test 引用，
+停 1 分钟等待人工批准（超时自动继续），才能进入 P1 优化。纯 AGENTS.md 执行约束，
+零代码变更。
+
+## 测试
+
+- `tests/test_resegment_guard.py`：nsp=0.906 丢弃且打印可见 / 干净段保留+origin /
+  0.59-0.61 阈值边界 / alp<−1.0 单独命中 / 短段骑在保留段音频（overlap 信号）。
+- `tests/test_verify_hardening.py`：真实事故几何（39.26-40.16 vs 39.96-43.94）flag +
+  word_collision + prefix hint / 0.03s 模糊边界不 flag / 置信度阈值边界 / 恢复段 pair
+  suspect+hint / BGM/语音/ambiguous/unknown 分级。
+- `tests/test_verify_gate.py`（追加）：low-confidence → exit 8 / adjacent-overlap →
+  exit 8 / vocals 存在时 uncovered 行带 [bgm] 分级 / 无 vocals 跳过 / 回读 task 带 suspect。
+- `tests/test_verify_retry_limit.py`（新增）：attempt 1-2 strict（红灯 exit 8）/ attempt 3+
+  强制报告模式（exit 0）/ 计数器落盘 `stages.verify.attempts`。
+- `tests/test_resegment_guard.py`（追加）：`test_resegment_resets_verify_attempts_on_new_run` /
+  `test_run_command_resets_verify_attempts`：
+  `run` 重置计数器，`generate`/`resegment` 不重置。
+- `tests/test_state_chain.py`（追加）：stale sha rebuild 保留 decisions / 缺失重建
+  decisions 为空。
 
 - resegment 与 fill_gaps 的恢复段质量标准统一为 ADR-021 一道守卫；幻觉拦截从
   「单点」变「全覆盖」，且拦截可见可审计。

@@ -156,6 +156,12 @@ uv run video-translate verify \
 ```
 - `--zh` / `--video` **必填**（缺失 = exit 2 拒跑）：verify 必须跑全 lane，局部自检不允许冒充通过。
 - **strict 默认**：任一 lane 红灯 = **exit 8**；报告模式才用 `--no-strict` 显式逃生。
+- **verify 重试限制（ADR-031 D8）**：同一次翻译任务中，`verify` 第 1–2 次为严格门（红灯
+  **exit 8**）；第 3 次及以后**强制降级报告模式**（打印问题列表、exit 0，不再闸门拦截），
+  防止 Agent 陷入「修 fix 的 fix」的本地振荡。计数器 `stages.verify.attempts` 存于
+  `vt_state.json`：`run`（完整流水线）重置为 0；`generate`/`resegment`（局部重跑）**不重置**
+  ——看到 `[verify] retry limit reached` 即表示重试上限已到，请**人工审阅**问题列表决定
+  后续修复（新增窗口、换翻译风格、重跑完整 `run` 等），不要无限重跑 verify。
 1. **声学 Lane**：对照 `silencedetect` 检查静音重叠与漏检 (`uncovered-audio`)；**画像失败 / 探测异常 = 红灯**（不再 skip 或吞异常）；**段级置信度巡检**（`no_speech_prob`≥0.6 / `avg_logprob`<-1.0 = 红灯，ADR-031 D3）与**相邻段重叠/词碰撞巡检**（恢复段前缀骑邻居音频 = 红灯 hint，D4/D5）；uncovered 窗自动对照 vocals.wav 能量分级（`[bgm]`/`[speech]`/`[ambiguous]` 建议行，D7——resegment 选窗不再靠 Agent 临场 volumedetect）；报告打印恢复段清单（高嫌疑提示，D2）。
 2. **内容 Lane**：行数覆盖、索引漂移、未翻译英文残留，并生成 `<base>.semantic_reread_task.json` 供 Agent 结合邻居语境快速回读标记。
 3. **表现 Lane**：检查显示窗口参数完整性。
@@ -239,6 +245,20 @@ uv run video-translate backfill --pending "<base>.agent_pending.json" --out "<ba
 uv run video-translate resegment --segments "<base>.segments_en.json" --video "<video.mp4>" \
     --windows 12.0-18.5 41.0-45.0 --lang ja
 ```
+
+### 4.4 P0→P1 修复批准门 (ADR-031 D8)
+> 修质量问题（幻觉漏网、闸门误伤、残窗不可收）时，修复过程分两阶段推进，中间
+> **必须经过人工批准点**，禁止一口气连续改到「修好为止」：
+
+1. **P0 — 守卫补丁**：先用守卫/巡检补丁堵住复发路径（参照「修产物已错的两条正路」），
+   并跑通回归测试。完成后**打印变更摘要**（改了哪个守卫、新增哪个测试、用什么事故几何
+   数据复现、为何当初漏过），并给出 ADR / 测试文件引用。
+2. **批准停点**：打印摘要后**等待最多 1 分钟**人工批准。用户可提前确认（OK）继续；
+   超时自动放行进入 P1。若被否决，**停止**并等待新指示，不要自行继续优化。
+3. **P1 — 优化**：仅在批准（或超时放行）后进行，如调阈值、新增巡检、补文档。
+
+> 纯执行约束，零代码变更（由 AGENTS.md 协议而非状态机强制）；与 verify 重试限制
+> （§3 Phase 4）互为表里：P0→P1 管「怎么修」，retry limit 管「修几轮」。
 
 ---
 
