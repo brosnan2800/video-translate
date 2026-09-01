@@ -18,6 +18,9 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
+import shutil
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -28,6 +31,7 @@ from .config import DEFAULT_HF_CACHE, DEFAULT_PERSONA, resolve_config
 from .io_utils import load_json, save_json
 from .proxy import detect_proxy, setup_http_proxy
 from .audio_profile import analyze_audio
+from .ffmpeg_utils import probe_duration
 from .toolchain import init_toolchain, resolve_command_entry
 from .verify import (
     UNCOVERED_AUDIO, find_uncovered_speech, find_untranslated_latin_words,
@@ -1164,39 +1168,115 @@ def _find_generate_opts(segments_path: str) -> dict | None:
     return None
 
 
+def _parse_reread_result(raw: object) -> list[tuple[int, str]]:
+    """Parse ``<base>.semantic_reread_result.json`` into flagged (index, why).
+
+    Tolerant of both shapes the agent may write:
+      {"12": "wrong: dropped the second clause"}     (value = verdict)
+      {"12: wrong: dropped the second clause": "…"}  (schema-illustration key)
+    Entries without a recognizable verdict are flagged conservatively — a gate
+    must fail loud, never silently clear an unreadable verdict.
+    """
+    if not isinstance(raw, dict):
+        return [(-1, f"unparseable reread result: {raw!r}")]
+    flags: list[tuple[int, str]] = []
+    for k, v in raw.items():
+        ks = str(k)
+        head = ks.strip().split(":")[0].strip()
+        idx = int(head) if head.isdigit() else -1
+        blob = str(v) if head.isdigit() else f"{ks}: {v}"
+        verdict = None
+        for w in ("untranslated", "omit", "add", "wrong", "ok"):
+            if re.search(rf"\b{w}\b", blob, re.IGNORECASE):
+                verdict = w
+                break
+        if verdict != "ok":
+            flags.append((idx, blob.strip() or "(no reason given)"))
+    return flags
+
+
+def _verify_state_hook(segments_path: str, status: str) -> None:
+    """Best-effort state update after verify (control plane 静默点 9).
+
+    Marks ``stages.verify.status`` = ok / flagged / pending_agent. NEVER a
+    gate: a missing or corrupt state file is tolerated — gates depend only on
+    the segments+zh files themselves (state.py contract).
+    """
+    try:
+        from . import state as vt_state
+        outdir = os.path.dirname(os.path.abspath(segments_path)) or "."
+        base = _derive_base(segments_path)
+        st = vt_state.ensure_state(outdir, base)
+        vt_state.set_stage(st, "verify")
+        vt_state.record_stage(st, "verify", status=status)
+        vt_state.save(outdir, base, st)
+    except Exception:  # noqa: BLE001 - state is an enhancement, never a gate
+        pass
+
+
+def _reread_all_ok(result_path: str) -> bool:
+    """True when a reread result exists AND every verdict is ok."""
+    if not os.path.exists(result_path):
+        return False
+    try:
+        return not _parse_reread_result(load_json(result_path))
+    except Exception:  # noqa: BLE001 - unreadable result is not "all ok"
+        return False
+
+
 def cmd_verify(args: argparse.Namespace) -> int:
     """Unified self-check gate: acoustic / content / presentation lanes (Spec 18).
 
-    Returns 0 normally; with --strict, returns a non-zero code if any lane flags
-    an issue (so CI can fail on warnings).
+    Control plane (§2.1 静默点 5–9):
+      - Missing --zh / --video is a usage error (EXIT_ARGS): verify must run
+        every lane — a partial self-check must never read as a pass.
+      - Strict is the DEFAULT: any lane flag -> EXIT_GATE_FAIL (8). Pass
+        --no-strict for report-only mode; the legacy --strict flag is accepted
+        as a no-op for backward compatibility.
+      - An audio-profile failure or an uncovered-probe failure is a RED
+        acoustic lane, never a silent skip.
+      - The semantic reread result is consumed when present (non-ok verdicts
+        fail the gate); when missing the task is (re)hung and the state file
+        is marked ``pending_agent`` — generated SRTs stay untouched.
     """
     segments_path = args.segments
     zh_path = getattr(args, "zh", None)
     video = getattr(args, "video", None)
-    strict = getattr(args, "strict", False)
+    # 静默点 5: strict is the default; --no-strict is the explicit escape hatch.
+    strict = not getattr(args, "no_strict", False)
     noise = getattr(args, "noise", "-30dB")
     d = getattr(args, "d", 0.3)
     opts_path = getattr(args, "opts", None)
     semantic = not getattr(args, "no_semantic", False)  # ADR-016/V14: ON by default
     semantic_out = getattr(args, "semantic_out", None)
 
+    if not zh_path or not video:
+        missing = "--zh" if not zh_path else "--video"
+        print(f"[verify] refusing to run: {missing} is required — verify must "
+              "execute every lane (acoustic/content/presentation); a partial "
+              "self-check would read as a pass.", file=sys.stderr)
+        return EXIT_ARGS
+
     segments = load_json(segments_path)
 
     # ---- Lane 1: acoustic -------------------------------------------------
+    # 静默点 7: a profile failure is a RED lane — "couldn't check" must never
+    # masquerade as "checked, all clear".
     silences: list[tuple[float, float]] = []
-    audio_ok = False
-    if video:
+    prof_error: str | None = None
+    try:
         prof = analyze_audio(video, noise=noise, d=d)
-        silences = prof.silence_intervals
-        audio_ok = prof.ok
+    except Exception as exc:  # noqa: BLE001 - profile probe crashed
+        prof = None
+        prof_error = f"audio profile probe failed: {exc}"
+    if prof is not None:
         if prof.ok:
+            silences = prof.silence_intervals
             print(f"[verify:acoustic] {len(silences)} silence gap(s) from "
                   f"silencedetect (independent reference)")
         else:
-            print("[verify:acoustic] audio profile unavailable — lane skipped")
-    else:
-        print("[verify:acoustic] skipped: pass --video to enable (needs "
-              "silencedetect reference)")
+            prof_error = ("audio profile unavailable (ffmpeg failed or no "
+                          "usable signal)")
 
     offset = 0.0
     if opts_path and os.path.exists(opts_path):
@@ -1207,36 +1287,34 @@ def cmd_verify(args: argparse.Namespace) -> int:
     acoustic_issues = verify_acoustic(segments, silences, offset=offset) if silences else []
 
     # ADR-016 (T2b): uncovered-audio detection — audio present but no cue.
+    # 静默点 8: a probe exception is RED with the reason, never a swallowed [].
     uncovered: list[tuple[float, float]] = []
-    if video and silences:
+    uncovered_error: str | None = None
+    if silences:
         try:
-            from .ffmpeg_utils import probe_duration
             dur = probe_duration(video)
             uncovered = find_uncovered_speech(segments, silences, dur)
-        except Exception:  # noqa: BLE001
-            uncovered = []
+        except Exception as exc:  # noqa: BLE001 - failure must stay visible
+            uncovered_error = f"uncovered-audio probe failed: {exc}"
 
     # ---- Lane 2: content (reuses validate_zh + verify_align) ---------------
     content_flags = 0
     mixed: list[dict[str, Any]] = []
-    if zh_path:
-        ok_zh, missing = validate_zh(segments_path, zh_path)
-        if not ok_zh:
-            content_flags += 1
-        zh = {int(k): v for k, v in load_json(zh_path).items()}
-        align_ok = align_report(segments, zh)
-        if not align_ok:
-            content_flags += 1
-        # ADR-016/V14: deterministic 中英混杂 check — lower-case latin words left
-        # untranslated (e.g. "rivalry"), which coverage/align can't catch.
-        for i, s in enumerate(segments):
-            words = find_untranslated_latin_words(zh.get(i, ""))
-            if words:
-                mixed.append({"index": i, "words": words})
-        if mixed:
-            content_flags += 1
-    else:
-        print("[verify:content] skipped: pass --zh to enable")
+    ok_zh, missing = validate_zh(segments_path, zh_path)
+    if not ok_zh:
+        content_flags += 1
+    zh = {int(k): v for k, v in load_json(zh_path).items()}
+    align_ok = align_report(segments, zh)
+    if not align_ok:
+        content_flags += 1
+    # ADR-016/V14: deterministic 中英混杂 check — lower-case latin words left
+    # untranslated (e.g. "rivalry"), which coverage/align can't catch.
+    for i, s in enumerate(segments):
+        words = find_untranslated_latin_words(zh.get(i, ""))
+        if words:
+            mixed.append({"index": i, "words": words})
+    if mixed:
+        content_flags += 1
 
     # ---- Lane 3: presentation ---------------------------------------------
     first_start = None
@@ -1248,19 +1326,25 @@ def cmd_verify(args: argparse.Namespace) -> int:
     presentation_issues = verify_presentation(opts, first_start, silences, offset=offset)
 
     # ---- report -----------------------------------------------------------
-    any_flag = (bool(acoustic_issues) or bool(uncovered) or
-                content_flags > 0 or bool(presentation_issues))
+    any_flag = (bool(acoustic_issues) or bool(uncovered)
+                or prof_error is not None or uncovered_error is not None
+                or content_flags > 0 or bool(presentation_issues))
     print(f"\n=== verify report ===")
     print(f"  acoustic : {len(acoustic_issues)} issue(s)"
-          + ("" if silences else " (no reference)"))
+          + ("" if (prof_error is None and uncovered_error is None)
+             else " (probe FAILED — lane is RED)"))
     for it in acoustic_issues:
         print(f"    - [{it['type']}] cue #{it['index']} "
               f"{it.get('start'):.2f}->{it.get('end'):.2f}s")
+    if prof_error:
+        print(f"    - [profile-error] {prof_error}")
+    if uncovered_error:
+        print(f"    - [probe-error] {uncovered_error}")
     if uncovered:
         print(f"  uncovered: {len(uncovered)} audio-present-but-no-cue window(s)")
         for (s, e) in uncovered:
             print(f"    - [{UNCOVERED_AUDIO}] {s:.2f}->{e:.2f}s")
-    print(f"  content  : {'ok' if (zh_path and content_flags == 0) else 'skipped/flagged'}"
+    print(f"  content  : {'ok' if content_flags == 0 else 'flagged'}"
           f" ({content_flags} flag(s))")
     for it in mixed:
         print(f"    - [untranslated-latin] cue #{it['index']} {it['words']}")
@@ -1269,26 +1353,68 @@ def cmd_verify(args: argparse.Namespace) -> int:
         detail = it.get("detail") or f"start={it.get('start'):.2f}s"
         print(f"    - [{it['type']}] {detail}")
 
-    # ---- Lane 2b: semantic reread task (agent-side; CLI never calls an LLM) --
-    if semantic and zh_path:
-        from .verify import build_semantic_reread_task
-        zh = {int(k): v for k, v in load_json(zh_path).items()}
-        task = build_semantic_reread_task(segments, zh)
-        out = semantic_out or os.path.join(
-            os.path.dirname(segments_path),
-            _derive_base(segments_path) + ".semantic_reread_task.json",
-        )
-        save_json(out, task, indent=2)
-        print(f"\n  semantic  : reread task written -> {out}")
-        print(f"              ({len(task['pairs'])} pairs) — agent rereads "
-              f"each (en,zh) and flags omit/add/wrong")
-    elif semantic and not zh_path:
-        print("\n  semantic  : skipped (needs --zh)")
+    # ---- Lane 2b: semantic reread (agent-side; CLI never calls an LLM) ------
+    # 静默点 9: consume the reread RESULT when present — non-ok verdicts fail
+    # the gate. When missing, (re)hang the task and mark state pending_agent;
+    # generated SRTs are NOT withdrawn, but the pipeline must not read as done.
+    pending_agent = False
+    if zh_path:
+        outdir = os.path.dirname(os.path.abspath(segments_path)) or "."
+        base = _derive_base(segments_path)
+        result_path = os.path.join(
+            outdir, base + ".semantic_reread_result.json")
+        reread_flags: list[tuple[int, str]] | None = None
+        if os.path.exists(result_path):
+            reread_flags = _parse_reread_result(load_json(result_path))
+            if reread_flags:
+                any_flag = True
+                print(f"  semantic  : reread RESULT flags {len(reread_flags)} "
+                      f"segment(s) -> RED")
+                for idx, why in reread_flags:
+                    print(f"    - [reread] cue #{idx if idx >= 0 else '?'} {why}")
+            else:
+                print("  semantic  : reread result all ok")
+        if semantic:
+            from .verify import build_semantic_reread_task
+            zh2 = {int(k): v for k, v in load_json(zh_path).items()}
+            task = build_semantic_reread_task(segments, zh2)
+            out = semantic_out or os.path.join(
+                os.path.dirname(segments_path),
+                base + ".semantic_reread_task.json",
+            )
+            save_json(out, task, indent=2)
+            print(f"  semantic  : reread task written -> {out}")
+            print(f"              ({len(task['pairs'])} pairs) — agent rereads "
+                  f"each (en,zh) and flags omit/add/wrong")
+        if reread_flags is None and not _reread_all_ok(result_path):
+            # No result file at all: hang (or re-hang) the task + mark pending.
+            pending_agent = True
+            if not semantic:
+                from .verify import build_semantic_reread_task
+                zh2 = {int(k): v for k, v in load_json(zh_path).items()}
+                task = build_semantic_reread_task(segments, zh2)
+                out = semantic_out or os.path.join(
+                    os.path.dirname(segments_path),
+                    base + ".semantic_reread_task.json",
+                )
+                save_json(out, task, indent=2)
+            print("  semantic  : reread result MISSING -> task hung, status "
+                  "marked pending_agent (agent reads neighbors, flags "
+                  "omit/add/wrong, writes <base>.semantic_reread_result.json)")
+    if pending_agent:
+        _verify_state_hook(segments_path, "pending_agent")
+    elif zh_path and not reread_flags:
+        _verify_state_hook(segments_path, "ok" if not any_flag else "flagged")
+    elif zh_path:
+        _verify_state_hook(segments_path, "flagged")
 
     if not any_flag:
         print("  => clean (no lane flagged)")
     if strict and any_flag:
-        return EXIT_RUNTIME
+        print("\n[verify] gate FAILED (exit 8): fix the flagged lane(s) above "
+              "and re-run; use --no-strict for a report-only pass.",
+              file=sys.stderr)
+        return EXIT_GATE_FAIL
     return EXIT_OK
 
 
@@ -1571,7 +1697,10 @@ def build_parser() -> argparse.ArgumentParser:
     v.add_argument("--noise", default="-30dB", help="silencedetect noise gate (default -30dB)")
     v.add_argument("--d", type=float, default=0.3, help="silencedetect min silence dur (s)")
     v.add_argument("--strict", action="store_true",
-                   help="return non-zero if any lane flags an issue (CI)")
+                   help="(deprecated no-op) strict is now the DEFAULT; kept "
+                        "for backward compatibility")
+    v.add_argument("--no-strict", dest="no_strict", action="store_true",
+                   help="report-only mode: print findings, always exit 0")
     v.add_argument("--no-semantic", action="store_true",
                    help="skip the agent-side semantic reread task (ON by default; "
                         "disable to save agent tokens when the reread is not needed). "
