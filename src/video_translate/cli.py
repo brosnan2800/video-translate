@@ -717,6 +717,81 @@ def cmd_translate(args: argparse.Namespace) -> int:
         return EXIT_RUNTIME
 
 
+def _enforce_generate_gate(
+    segments_path: str,
+    zh_path: str,
+    *,
+    base: str,
+    outdir: str,
+    allow_degrade: bool = False,
+) -> None:
+    """control plane §2.1 静默点 4: generate 前置强制校验。
+
+    只依赖 segments + zh 两个文件本身（防绕过核心——就算删掉 state 文件闸门照
+    常生效），state 仅增强（陈旧检测）：
+
+      1. zh 覆盖率 100%（每个 en segment index 都有 zh 项）——漏行/漏 index 阻断；
+      2. en/zh 段数匹配（对齐收紧段边界 → merge 改变段数 → 旧翻译按 index 错行）；
+      3. verify_align 位移检测命中 → 阻断（原 cli.py:697-709 的 warning 升级）；
+      4. state 存在时比对 segments_sha：segments 在翻译后被改变 = 翻译陈旧 → 阻断。
+
+    逃生门：--allow-degrade / --no-align-check 显式放行（记录在 state，不留静默）。
+    """
+    import json as _json
+
+    # ---- 1 + 2: 覆盖率 100% + 段数匹配（纯文件校验，不依赖 state） ----
+    with open(segments_path, encoding="utf-8") as _f:
+        _segs = _json.load(_f)
+    with open(zh_path, encoding="utf-8") as _f:
+        _zh = _json.load(_f)
+    n_segs = len(_segs)
+    missing = [i for i in range(n_segs) if str(i) not in _zh]
+    if missing:
+        raise GateFail(
+            f"generate blocked: zh 覆盖不完整，缺失 {len(missing)} 个 index "
+            f"({missing[:10]}…)。翻译必须 100% 覆盖全部 {n_segs} 个 en segment。",
+            "用 `video-translate translate --segments <base>.segments_en.json "
+            "--out <base>.zh_segments.json` 补齐缺失行后重跑。",
+        )
+    # 段数匹配：zh 的 key 数必须 >= en 段数（多风格允许 style 后缀 key 分开存）
+    if len(_zh) != n_segs:
+        raise GateFail(
+            f"generate blocked: zh 有 {len(_zh)} 项但 en 有 {n_segs} 段——翻译与 "
+            f"当前 segments 不匹配（对齐/重转写后段数可能变化）。",
+            "重新翻译（对齐后段边界变化必须重译，SRT 才能按 index 对齐），"
+            "或 --no-align-check 显式放行（记录在 state）。",
+        )
+
+    # ---- 3: verify_align 位移检测 ----
+    if not allow_degrade:
+        from .verify_align import report as _align_report
+        if not _align_report(_segs, _zh):
+            raise GateFail(
+                "generate blocked: verify_align 检测到 zh/en 索引漂移"
+                "（行错位）。",
+                "核对被标记的 range；确认 zh 是按当前 segments 的 index 顺序翻译。",
+            )
+
+    # ---- 4: segments_sha 陈旧检测（state 增强，不是闸门前提） ----
+    try:
+        from .state import load as _state_load
+        from .state import segment_sha as _sha
+        st = _state_load(outdir, base)
+        if st:
+            trans_sha = st.get("stages", {}).get("transcribe", {}).get("segments_sha")
+            current_sha = _sha(segments_path)
+            if trans_sha and trans_sha != current_sha:
+                raise GateFail(
+                    "generate blocked: segments 在转写后被改动，翻译对应的不是"
+                    "当前 segments（陈旧）。",
+                    "重新翻译后再 generate（或显式放行）。",
+                )
+    except GateFail:
+        raise
+    except Exception:  # noqa: BLE001 - state 损坏不应阻断纯文件闸门
+        pass
+
+
 def cmd_generate(args: argparse.Namespace) -> int:
     base = args.base or _derive_base(args.segments)
     gap = getattr(args, "gap", 0.0) or 0.0
@@ -726,23 +801,20 @@ def cmd_generate(args: argparse.Namespace) -> int:
     flat = getattr(args, "flat", False)
     prune_old = getattr(args, "prune_old", False)
 
-    # V11: agent translation is written batch-by-batch keyed by segment index;
-    # one skipped line shifts every later translation while the English track
-    # stays correct — invisible in logs, obvious to a viewer. Catch it before
-    # rendering. Warning only; --no-align-check silences it.
-    if not getattr(args, "no_align_check", False):
-        try:
-            import json as _json
-            from .verify_align import report as _align_report
-            with open(args.segments, encoding="utf-8") as _f:
-                _segs = _json.load(_f)
-            with open(args.zh, encoding="utf-8") as _f:
-                _zh = _json.load(_f)
-            if not _align_report(_segs, _zh):
-                print("[align] verify the flagged range before shipping "
-                      "(--no-align-check to silence)", file=sys.stderr)
-        except Exception as e:  # noqa: BLE001
-            print(f"[align] check skipped ({e})", file=sys.stderr)
+    # control plane 静默点 4: enforce 前置校验（覆盖 100% + 段数匹配 + 位移 +
+    # sha 陈旧）。--no-align-check / --allow-degrade 是显式逃生门。
+    allow_degrade = (
+        getattr(args, "allow_degrade", False)
+        or getattr(args, "no_align_check", False)
+    )
+    outdir = args.outdir or Path(args.segments).parent
+    try:
+        _enforce_generate_gate(
+            args.segments, args.zh, base=base, outdir=str(outdir),
+            allow_degrade=allow_degrade,
+        )
+    except GateFail:
+        raise  # cli.main 统一 catch → exit 8
 
     try:
         from .generate import generate_subtitles
@@ -1342,7 +1414,14 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--prune-old", action="store_true",
                    help="keep only the 2 newest versioned outputs in the subfolder")
     g.add_argument("--no-align-check", action="store_true",
-                   help="skip the zh/en index-drift audit run before rendering")
+                   help="skip the zh/en index-drift audit run before rendering "
+                        "(equivalent to --allow-degrade; the translate coverage "
+                        "gate stays active)")
+    g.add_argument("--allow-degrade", action="store_true",
+                   help="(control plane escape hatch) explicitly bypass the "
+                        "generate pre-flight gate (zh coverage / segment-count / "
+                        "index-drift / staleness). Reason recorded in state; "
+                        "never silent.")
     g.add_argument("--style", default=None,
                    choices=["film", "literal", "bilingual_study"],
                    help="style suffix for output filenames (e.g. base.film.bilingual.srt); "
