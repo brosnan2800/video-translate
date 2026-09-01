@@ -30,12 +30,14 @@ from . import __version__
 from .config import DEFAULT_HF_CACHE, DEFAULT_PERSONA, resolve_config
 from .io_utils import load_json, save_json
 from .proxy import detect_proxy, setup_http_proxy
-from .audio_profile import analyze_audio
+from .audio_profile import analyze_audio, probe_volume_window
 from .ffmpeg_utils import probe_duration
 from .toolchain import init_toolchain, resolve_command_entry
 from .verify import (
-    UNCOVERED_AUDIO, find_uncovered_speech, find_untranslated_latin_words,
-    verify_acoustic, verify_presentation,
+    ADJACENT_OVERLAP, LOW_CONFIDENCE, UNCOVERED_AUDIO, classify_uncovered_windows,
+    find_adjacent_overlaps, find_low_confidence_segments, find_uncovered_speech,
+    find_untranslated_latin_words, is_recovered_segment, verify_acoustic,
+    verify_presentation,
 )
 from .translate import validate_zh
 from .verify_align import report as align_report
@@ -1087,7 +1089,8 @@ def cmd_resegment(args: argparse.Namespace) -> int:
             )
 
     from .transcribe import transcribe_window
-    new_segs: list[dict[str, Any]] = []
+    from .fill_gaps import _is_recovered_hallucination
+    decoded: list[dict[str, Any]] = []
     for (ws, we) in windows:
         print(f"[resegment] window {ws:.1f}-{we:.1f}s lang={args.lang} ...",
               flush=True)
@@ -1102,7 +1105,7 @@ def cmd_resegment(args: argparse.Namespace) -> int:
         for seg in window_segs:
             seg = dict(seg)
             seg["lang"] = args.lang
-            new_segs.append(seg)
+            decoded.append(seg)
         print(f"    -> {len(window_segs)} clean segment(s)", flush=True)
 
     # drop originals overlapping any window, then merge + sort by start
@@ -1110,6 +1113,24 @@ def cmd_resegment(args: argparse.Namespace) -> int:
         seg for seg in segments
         if not any(seg["start"] < we and seg["end"] > ws for (ws, we) in windows)
     ]
+    # ADR-031 D1: spliced re-decodes go through the SAME hallucination guard as
+    # fill_gaps recoveries (ADR-021). kathy_meta_vlog: "We'll be right back."
+    # (no_speech_prob=0.906) and "Wait." (0.851) escaped because resegment had
+    # no guard. Interception is PRINTED — never silent.
+    new_segs: list[dict[str, Any]] = []
+    dropped = 0
+    for seg in decoded:
+        if _is_recovered_hallucination(seg, kept + new_segs):
+            dropped += 1
+            print(f"[resegment] hallucination guard DROPPED "
+                  f"{float(seg.get('start') or 0):.2f}-"
+                  f"{float(seg.get('end') or 0):.2f}s {seg.get('text')!r} "
+                  f"(no_speech_prob={seg.get('no_speech_prob')}, "
+                  f"avg_logprob={seg.get('avg_logprob')}) — window energy was "
+                  f"likely BGM/noise, not speech", flush=True)
+            continue
+        seg["origin"] = "resegment"  # ADR-031 D2: recovered-class visibility
+        new_segs.append(seg)
     merged = kept + new_segs
     merged.sort(key=lambda s: s["start"])
     save_json(segs_path, merged, indent=0)
@@ -1120,7 +1141,8 @@ def cmd_resegment(args: argparse.Namespace) -> int:
     # re-translate the amended segments; the chain stops at `translate`.
     _record_transcribe_stage(segs_path, video=args.video)
     print(f"[resegment] done: {len(segments)} -> {len(merged)} segments "
-          f"({len(new_segs)} re-transcribed as '{args.lang}') -> {segs_path}")
+          f"({len(new_segs)} re-transcribed as '{args.lang}', "
+          f"{dropped} hallucination-guarded) -> {segs_path}")
     return EXIT_OK
 
 
@@ -1346,6 +1368,42 @@ def _reread_all_ok(result_path: str) -> bool:
         return False
 
 
+def _find_vocals_wav(segments_path: str) -> str | None:
+    """ADR-031 D7: locate the demucs vocals cache co-located with segments."""
+    d = os.path.dirname(os.path.abspath(segments_path)) or "."
+    base = _derive_base(segments_path)
+    for p in sorted(Path(d).glob(f"{base}.*.vocals.wav")):
+        return str(p)
+    return None
+
+
+def _classify_uncovered_advisory(
+    segments_path: str,
+    uncovered: list[tuple[float, float]],
+) -> dict[tuple[float, float], dict[str, str]] | None:
+    """ADR-031 D7: classify uncovered windows by vocal-track energy (advisory).
+
+    Probes the demucs vocals cache (when present) per window and attaches a
+    bgm/speech/ambiguous/unknown verdict, so the next-round decision
+    (resegment vs adjudicate-as-BGM) no longer depends on the agent
+    improvising volumedetect calls. Purely advisory: uncovered windows are
+    already RED on their own.
+    """
+    vocals = _find_vocals_wav(segments_path)
+    if not vocals:
+        return None
+    try:
+        volumes: dict[tuple[float, float], tuple[float | None, float | None]] = {}
+        for (s, e) in uncovered:
+            try:
+                volumes[(s, e)] = probe_volume_window(vocals, s, e)
+            except Exception:  # noqa: BLE001 - single-window probe failure
+                volumes[(s, e)] = (None, None)
+        return classify_uncovered_windows(uncovered, volumes)
+    except Exception:  # noqa: BLE001 - classification is advisory, never a gate
+        return None
+
+
 def cmd_verify(args: argparse.Namespace) -> int:
     """Unified self-check gate: acoustic / content / presentation lanes (Spec 18).
 
@@ -1407,6 +1465,13 @@ def cmd_verify(args: argparse.Namespace) -> int:
         opts = _find_generate_opts(segments_path) or {}
     offset = float(opts.get("offset", 0.0) or 0.0)
     acoustic_issues = verify_acoustic(segments, silences, offset=offset) if silences else []
+    # ADR-031 D3/D4/D5: segment-confidence + adjacent-overlap/prefix-collision
+    # inspection runs unconditionally — it does not depend on the silencedetect
+    # reference (kathy_meta_vlog: "We'll be right back." nsp=0.906 and the
+    # "Is he" prefix riding on "busy." escaped every silence-based check).
+    acoustic_issues = (acoustic_issues
+                       + find_low_confidence_segments(segments)
+                       + find_adjacent_overlaps(segments))
 
     # ADR-016 (T2b): uncovered-audio detection — audio present but no cue.
     # 静默点 8: a probe exception is RED with the reason, never a swallowed [].
@@ -1456,16 +1521,39 @@ def cmd_verify(args: argparse.Namespace) -> int:
           + ("" if (prof_error is None and uncovered_error is None)
              else " (probe FAILED — lane is RED)"))
     for it in acoustic_issues:
-        print(f"    - [{it['type']}] cue #{it['index']} "
-              f"{it.get('start'):.2f}->{it.get('end'):.2f}s")
+        st, en = it.get("start"), it.get("end")
+        span = (f" {st:.2f}->{en:.2f}s"
+                if isinstance(st, (int, float)) and isinstance(en, (int, float))
+                else "")
+        extra = ""
+        if it["type"] == ADJACENT_OVERLAP:
+            extra = (f" (rides on cue #{it.get('index_a')}, overlap "
+                     f"{it.get('overlap')}s"
+                     + (", word-collision" if it.get("word_collision") else "")
+                     + (f" — {it['hint']}" if it.get("hint") else "") + ")")
+        elif it["type"] == LOW_CONFIDENCE:
+            extra = (f" (no_speech_prob={it.get('no_speech_prob')}, "
+                     f"avg_logprob={it.get('avg_logprob')})")
+        print(f"    - [{it['type']}] cue #{it.get('index')}{span}{extra}")
     if prof_error:
         print(f"    - [profile-error] {prof_error}")
     if uncovered_error:
         print(f"    - [probe-error] {uncovered_error}")
     if uncovered:
         print(f"  uncovered: {len(uncovered)} audio-present-but-no-cue window(s)")
+        classifications = _classify_uncovered_advisory(segments_path, uncovered)
         for (s, e) in uncovered:
-            print(f"    - [{UNCOVERED_AUDIO}] {s:.2f}->{e:.2f}s")
+            line = f"    - [{UNCOVERED_AUDIO}] {s:.2f}->{e:.2f}s"
+            if classifications and (s, e) in classifications:
+                c = classifications[(s, e)]
+                line += f"  [{c['verdict']}] {c['suggestion']}"
+            print(line)
+    recovered_idx = [i for i, s in enumerate(segments) if is_recovered_segment(s)]
+    if recovered_idx:
+        tags = ", #".join(str(i) for i in recovered_idx)
+        print(f"  recovered : {len(recovered_idx)} fill_gaps/resegmented "
+              f"segment(s) -> #{tags} (high hallucination suspicion — see "
+              f"reread task hints)")
     print(f"  content  : {'ok' if content_flags == 0 else 'flagged'}"
           f" ({content_flags} flag(s))")
     for it in mixed:

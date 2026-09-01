@@ -27,6 +27,15 @@ FIRST_CUE_EARLY = "first-cue-early"
 TAIL_STRIPPED = "tail-stripped"
 MIN_DUR_STRIPPED = "min-dur-stripped"
 UNCOVERED_AUDIO = "uncovered-audio"
+LOW_CONFIDENCE = "low-confidence"        # ADR-031 D3: whisper 自判非语音/低置信
+ADJACENT_OVERLAP = "adjacent-overlap"    # ADR-031 D4: 相邻段声学窗口重叠
+
+# ADR-031 D7: BGM/语音能量分级阈值（kathy_meta_vlog 人声轨实测标定，
+# 与轮 2 人工仲裁同标准）。确认语音窗人声轨 mean ≈ -15..-20dB / max ≈ -2..-6dB；
+# BGM 残响窗 mean ≤ -36dB。
+BGM_MEAN_DB = -36.0
+SPEECH_MEAN_DB = -25.0
+SPEECH_MAX_DB = -12.0
 
 _EPS = 1e-3
 
@@ -210,6 +219,153 @@ def verify_presentation(opts: dict[str, float],
     return issues
 
 
+def is_recovered_segment(seg: dict[str, Any]) -> bool:
+    """True for fill_gaps-recovered or resegment-spliced segments (ADR-031 D2).
+
+    Recovered segments carry a structurally higher hallucination risk (they are
+    force-decoded onto hole/BGM energy), so downstream review (verify report,
+    semantic reread task) must be able to SEE them. fill_gaps tags its
+    recoveries with ``_recovered: True``; resegment tags its splices with
+    ``origin: "resegment"`` (ADR-031 D1/D2).
+    """
+    if seg.get("_recovered"):
+        return True
+    origin = seg.get("origin")
+    return origin is not None and origin != "whisper"
+
+
+def find_low_confidence_segments(
+    segments: list[dict[str, Any]],
+    *,
+    no_speech_thr: float = 0.6,
+    logprob_thr: float = -1.0,
+) -> list[dict[str, Any]]:
+    """Flag segments Whisper itself scored as non-speech / low confidence (D3).
+
+    Same thresholds as the fill_gaps recovery guard (ADR-021: no_speech_prob
+    >= 0.6 is the STRONGEST single hallucination signal; avg_logprob < -1.0 as
+    the fallback). kathy_meta_vlog delivered "We'll be right back." (nsp=0.906)
+    and "Wait." (nsp=0.851) because nothing downstream ever re-checked the
+    stored confidence fields — this inspection closes that blind spot for BOTH
+    new and existing timelines. Segments without confidence fields (main-pass
+    segments after merge) are skipped.
+
+    Pure (no I/O). Returns issue dicts: ``{index, type, no_speech_prob?,
+    avg_logprob?, start?, end?}``.
+    """
+    issues: list[dict[str, Any]] = []
+    for i, s in enumerate(segments):
+        hits: dict[str, float] = {}
+        nsp = s.get("no_speech_prob")
+        if nsp is not None and float(nsp) >= no_speech_thr:
+            hits["no_speech_prob"] = float(nsp)
+        alp = s.get("avg_logprob")
+        if alp is not None and float(alp) < logprob_thr:
+            hits["avg_logprob"] = float(alp)
+        if hits:
+            issues.append({"index": i, "type": LOW_CONFIDENCE,
+                           "start": s.get("start"), "end": s.get("end"), **hits})
+    return issues
+
+
+def find_adjacent_overlaps(
+    segments: list[dict[str, Any]],
+    *,
+    min_overlap: float = 0.05,
+    word_eps: float = 0.02,
+) -> list[dict[str, Any]]:
+    """Flag adjacent cues whose acoustic windows overlap (ADR-031 D4/D5).
+
+    Two utterances cannot occupy the same wall-clock audio: an overlap beyond
+    ordinary fuzzy boundaries (>0.05s) means one of the two windows is wrong —
+    typically a recovery riding on confirmed neighbour audio. When the later
+    cue's FIRST word starts before the earlier cue's LAST word ends, the
+    overlap is word-level (``word_collision``); for recovered segments that is
+    the classic hallucinated-prefix fingerprint (kathy_meta_vlog: the "Is" of
+    "Is he not going to make it?" riding on "busy."), so the issue carries a
+    ``hint``. Report-only: timestamps are never auto-trimmed (ADR-012 red
+    line) — the fix is resegment/manual, not silent rewriting.
+
+    Pure (no I/O). Returns issue dicts sorted by cue order.
+    """
+    issues: list[dict[str, Any]] = []
+    order = sorted(range(len(segments)),
+                   key=lambda i: float(segments[i].get("start") or 0.0))
+    for pos_b, b in enumerate(order):
+        sb = float(segments[b].get("start") or 0.0)
+        best: tuple[int, float] | None = None
+        for a in order[:pos_b]:
+            ea = float(segments[a].get("end") or 0.0)
+            ov = ea - sb
+            if ov <= min_overlap:
+                continue
+            if best is None or ov > best[1]:
+                best = (a, ov)
+        if best is None:
+            continue
+        a, ov = best
+        issue: dict[str, Any] = {
+            "index": b, "index_a": a, "index_b": b, "type": ADJACENT_OVERLAP,
+            "start": sb, "end": float(segments[a].get("end") or 0.0),
+            "overlap": round(ov, 3),
+        }
+        wa = segments[a].get("words") or []
+        wb = segments[b].get("words") or []
+        ws0 = wb[0].get("start") if wb else None
+        we_last = wa[-1].get("end") if wa else None
+        if (ws0 is not None and we_last is not None
+                and float(ws0) < float(we_last) - word_eps):
+            issue["word_collision"] = True
+            if is_recovered_segment(segments[b]):
+                issue["hint"] = ("suspected hallucinated prefix: first word(s) "
+                                 "of the recovered segment ride on neighbour "
+                                 "audio")
+        issues.append(issue)
+    return issues
+
+
+def classify_vocals_energy(mean_db: float | None, max_db: float | None) -> str:
+    """Classify a window's vocal-track energy: bgm / speech / ambiguous / unknown.
+
+    Thresholds calibrated on kathy_meta_vlog (ADR-031 D7): confirmed speech
+    windows sit at mean ≈ -15..-20dB / max ≈ -2..-6dB on the demucs vocals
+    track; BGM residue sits at mean ≤ -36dB (same standard as the round-2
+    manual adjudication). Pure (no I/O).
+    """
+    if mean_db is None or max_db is None:
+        return "unknown"
+    if mean_db <= BGM_MEAN_DB:
+        return "bgm"
+    if mean_db >= SPEECH_MEAN_DB or max_db >= SPEECH_MAX_DB:
+        return "speech"
+    return "ambiguous"
+
+
+_VOCALS_SUGGESTIONS = {
+    "bgm": "likely BGM residue — adjudicate as music bed, no resegment needed",
+    "speech": "vocal energy present — resegment this window (guard is built in)",
+    "ambiguous": "mid energy — listen and adjudicate manually",
+    "unknown": "vocals-track probe failed — adjudicate manually",
+}
+
+
+def classify_uncovered_windows(
+    uncovered: list[tuple[float, float]],
+    volumes: dict[tuple[float, float], tuple[float | None, float | None]],
+) -> dict[tuple[float, float], dict[str, str]]:
+    """Attach a per-window BGM/speech verdict to uncovered windows (D7).
+
+    ``volumes`` maps each uncovered window to a ``(mean_db, max_db)`` probe
+    result on the vocals track (missing entries / None values -> "unknown").
+    Pure (no I/O) — the caller (cli) does the probing.
+    """
+    out: dict[tuple[float, float], dict[str, str]] = {}
+    for w in uncovered:
+        verdict = classify_vocals_energy(*volumes.get(w, (None, None)))
+        out[w] = {"verdict": verdict, "suggestion": _VOCALS_SUGGESTIONS[verdict]}
+    return out
+
+
 def find_untranslated_latin_words(zh_text: str) -> list[str]:
     """Return lower-case latin tokens left untranslated inside a zh subtitle.
 
@@ -258,7 +414,7 @@ def build_semantic_reread_task(
         # （指代一致、术语统一、语气连贯），故把 zh 邻居一并带上。
         zh_before = [(zh.get(j) or "").strip() for j in before]
         zh_after = [(zh.get(j) or "").strip() for j in after]
-        pairs.append({
+        pair: dict[str, Any] = {
             "index": idx,
             "en": en,
             "zh": cn,
@@ -266,7 +422,18 @@ def build_semantic_reread_task(
             "context_after": context_after,
             "context_before_zh": zh_before,
             "context_after_zh": zh_after,
-        })
+        }
+        # ADR-031 D2: recovered segments (fill_gaps / resegment) carry a
+        # structurally higher hallucination risk. Semantic plausibility is NOT
+        # evidence — whisper hallucinations are precisely "the most plausible
+        # line for this context" ("We'll be right back.", nsp=0.906). The task
+        # must tell the rereading agent to demand acoustic evidence.
+        if is_recovered_segment(s):
+            pair["suspect"] = True
+            pair["hint"] = ("recovered segment (fill_gaps/resegment): high "
+                            "hallucination suspicion — confirm against audio/"
+                            "energy evidence, not just semantic plausibility")
+        pairs.append(pair)
     return {
         "task": "semantic-reread",
         "persona": "You are a rigorous translator. Re-read each (en, zh) pair "

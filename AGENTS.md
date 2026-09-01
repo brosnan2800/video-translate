@@ -42,7 +42,7 @@ full architectural rationale.
 | **镜像源靠 Agent 临选** | Agent/人工每次安装时现场拼 `--extra-index-url` 或挑代理 | 换人或换机就装不动、或装错源，不可复现 | **镜像源固化进 `pyproject` 的 `[tool.uv.index]`**（cu128 官方 PyTorch 索引，`explicit = true` 让它只服务 torch/torchaudio，不遮蔽 PyPI 上的通用包）+ `PIP_EXTRA_INDEX_URL` 进 [TOOLCHAIN.md](TOOLCHAIN.md)；安装一律程序决定，不靠临场决策。 |
 | **尾部回音幻觉** | 在笑声/欢呼/掌声等"有能量无语义"窗口后，看到新段复述上一句尾部（如真句 `give me a yogurt either way.` 后冒出 `I'm not hungry either way.`）时，手工删段或重算时间戳 | 手工删段破坏 index 对齐、重算时间戳破坏声学层；且下次重跑又复现 | 这是 Whisper 自回归固有缺陷（ADR-020）。**不要手工改**，靠 `drop_hallucination_segments` 自动拦截：段内词与前驱**逐字共享时间戳且含零时长词**（第四信号）即判回音；转写层已携带 `avg_logprob` 供第五信号。两信号已在单测覆盖，全片重跑自动生效。 |
 | **依赖与外部工具** | 加依赖只改 `pyproject` 不提交 `uv.lock`；手动下载 ffmpeg/模型塞进仓库或散落各盘 | 换机版本飘移、装成 CPU wheel、二进制垃圾散落缓存 | 一切依赖与外部资产按 [MAJOR_VERSION_PLAN.md](MAJOR_VERSION_PLAN.md) §3.2 规则 R1-R7 执行：依赖进顶层 + lockfile 成对提交；ffmpeg 由 `setup --ffmpeg` 自动下载；模型默认落项目根 `models/`（零 C 盘）不进 git。详见 [docs/TOOLING.md](docs/TOOLING.md)。 |
-| **补洞恢复段幻觉** | `fill_gaps` 漏音补洞恢复出的 `_recovered` 段（如 `Don't worry.`/`I'm a clown.`/`Hi, son.`/`Now what?`/`This is bad.`）与邻居段**时间窗口重叠**（骑在已确认音频上）或**语速物理不可能**（3 词塞进 0.16s），却因只过了文本相似度检查而溜进字幕 | 转写层 `drop_hallucination_segments` 只作用于 Whisper 原产段、在 fill_gaps **之前**运行，补洞恢复段完全绕过了它；手工改会破坏断点续跑 | `fill_gaps` 已内置 `_is_recovered_hallucination` 守卫（ADR-020 补遗/ADR-021）：恢复段与现有段重叠 >0.12s、或语速 >8wps、或 `no_speech_prob`>=0.6（Whisper 自判非语音，最强信号，avg_logprob 不设闸）、或 `avg_logprob`<-1.0、或**零时长词 ≥2 个**（DTW 坍缩指纹，如开头非语音能量被硬拼成 `Hubsan x4 H502E...`/`We'll be right back.`/`Thank you.` 全部被拦）即丢弃；collapse 替换路径关闭重叠信号以免误杀真替换。已单测固化，**全片重跑自动生效，不要手工改**。 |
+| **补洞恢复段幻觉** | `fill_gaps` 漏音补洞恢复出的 `_recovered` 段（如 `Don't worry.`/`I'm a clown.`/`Hi, son.`/`Now what?`/`This is bad.`）与邻居段**时间窗口重叠**（骑在已确认音频上）或**语速物理不可能**（3 词塞进 0.16s），却因只过了文本相似度检查而溜进字幕 | 转写层 `drop_hallucination_segments` 只作用于 Whisper 原产段、在 fill_gaps **之前**运行，补洞恢复段完全绕过了它；手工改会破坏断点续跑 | `fill_gaps` 已内置 `_is_recovered_hallucination` 守卫（ADR-020 补遗/ADR-021）：恢复段与现有段重叠 >0.12s、或语速 >8wps、或 `no_speech_prob`>=0.6（Whisper 自判非语音，最强信号，avg_logprob 不设闸）、或 `avg_logprob`<-1.0、或**零时长词 ≥2 个**（DTW 坍缩指纹，如开头非语音能量被硬拼成 `Hubsan x4 H502E...`/`We'll be right back.`/`Thank you.` 全部被拦）即丢弃；collapse 替换路径关闭重叠信号以免误杀真替换。**resegment 拼接产出同过此守卫**（ADR-031 D1，拦截打印可见不静默），保留段打 `origin: "resegment"`（D2，恢复段类别对 verify/回读可见）。已单测固化，**全片重跑自动生效，不要手工改**。 |
 | **断句切点** | 看到句尾词被掐到下一条字幕（`my sister` ‖ `deidre`、`we don't` ‖ `know`）时，手工在剪映里挪词或改文本 | 破坏 index 对齐与声学时间戳；下次重跑复现 | 42 字符剪映上限必须切，但 V8 已让切点**智能回退**（ADR-022）：优先标点边界→次选 >0.3s 词间气口→贪心兜底；句首连接词孤儿（`because`）自动并右。无标点+零间隙的密集语流物理无解，等 whisperX 对齐后气口浮现。重跑自动生效。 |
 
 ---
@@ -55,7 +55,7 @@ full architectural rationale.
 |---|---|---|---|
 | **声学层**（时间轴压在真语音） | VAD 路由 | 依据 `doctor --video` 音频画像**自动路由**，禁止盲猜 | ADR-011 / ADR-012 |
 | **声学层** | 漂移与漏检 | 对照 `silencedetect` 独立参照，探测静音跨越与 `uncovered-audio` (≥2s 无 cue 语音窗) | ADR-012 / ADR-016 |
-| **声学层** | 幻觉拦截 | 转写层 `drop_hallucination_segments` 五信号：word 塌缩≥50%+邻居3-gram 重复 / 整段落静音窗 / **尾部回音（窗口被邻居时间窗包含且含零时长词，确定性）/ Whisper 低 `avg_logprob`**；**补洞恢复段**另有 `_is_recovered_hallucination` 守卫（重叠>0.12s / 语速>8wps / 低置信度）兜住绕回 fill_gaps 的回音 | ADR-012 / ADR-020 / ADR-021 |
+| **声学层** | 幻觉拦截 | 转写层 `drop_hallucination_segments` 五信号：word 塌缩≥50%+邻居3-gram 重复 / 整段落静音窗 / **尾部回音（窗口被邻居时间窗包含且含零时长词，确定性）/ Whisper 低 `avg_logprob`**；**补洞恢复段**另有 `_is_recovered_hallucination` 守卫（重叠>0.12s / 语速>8wps / 低置信度）兜住绕回 fill_gaps 的回音；**resegment 拼接产出同过此守卫**（拦截打印可见）；verify 声学 lane 巡检**段级置信度**（`no_speech_prob`≥0.6 / `avg_logprob`<-1.0 → 红灯）与**相邻段重叠/词碰撞**（恢复段首词骑邻居词 = 幻觉前缀指纹，只报告不修剪） | ADR-012 / ADR-020 / ADR-021 / ADR-031 |
 | **内容层**（zh 忠实于 en） | 覆盖与对齐 | `validate_zh`（覆盖率）→ `verify_align`（Pearson 索引对齐）→ 中英混杂词检测 → **语义回读（默认开启）** | Spec 17 / Spec 18 |
 | **表现层**（出入字时机） | 显示窗口 | 保持 `tail 0.3 / min-dur 1.0` 默认值；防剪映缓存碰撞自动 `_vN` 递增 | Spec 04 / ADR-012 |
 
@@ -156,7 +156,7 @@ uv run video-translate verify \
 ```
 - `--zh` / `--video` **必填**（缺失 = exit 2 拒跑）：verify 必须跑全 lane，局部自检不允许冒充通过。
 - **strict 默认**：任一 lane 红灯 = **exit 8**；报告模式才用 `--no-strict` 显式逃生。
-1. **声学 Lane**：对照 `silencedetect` 检查静音重叠与漏检 (`uncovered-audio`)；**画像失败 / 探测异常 = 红灯**（不再 skip 或吞异常）。
+1. **声学 Lane**：对照 `silencedetect` 检查静音重叠与漏检 (`uncovered-audio`)；**画像失败 / 探测异常 = 红灯**（不再 skip 或吞异常）；**段级置信度巡检**（`no_speech_prob`≥0.6 / `avg_logprob`<-1.0 = 红灯，ADR-031 D3）与**相邻段重叠/词碰撞巡检**（恢复段前缀骑邻居音频 = 红灯 hint，D4/D5）；uncovered 窗自动对照 vocals.wav 能量分级（`[bgm]`/`[speech]`/`[ambiguous]` 建议行，D7——resegment 选窗不再靠 Agent 临场 volumedetect）；报告打印恢复段清单（高嫌疑提示，D2）。
 2. **内容 Lane**：行数覆盖、索引漂移、未翻译英文残留，并生成 `<base>.semantic_reread_task.json` 供 Agent 结合邻居语境快速回读标记。
 3. **表现 Lane**：检查显示窗口参数完整性。
 4. **语义回读闭环**：verify 会消费 `<base>.semantic_reread_result.json`——存在且含非 ok 判定 = 红灯；**缺失则重挂 task 并置状态 `pending_agent`**（已产出的 SRT 不撤回，但状态链不显示「完成」）。

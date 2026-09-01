@@ -192,3 +192,65 @@ def test_state_hook_survives_corrupt_state(art, no_probe, monkeypatch):
     monkeypatch.setattr(cli, "probe_duration", lambda v: 5.0)
     (art / "demo.vt_state.json").write_text("{not json", encoding="utf-8")
     assert _run(art, ["--no-semantic"]) == cli.EXIT_OK
+
+
+# --------------------------- ADR-031: 声学 lane 硬化 ------------------------
+
+def test_low_confidence_segments_turn_acoustic_lane_red(art, no_probe, monkeypatch):
+    """Whisper 自判非语音的段（nsp>=0.6）必须让声学 lane 红（D3）。"""
+    segs = json.loads((art / "demo.segments_en.json").read_text(encoding="utf-8"))
+    segs[1]["no_speech_prob"] = 0.906
+    (art / "demo.segments_en.json").write_text(
+        json.dumps(segs), encoding="utf-8")
+    monkeypatch.setattr(cli, "probe_duration", lambda v: 5.0)
+    assert _run(art, []) == cli.EXIT_GATE_FAIL
+
+
+def test_adjacent_overlap_turns_acoustic_lane_red(art, no_probe, monkeypatch):
+    """相邻段声学窗口重叠 >0.05s -> 声学 lane 红（D4）。"""
+    segs = json.loads((art / "demo.segments_en.json").read_text(encoding="utf-8"))
+    segs[1]["start"] = 0.9                       # 骑在 seg0 [0.0,1.0] 上，重叠 0.1s
+    segs[1]["words"][0]["start"] = 0.9
+    (art / "demo.segments_en.json").write_text(
+        json.dumps(segs), encoding="utf-8")
+    monkeypatch.setattr(cli, "probe_duration", lambda v: 5.0)
+    assert _run(art, []) == cli.EXIT_GATE_FAIL
+
+
+def test_uncovered_windows_classified_by_vocals_energy(
+        art, no_probe, monkeypatch, capsys):
+    """uncovered 窗自动按人声轨能量分级（D7）：BGM 窗给「无需 resegment」建议。"""
+    (art / "demo.7a62b360.vocals.wav").write_bytes(b"")
+    monkeypatch.setattr(cli, "probe_duration", lambda v: 6.5)   # uncovered (4.0, 6.5)
+    monkeypatch.setattr(cli, "probe_volume_window",
+                        lambda path, s, e, ff=None: (-40.0, -22.0))
+    rc = _run(art, [])
+    assert rc == cli.EXIT_GATE_FAIL              # uncovered 本身仍是红
+    out = capsys.readouterr().out
+    assert "[bgm]" in out
+    assert "likely BGM" in out
+
+
+def test_uncovered_classification_skipped_without_vocals(
+        art, no_probe, monkeypatch, capsys):
+    """无 vocals 缓存时跳过分级（行为与 ADR-031 之前一致）。"""
+    monkeypatch.setattr(cli, "probe_duration", lambda v: 6.5)
+    assert _run(art, []) == cli.EXIT_GATE_FAIL
+    out = capsys.readouterr().out
+    assert "[bgm]" not in out
+
+
+def test_reread_task_carries_recovered_suspect_hints(art, no_probe, monkeypatch):
+    """恢复段 pair 附 suspect+hint（D2）——语义回读不能只靠语义合理性放行。"""
+    segs = json.loads((art / "demo.segments_en.json").read_text(encoding="utf-8"))
+    segs[1]["_recovered"] = True
+    (art / "demo.segments_en.json").write_text(
+        json.dumps(segs), encoding="utf-8")
+    monkeypatch.setattr(cli, "probe_duration", lambda v: 5.0)
+    _run(art, [])                                # semantic 默认开启 -> task 落盘
+    task = json.loads(
+        (art / "demo.semantic_reread_task.json").read_text(encoding="utf-8"))
+    pairs = {p["index"]: p for p in task["pairs"]}
+    assert pairs[1]["suspect"] is True
+    assert "hallucination" in pairs[1]["hint"]
+    assert "suspect" not in pairs[0]

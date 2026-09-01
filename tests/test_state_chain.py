@@ -164,3 +164,50 @@ def test_resegment_refreshes_segments_sha_anchor(tmp_path, monkeypatch):
     from video_translate import pipeline
     pipeline.enforce("generate", pipeline.build_ctx(tmp_path, "demo"),
                      caps_probe=lambda n: True)  # 不 raise 即放行
+
+
+# ----------------------- ADR-031 D6: decisions survive rebuild --------------
+
+def test_ensure_state_preserves_decisions_on_stale_sha(tmp_path):
+    """segments 文件变化（resegment 合法修订）触发 rebuild 时，decisions 必须保留。
+
+    kathy_meta_vlog 事故：run 记录的 decisions 在首轮 resegment 后被
+    ensure_state 的 rebuild 启发式整档抹掉（实测 vt_state.json decisions == {}）。
+    """
+    seg = _write_segments(tmp_path)
+    args = argparse.Namespace(
+        engine=None, style=None, align="whisperx",
+        separate_vocals=False, vad=True, adaptive_vad=False)
+    _record_run_decisions(args, seg)
+
+    # 模拟 resegment：segments 文件被合法修订 -> sha 陈旧 -> rebuild 触发
+    segs = json.loads(open(seg, encoding="utf-8").read())
+    segs.append({"start": 2.0, "end": 3.0, "text": "Amended in."})
+    with open(seg, "w", encoding="utf-8") as f:
+        f.write(json.dumps(segs))
+
+    st = vt_state.ensure_state(tmp_path, "demo")
+    assert st["decisions"]["align"]["value"] == "whisperx"       # 保留
+    assert vt_state.stage_status(st, "transcribe")["segments_sha"] \
+        == vt_state.segment_sha(seg)                             # 且锚点已刷新
+
+
+def test_ensure_state_missing_state_rebuilds_without_decisions(tmp_path):
+    """回归守卫：state 缺失时照旧从产物重建（decisions 为空、锚点刷新）。"""
+    seg = _write_segments(tmp_path)
+    st = vt_state.ensure_state(tmp_path, "demo")
+    assert st["decisions"] == {}
+    assert vt_state.stage_status(st, "transcribe")["segments_sha"] \
+        == vt_state.segment_sha(seg)
+
+
+def test_ensure_state_preserves_video_path_on_stale_sha(tmp_path):
+    """video 路径同理保留（run 之后的 resegment 不该把 video 字段抹掉）。"""
+    seg = _write_segments(tmp_path)
+    _record_transcribe_stage(seg, video="demo.mp4")
+    segs = json.loads(open(seg, encoding="utf-8").read())
+    segs.append({"start": 2.0, "end": 3.0, "text": "Amended in."})
+    with open(seg, "w", encoding="utf-8") as f:
+        f.write(json.dumps(segs))
+    st = vt_state.ensure_state(tmp_path, "demo")
+    assert st.get("video") == "demo.mp4"

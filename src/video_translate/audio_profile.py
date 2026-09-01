@@ -72,6 +72,28 @@ def parse_volumedetect(stderr: str) -> tuple[float | None, float | None]:
     return mean, maxv
 
 
+def probe_volume_window(path: str, start: float, end: float,
+                        ff: str | None = None) -> tuple[float | None, float | None]:
+    """volumedetect over ``[start, end)`` of ``path`` (ADR-031 D7).
+
+    Used by verify to classify uncovered-audio windows against the demucs
+    vocals track (BGM residue vs. real vocal energy) — the manual
+    ``Temp\\check_windows.py`` adjudication workflow, productized.
+
+    Returns ``(mean_db, max_db)``; either may be None when ffmpeg produced no
+    parsable volume line. Raises on subprocess failure — the caller decides
+    severity (the classification is advisory, never a gate).
+    """
+    if ff is None:
+        ff = _resolve_binary("ffmpeg")
+    dur = max(float(end) - float(start), 0.01)
+    cmd = [ff, "-hide_banner", "-ss", str(float(start)), "-t", str(dur),
+           "-i", path, "-af", "volumedetect", "-f", "null", "-"]
+    proc = subprocess.run(cmd, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace")
+    return parse_volumedetect(proc.stderr)
+
+
 def parse_silencedetect(stderr: str, duration: float | None = None) -> list[tuple[float, float]]:
     """Parse silence (start, end) intervals from silencedetect stderr.
 

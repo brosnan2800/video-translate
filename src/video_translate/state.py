@@ -216,9 +216,27 @@ def ensure_state(
 ) -> dict[str, Any]:
     """Return the current state, rebuilding + persisting it from artifacts when
     it is missing or its fingerprint anchor is stale (run --skip transcribe on
-    an old directory self-heals into the state chain)."""
+    an old directory self-heals into the state chain).
+
+    ADR-031 D6: the rebuild heuristic fires on ANY segments-file change —
+    including a *legitimate* resegment amendment — which used to wipe the
+    recorded ``decisions`` (agent/user P0 choices with origin grading;
+    kathy_meta_vlog ended with ``decisions == {}`` after its first resegment).
+    Decisions (and the ``video`` path) are therefore carried over into the
+    rebuilt state instead of being lost.
+    """
+    existing = load(outdir, base)
     if not state_needs_rebuild(outdir, base):
-        return load(outdir, base)
-    st = rebuild_state(outdir, base, video=video)
+        return existing
+    prior_video = None
+    prior_decisions: dict[str, Any] | None = None
+    if isinstance(existing, dict) and existing:
+        prior_video = existing.get("video")
+        dec = existing.get("decisions")
+        if isinstance(dec, dict) and dec:
+            prior_decisions = dec
+    st = rebuild_state(outdir, base, video=video or prior_video)
+    if prior_decisions:
+        st["decisions"] = prior_decisions
     save(outdir, base, st)
     return st
