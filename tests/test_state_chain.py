@@ -127,3 +127,40 @@ def test_record_generate_stage_direct(tmp_path):
     st = vt_state.load(tmp_path, "demo")
     assert vt_state.stage_status(st, "generate")["style"] == "film"
     assert vt_state.current_stage(st) == "verify"
+
+
+# --------------------------- resegment refreshes the anchor ----------------
+
+def test_resegment_refreshes_segments_sha_anchor(tmp_path, monkeypatch):
+    """resegment 是转写层的合法修正：splice 后必须刷新 segments_sha 基线，
+    否则 generate 的陈旧闸会把「已重译」误判为「忘重译」（cp 缺口修复）。"""
+    seg = _write_segments(tmp_path)  # 1 段基线
+    _record_transcribe_stage(seg, video="demo.mp4")
+    old_sha = vt_state.segment_sha(seg)
+
+    # 模拟 resegment：窗口重解码产出新段（函数内 import，patch 源模块即可）
+    new_window_seg = [{"start": 2.0, "end": 3.0, "text": "Inserted line."}]
+    monkeypatch.setattr(
+        "video_translate.transcribe.transcribe_window",
+        lambda *a, **k: [dict(s) for s in new_window_seg])
+    args = argparse.Namespace(
+        segments=seg, video="demo.mp4", windows=["2.0-3.0"], lang="en",
+        vad=False, model=None, threads=4, device=None, compute_type=None,
+        separate_vocals=None, demucs_model=None)
+    from video_translate.cli import cmd_resegment
+    assert cmd_resegment(args) == EXIT_OK
+
+    # 段已 splice（1 + 1 = 2 段）
+    merged = json.loads(open(seg, encoding="utf-8").read())
+    assert len(merged) == 2
+    # 指纹基线已刷新为新文件，且链位停在 translate 等待重译
+    st = vt_state.load(tmp_path, "demo")
+    assert vt_state.stage_status(st, "transcribe")["segments_sha"] \
+        == vt_state.segment_sha(seg) != old_sha
+    assert vt_state.current_stage(st) == "translate"
+    # 由此 generate 的 sha 闸放行（zh 重译后）
+    (tmp_path / "demo.zh_segments.json").write_text(
+        json.dumps({0: "原句。", 1: "插句。"}), encoding="utf-8")
+    from video_translate import pipeline
+    pipeline.enforce("generate", pipeline.build_ctx(tmp_path, "demo"),
+                     caps_probe=lambda n: True)  # 不 raise 即放行

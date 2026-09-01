@@ -1113,6 +1113,12 @@ def cmd_resegment(args: argparse.Namespace) -> int:
     merged = kept + new_segs
     merged.sort(key=lambda s: s["start"])
     save_json(segs_path, merged, indent=0)
+    # Control plane: resegment is a legitimate transcription-layer amendment —
+    # refresh the segments_sha anchor so the generate stale-translation gate
+    # compares against the NEW baseline (otherwise a legal fix would be
+    # indistinguishable from "forgot to re-translate"). Agent still must
+    # re-translate the amended segments; the chain stops at `translate`.
+    _record_transcribe_stage(segs_path, video=args.video)
     print(f"[resegment] done: {len(segments)} -> {len(merged)} segments "
           f"({len(new_segs)} re-transcribed as '{args.lang}') -> {segs_path}")
     return EXIT_OK
