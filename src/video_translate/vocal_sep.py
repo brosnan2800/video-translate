@@ -161,9 +161,13 @@ def _extract_vocals_via_cli(
     Returns abs path to the DEMUCS-PRODUCED wav (raw sr, usually 44100 stereo),
     or None on failure.
     """
-    demucs_bin = shutil_which("demucs")
-    if demucs_bin is None:
+    # Rule 3: resolve via the central registry instead of a per-call PATH search,
+    # so the binary found here is the same one every other stage uses.
+    from .toolchain import resolve_tool, tool_available
+
+    if not tool_available("demucs"):
         return None
+    demucs_bin = resolve_tool("demucs")
     out_tmp = Path(tmpdir) / "demucs_out"
     out_tmp.mkdir(parents=True, exist_ok=True)
     name = Path(input_path).stem
@@ -186,17 +190,15 @@ def _extract_vocals_via_cli(
     return str(produced)
 
 
-def shutil_which(exe: str) -> str | None:
-    """Small shutil.which wrapper for test patching."""
-    import shutil
-    return shutil.which(exe)
-
-
 def _resample_to_16k_mono(src: str, dst: str) -> bool:
     """FFmpeg resample to 16kHz mono WAV (Whisper expected input format)."""
-    ffmpeg_bin = os.environ.get("VT_FFMPEG") or _which_or_ffmpeg("ffmpeg")
-    if not ffmpeg_bin:
-        return False
+    # Rule 3: use the persisted toolchain path. This used to read a non-existent
+    # `VT_FFMPEG` variable (the real key is `VT_FFMPEG_DIR`), so it silently
+    # always fell through to a per-call shutil.which that drifted with the CWD —
+    # the "ffmpeg works here but not there" bug.
+    from .toolchain import resolve_tool
+
+    ffmpeg_bin = resolve_tool("ffmpeg")
     cmd = [
         ffmpeg_bin, "-y", "-v", "error", "-nostdin",
         "-i", src,
@@ -208,11 +210,6 @@ def _resample_to_16k_mono(src: str, dst: str) -> bool:
     except Exception:
         return False
     return Path(dst).is_file()
-
-
-def _which_or_ffmpeg(name: str) -> str:
-    import shutil
-    return shutil.which(name) or name
 
 
 def separate_vocals(

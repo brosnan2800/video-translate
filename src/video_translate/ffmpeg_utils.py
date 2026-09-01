@@ -5,43 +5,45 @@ invoking the binaries (see build_probe_cmd / build_extract_cmd).
 """
 from __future__ import annotations
 
-import shutil
 import subprocess
 
 
 def _resolve_binary(name: str) -> str:
-    """Resolve ffmpeg/ffprobe to the **persisted, absolute** tool path.
+    """Resolve a tool (ffmpeg/ffprobe/demucs/…) to its **persisted, absolute** path.
 
-    Single source of truth: the toolchain config (``init_toolchain`` /
-    ``get_toolchain_status``). It is resolved **once** at startup from
-    ``.env(.local)`` / ``VT_FFMPEG_DIR`` (E2) and cached in
-    ``_GLOBAL_TOOLCHAIN``. Every downstream tool call reuses that exact absolute
-    path, so a binary found at one pipeline stage is never "lost" at a later
-    stage (fill_gaps / verify) — no per-call PATH search, no dependence on the
-    current working directory.
+    Single source of truth: ``toolchain.resolve_tool()``, which reads the path
+    persisted by ``init_toolchain`` (E2 — resolved once at startup from
+    ``.env(.local)`` / ``VT_FFMPEG_DIR`` and cached in ``_GLOBAL_TOOLCHAIN``).
+    Every downstream tool call reuses that exact absolute path, so a binary
+    found at one pipeline stage is never "lost" at a later one (fill_gaps /
+    verify) — no per-call PATH search, no dependence on the current working
+    directory.
 
-    This also makes direct calls (e.g. ``analyze_audio`` / ``verify`` from a
-    plain script that bypasses the CLI's ``init_toolchain``) self-heal: the
-    first resolution auto-loads the ``.env(.local)`` config and binds the
-    portable build, instead of raising FileNotFoundError. Command *construction*
-    stays pure (unit-tested); resolution happens only at execution time.
+    This used to be a second, hand-rolled copy of the resolver with hard-coded
+    ``if name == "ffmpeg"`` branches, so any tool registered later in
+    ``toolchain._TOOL_REGISTRY`` was invisible here — the gap that let demucs /
+    nvidia-smi lookups drift between stages.
+
+    Direct calls (e.g. ``analyze_audio`` / ``verify`` from a plain script that
+    bypasses the CLI's ``init_toolchain``) also self-heal: the first resolution
+    auto-loads the ``.env(.local)`` config and binds the portable build, instead
+    of raising FileNotFoundError. Command *construction* stays pure
+    (unit-tested); resolution happens only at execution time.
 
     Fallback chain (preserves system-PATH / bare-script usability):
       1. cached toolchain status path (absolute — preferred)
-      2. ``shutil.which(name)`` — system-installed ffmpeg on PATH
+      2. ``shutil.which(name)`` — system-installed binary on PATH
       3. bare name — subprocess searches PATH at exec time
     """
     try:
-        from .toolchain import get_toolchain_status
+        from .toolchain import resolve_tool
 
-        status = get_toolchain_status()
-        if name == "ffmpeg" and status.ffmpeg_path:
-            return status.ffmpeg_path
-        if name == "ffprobe" and status.ffprobe_path:
-            return status.ffprobe_path
+        return resolve_tool(name)
     except Exception:  # noqa: BLE001 - never let resolution crash a tool call
-        pass
-    return shutil.which(name) or name
+        # Bare name: subprocess searches PATH at exec time. `resolve_tool` already
+        # carries the shutil.which fallback, so duplicating it here would be a
+        # second resolver that drifts from the registry.
+        return name
 
 
 def build_probe_cmd(input_path: str) -> list[str]:

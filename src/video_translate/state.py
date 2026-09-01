@@ -280,3 +280,91 @@ def reset_verify_attempts(outdir: str | Path, base: str) -> None:
     st.setdefault("stages", {}).setdefault("verify", {})
     st["stages"]["verify"]["attempts"] = 0
     save(outdir, base, st)
+
+
+# ---------------------------------------------------------------------------
+# ADR-032: P0 audio-profile snapshot + P0 -> P1 routing decision
+# ---------------------------------------------------------------------------
+# The P0 -> P1 hand-off used to live only in prose (AGENTS.md), so a skipped
+# profile left no trace and `run` silently fell back to a bare run. Persisting
+# both the recommendation and the final routing makes the hand-off auditable and
+# lets `run` recover the route even when the decision point was bypassed.
+
+AUDIO_PROFILE_KEY = "audio_profile"
+ROUTING_KEY = "routing"
+
+
+def _decision_value(
+    outdir: str | Path, base: str, key: str
+) -> dict[str, Any] | None:
+    """Return the persisted ``decisions.<key>`` value, or None when absent."""
+    st = load(outdir, base)
+    entry = st.get("decisions", {}).get(key)
+    if not isinstance(entry, dict):
+        return None
+    value = entry.get("value")
+    return value if isinstance(value, dict) else None
+
+
+def record_audio_profile(
+    outdir: str | Path,
+    base: str,
+    recommendation: Any,
+) -> dict[str, Any]:
+    """Persist the P0 profile recommendation into ``decisions.audio_profile``.
+
+    Args:
+        recommendation: an ``AudioProfileRecommendation`` (anything exposing
+            ``to_dict()``); a plain mapping is accepted as-is.
+
+    Returns:
+        The persisted payload.
+    """
+    data = (recommendation.to_dict() if hasattr(recommendation, "to_dict")
+            else dict(recommendation))
+    st = ensure_state(outdir, base)
+    record_decision(st, AUDIO_PROFILE_KEY, data, origin="profile")
+    save(outdir, base, st)
+    return data
+
+
+def get_audio_profile(outdir: str | Path, base: str) -> dict[str, Any] | None:
+    """Return the persisted audio-profile recommendation, or None."""
+    return _decision_value(outdir, base, AUDIO_PROFILE_KEY)
+
+
+def record_routing(
+    outdir: str | Path,
+    base: str,
+    *,
+    style: str,
+    vad: bool,
+    adaptive_vad: bool,
+    separate_vocals: bool,
+    vad_threshold: float | None = None,
+    origin: str = "profile",
+    reason: str | None = None,
+) -> dict[str, Any]:
+    """Persist the final three routing decisions into ``decisions.routing``.
+
+    ``origin`` records who decided: ``"profile"`` when the Agent fell back to the
+    audio-profile recommendation (decision-point timeout or a bypassed decision
+    point), ``"explicit"`` when the user picked at the decision point or passed
+    an explicit CLI flag.
+    """
+    value: dict[str, Any] = {
+        "style": style,
+        "vad": bool(vad),
+        "adaptive_vad": bool(adaptive_vad),
+        "separate_vocals": bool(separate_vocals),
+        "vad_threshold": vad_threshold,
+    }
+    st = ensure_state(outdir, base)
+    record_decision(st, ROUTING_KEY, value, origin=origin, reason=reason)
+    save(outdir, base, st)
+    return value
+
+
+def get_routing(outdir: str | Path, base: str) -> dict[str, Any] | None:
+    """Return the persisted routing decision, or None when never recorded."""
+    return _decision_value(outdir, base, ROUTING_KEY)

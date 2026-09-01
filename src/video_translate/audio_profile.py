@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import re
 import subprocess
+from dataclasses import dataclass
+from typing import Any
 
 from .ffmpeg_utils import _resolve_binary, build_audio_profile_cmd
 
@@ -203,3 +205,133 @@ def analyze_audio(video_path: str, noise: str = "-30dB", d: float = 0.3) -> Audi
     # leave duration None. Callers that need it can probe separately.
     silences = parse_silencedetect(stderr, duration=None)
     return AudioProfile(mean_vol=mean, max_vol=maxv, silence_intervals=silences, ok=True)
+
+
+# ---------------------------------------------------------------------------
+# T5 / ADR-032: three-decision recommendation (the P0 -> P1 decision point)
+# ---------------------------------------------------------------------------
+# `doctor --video` and the Agent decision point must agree on the routing advice.
+# Historically this logic lived inline in `cli.doctor` and was only printed, so
+# the Agent had to re-derive it from prose — which is exactly how the P0 skip
+# happened. It is now one pure function both callers share, and its output is
+# persisted so every run can be audited.
+@dataclass
+class AudioProfileRecommendation:
+    """The three routing decisions derived from an audio profile.
+
+    These are exactly the three options the P0 -> P1 decision point puts to the
+    user: translation style, VAD strategy, vocal separation.
+
+    Attributes:
+        style: film / literal / bilingual_study. User preference with no acoustic
+            signal, so it always echoes the configured default.
+        vad: enable global VAD (anchors segment boundaries to real silence).
+        adaptive_vad: enable per-chunk VAD routing (mixed audio, ADR-015).
+            Mutually exclusive with ``vad``.
+        separate_vocals: run Demucs before transcription (strong BGM, ADR-017).
+        vad_threshold: 0.1 for low-level audio, else None (= transcribe default).
+        rationale: human-readable reason, surfaced at the decision point.
+    """
+
+    style: str = "film"
+    vad: bool = False
+    adaptive_vad: bool = False
+    separate_vocals: bool = False
+    vad_threshold: float | None = None
+    rationale: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialisable form persisted into ``decisions.audio_profile``."""
+        return {
+            "style": self.style,
+            "vad": self.vad,
+            "adaptive_vad": self.adaptive_vad,
+            "separate_vocals": self.separate_vocals,
+            "vad_threshold": self.vad_threshold,
+            "rationale": self.rationale,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "AudioProfileRecommendation":
+        """Rebuild from a persisted dict; unknown keys are ignored."""
+        return cls(
+            style=data.get("style", "film"),
+            vad=bool(data.get("vad", False)),
+            adaptive_vad=bool(data.get("adaptive_vad", False)),
+            separate_vocals=bool(data.get("separate_vocals", False)),
+            vad_threshold=data.get("vad_threshold"),
+            rationale=data.get("rationale", ""),
+        )
+
+
+def profile_recommendation(
+    prof: AudioProfile | None,
+    *,
+    duration: float | None = None,
+    default_style: str = "film",
+    demucs_available: bool = True,
+) -> AudioProfileRecommendation:
+    """Derive the three routing decisions from an audio profile (ADR-032).
+
+    Pure: no I/O, no subprocess, no environment reads, so ``doctor`` and the
+    Agent decision point can share it and tests can drive it with synthetic
+    profiles.
+
+    Args:
+        prof: result of :func:`analyze_audio`.
+        duration: media duration in seconds. Needed to tell "clean with pauses"
+            apart from "continuous noise"; without it the function stays
+            conservative (no adaptive routing, no vocal separation).
+        default_style: style to recommend (there is no acoustic signal for style).
+        demucs_available: whether the Demucs binary resolves. Passed in rather
+            than imported to keep this module free of a `vocal_sep` dependency.
+    """
+    if prof is None or not prof.ok:
+        return AudioProfileRecommendation(
+            style=default_style,
+            vad=False,
+            adaptive_vad=False,
+            separate_vocals=False,
+            vad_threshold=None,
+            rationale=("audio profile unavailable (ffmpeg failed); "
+                       "bare run is safest (VAD off)"),
+        )
+
+    flag, rationale = recommend_vad(prof)
+    wants_vad = flag.startswith("--vad")
+    # The low-level branch of `recommend_vad` asks for a relaxed threshold.
+    vad_threshold = 0.1 if "vad-threshold 0.1" in flag else None
+
+    sf = _silence_fraction(prof.silence_intervals, duration) if duration else None
+    continuous = sf is not None and sf < CLEAN_SILENCE_FRACTION
+
+    # ADR-015: clean-but-continuous audio means speech sits under laughter /
+    # cheer / BGM — route per chunk instead of forcing one global VAD choice.
+    adaptive_vad = wants_vad and continuous
+    vad = wants_vad and not adaptive_vad
+
+    # ADR-017: continuous (high-density) audio is where Demucs actually pays off.
+    separate_vocals = continuous and demucs_available
+
+    parts = [rationale]
+    if sf is not None:
+        parts.append(f"silence fraction {sf:.2f}")
+        if continuous:
+            detail = (f"continuous noise (< {CLEAN_SILENCE_FRACTION}) -> "
+                      f"per-chunk adaptive routing")
+            if demucs_available:
+                detail += " + vocal separation"
+            parts.append(detail)
+    else:
+        parts.append("duration unknown -> continuous-noise detection skipped")
+    if continuous and not demucs_available:
+        parts.append("demucs not installed, vocal separation unavailable")
+
+    return AudioProfileRecommendation(
+        style=default_style,
+        vad=vad,
+        adaptive_vad=adaptive_vad,
+        separate_vocals=separate_vocals,
+        vad_threshold=vad_threshold,
+        rationale="; ".join(parts),
+    )

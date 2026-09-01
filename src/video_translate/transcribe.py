@@ -21,7 +21,6 @@ import gc
 import hashlib
 import json
 import os
-import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -71,7 +70,11 @@ def _cuda_available() -> bool:
     Prefers ``nvidia-smi`` (no heavy import) and falls back to ``torch`` only
     if it is already installed. Never imports torch just to probe.
     """
-    if shutil.which("nvidia-smi"):
+    # Rule 3: ask the central registry — the same answer at every stage and in
+    # every CWD — instead of a per-call PATH search.
+    from .toolchain import tool_available
+
+    if tool_available("nvidia-smi"):
         return True
     try:
         import torch  # noqa: F401  # lazy, may be absent on CPU-only boxes

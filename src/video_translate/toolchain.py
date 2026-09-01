@@ -134,6 +134,12 @@ def load_env(
     return merged, [str(f) for f in files]
 
 
+# Fallback for the HuggingFace cache when neither .env nor the environment sets
+# HF_HOME. Mirrors config.DEFAULT_HF_CACHE; duplicated on purpose because config
+# imports toolchain (importing config here would be circular).
+_DEFAULT_HF_CACHE = os.path.join(os.path.expanduser("~"), ".cache", "huggingface")
+
+
 @dataclass
 class ToolchainStatus:
     """Diagnostic snapshot of toolchain and runtime isolation."""
@@ -141,6 +147,8 @@ class ToolchainStatus:
     loaded_files: list[str] = field(default_factory=list)
     ffmpeg_path: str | None = None
     ffprobe_path: str | None = None
+    demucs_path: str | None = None
+    nvidia_smi_path: str | None = None
     cuda_dir: str | None = None
     cuda_source: str | None = None  # E4: "venv-torch" | "env" | "system" | None
     cuda_available: bool = False
@@ -149,6 +157,11 @@ class ToolchainStatus:
     compute_type: str = "int8"
     dll_handles: list[Any] = field(default_factory=list, repr=False)
     initialized: bool = False
+    # Dependency directories: resolved once here, read through model_dir() so
+    # call sites never read HF_HOME / TORCH_HOME / NLTK_DATA themselves (rule 3).
+    hf_cache_dir: str | None = None
+    nltk_data_dir: str | None = None
+    demucs_models_dir: str | None = None
 
 
 _GLOBAL_TOOLCHAIN: ToolchainStatus | None = None
@@ -313,14 +326,25 @@ def init_toolchain(
             except Exception:
                 pass
 
-    # 4. Probe binaries
+    # 4. Probe binaries — every name in _TOOL_REGISTRY is resolved here, once.
     status.ffmpeg_path = shutil.which("ffmpeg")
     status.ffprobe_path = shutil.which("ffprobe")
+    status.demucs_path = shutil.which("demucs")
+    status.nvidia_smi_path = shutil.which("nvidia-smi")
 
-    # 5. Probe CUDA
+    # 5. Resolve dependency directories — the single source for model_dir().
+    status.hf_cache_dir = (
+        merged.get("HF_HOME")
+        or os.environ.get("HF_HOME")
+        or _DEFAULT_HF_CACHE
+    )
+    status.nltk_data_dir = nltk_data_dir()
+    status.demucs_models_dir = os.path.join(project_root(), "models", "torch")
+
+    # 6. Probe CUDA
     status.cuda_available, status.cuda_info = _check_cuda_support()
 
-    # 6. Resolve default device / compute type
+    # 7. Resolve default device / compute type
     cfg_dev = os.environ.get("VT_DEVICE", "auto").lower()
     cfg_ct = os.environ.get("VT_COMPUTE_TYPE", "auto").lower()
     if cfg_dev == "auto":
@@ -358,6 +382,8 @@ def get_toolchain_status() -> ToolchainStatus:
 _TOOL_REGISTRY: dict[str, str] = {
     "ffmpeg": "ffmpeg_path",
     "ffprobe": "ffprobe_path",
+    "demucs": "demucs_path",
+    "nvidia-smi": "nvidia_smi_path",
 }
 
 
@@ -387,6 +413,41 @@ def tool_available(name: str) -> bool:
     hard-stop (exit 8 / missing-dep) instead of silent degradation.
     """
     return resolve_tool(name) != name
+
+
+# ---------------------------------------------------------------------------
+# Dependency directory registry (rule 3: no ad-hoc env reads at call sites)
+# ---------------------------------------------------------------------------
+# Model/weight caches and corpora are resolved once by ``init_toolchain`` and
+# read back through ``model_dir()``. Call sites must never read HF_HOME /
+# TORCH_HOME / NLTK_DATA directly: a value read at one stage can differ from the
+# next (unset env, different CWD, a later .env load), which is exactly how
+# "model missing — re-download" false alarms happen.
+_DEP_REGISTRY: dict[str, str] = {
+    "hf_cache": "hf_cache_dir",
+    "nltk_data": "nltk_data_dir",
+    "demucs_models": "demucs_models_dir",
+}
+
+
+def model_dir(name: str) -> str | None:
+    """Return the absolute path of a registered dependency directory.
+
+    Args:
+        name: key of :data:`_DEP_REGISTRY` — ``hf_cache``, ``nltk_data`` or
+            ``demucs_models``.
+
+    Returns:
+        The resolved directory, or ``None`` when the name is unregistered or not
+        resolved yet. Callers decide severity: a missing model dir is a missing
+        dependency (exit 3), a missing cache dir usually just means "download".
+    """
+    attr = _DEP_REGISTRY.get(name)
+    if not attr:
+        return None
+    status = get_toolchain_status()
+    value = getattr(status, attr, None)
+    return value or None
 
 
 # ---------------------------------------------------------------------------

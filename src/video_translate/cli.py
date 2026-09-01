@@ -19,12 +19,9 @@ from __future__ import annotations
 import argparse
 import os
 import re
-import shutil
-import os
-import shutil
 import sys
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 from . import __version__
 from .config import DEFAULT_HF_CACHE, DEFAULT_PERSONA, resolve_config
@@ -57,11 +54,28 @@ EXIT_GATE_FAIL = 8  # control plane: an explicit decision could not be honored
 # --------------------------- helpers ---------------------------
 
 def _has(binary: str) -> bool:
-    return shutil.which(binary) is not None
+    """True when the binary resolves to a real executable.
+
+    Routes through the toolchain registry so this check agrees with whatever
+    ``resolve_tool()`` later hands to subprocess. A path-only check here used to
+    disagree with the persisted portable build — the source of "ffmpeg OK in
+    doctor / ffmpeg missing in the next stage".
+    """
+    from .toolchain import tool_available
+
+    return tool_available(binary)
 
 
 def _hf_cache_dir() -> str:
-    return os.environ.get("HF_HOME", DEFAULT_HF_CACHE)
+    """HuggingFace cache dir, resolved through the toolchain registry.
+
+    Reading HF_HOME at the call site can disagree with the value resolved at
+    startup (unset env, a later .env load), which is what produced false
+    "model missing — re-download" reports.
+    """
+    from .toolchain import model_dir
+
+    return model_dir("hf_cache") or DEFAULT_HF_CACHE
 
 
 # Milestone 3 / E3: a complete large-v3 model.bin is ~3.09 GB. A model.bin
@@ -324,36 +338,31 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     else:
         print(f"  proxy         : n/a (agent engine translates locally; no network)")
 
-    # ADR-012 / ADR-017: audio profile + automatic VAD & vocal separation recommendation.
+    # ADR-012 / ADR-017 / ADR-032: audio profile + 统一三决策推荐 (doctor 与
+    # 决策点/run 共用 profile_recommendation, 避免双份逻辑漂移)。落盘到
+    # decisions.audio_profile, 供 cmd_run 复用并作为 P0→P1 决策点依据。
     video = getattr(args, "video", None)
     if video:
         try:
-            from .audio_profile import analyze_audio, recommend_vad
+            from .audio_profile import analyze_audio, profile_recommendation
             prof = analyze_audio(video)
             if prof.ok:
-                flag, rationale = recommend_vad(prof)
+                rec = profile_recommendation(prof, default_style=cfg.style or "film")
                 print(f"\n  audio profile : mean={prof.mean_vol} dB, max={prof.max_vol} dB, "
                       f"{len(prof.silence_intervals)} silence gap(s)")
-                print(f"  VAD routing   : {flag}")
-                print(f"                  ({rationale})")
-                # ADR-015: a clean-but-continuous (low silence fraction) profile
-                # means speech sits under laughter/cheer/music — prefer per-chunk
-                # adaptive routing over a single global VAD decision.
-                from .audio_profile import _silence_fraction, CLEAN_SILENCE_FRACTION
-                from .ffmpeg_utils import probe_duration
-                dur = probe_duration(video)
-                sf = _silence_fraction(prof.silence_intervals, dur) if dur else 0.0
-                if flag and sf < CLEAN_SILENCE_FRACTION:
-                    print(f"  note          : low silence fraction ({sf:.2f} < "
-                          f"{CLEAN_SILENCE_FRACTION}) suggests continuous noise — "
-                          f"consider --adaptive-vad for per-chunk routing")
-                # ADR-017 / T2: recommend --separate-vocals if continuous noise or heavy background
-                from .vocal_sep import demucs_available
-                if sf < CLEAN_SILENCE_FRACTION:
-                    if demucs_available():
-                        print(f"  vocal separation: RECOMMENDED (--separate-vocals) — high density audio detected")
-                    else:
-                        print(f"  vocal separation: RECOMMENDED but demucs not installed (pip install -e .)")
+                print(f"  recommendation: style={rec.style} vad={rec.vad} "
+                      f"adaptive_vad={rec.adaptive_vad} "
+                      f"separate_vocals={rec.separate_vocals} "
+                      f"vad_threshold={rec.vad_threshold}")
+                print(f"                  {rec.rationale}")
+                # 落盘快照: 供 cmd_run 复用 (避免重复画像) + 作为决策点依据。
+                try:
+                    from . import state as vt_state
+
+                    vt_state.record_audio_profile(
+                        _default_outdir(video), _default_base(video), rec)
+                except Exception:  # noqa: BLE001
+                    pass
             else:
                 print(f"\n  audio profile : unavailable (ffmpeg profile failed; default bare run)")
         except Exception as e:  # noqa: BLE001
@@ -361,7 +370,13 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     # Show the resolved FFmpeg bin dir (helps diagnose "ffmpeg MISS" cases) and,
     # when it is missing, point the user/Agent at the deterministic fix.
-    ffmpeg_dir = os.environ.get("VT_FFMPEG_DIR")
+    # Rule 3: derive it from the path the toolchain actually resolved rather than
+    # a raw env read — the variable can be stale or empty while a portable build
+    # is in use (or set while something else actually wins).
+    from .toolchain import get_toolchain_status
+
+    ffmpeg_path = get_toolchain_status().ffmpeg_path
+    ffmpeg_dir = str(Path(ffmpeg_path).parent) if ffmpeg_path else ""
     if ffmpeg_dir:
         print(f"\n  ffmpeg dir    : {ffmpeg_dir}")
     if ffmpeg_missing:
@@ -849,6 +864,134 @@ def _record_run_decisions(args: argparse.Namespace, segments_path: str) -> None:
         pass
 
 
+def _resolve_routing(
+    args: argparse.Namespace,
+    outdir: str,
+    base: str,
+    input_path: str,
+    cfg: Any,
+) -> tuple[dict[str, Any] | None, str]:
+    """P0->P1 自动路由 (ADR-032): 画像兜底 + 三决策合并 + 落盘。
+
+    合并优先级: CLI 显式 flag > 已落盘 routing > 画像推荐兜底。
+
+    * 无 ``audio_profile`` 快照时自动 ``analyze_audio`` 并落盘——绝不裸跑无画像。
+    * 最终三决策以 origin 分级 (``explicit``=用户/CLI 拍板, ``profile``=画像推荐)
+      落盘到 ``decisions.routing``，使 P0→P1 交接可审计。
+
+    ``--require-profile`` (可选硬闸): 要求 P0→P1 必须经人工决策点，即已存在
+    ``origin=explicit`` 的 routing，否则返回 ``(None, "explicit")``，调用方据此
+    退出 ``EXIT_GATE_FAIL``——防止 Agent 失守时裸跳过决策点。
+
+    Returns:
+        ``(final, origin)``；硬闸未通过时 ``final`` 为 ``None``。
+    """
+    from . import state as vt_state
+    from .audio_profile import analyze_audio, profile_recommendation
+
+    # 可选硬闸: 必须经人工决策点 (origin=explicit 的 routing)。
+    if getattr(args, "require_profile", False):
+        st = vt_state.load(outdir, base)
+        entry = st.get("decisions", {}).get(vt_state.ROUTING_KEY)
+        if not isinstance(entry, dict) or entry.get("origin") != "explicit":
+            print("[gate] --require-profile: P0→P1 必须经由人工决策点 "
+                  "(decisions.routing origin=explicit)，当前缺失。")
+            print("       请先运行 `doctor --video <video>` 完成画像，并让 Agent 在决策点 "
+                  "选择/确认路由后 run。")
+            return None, "explicit"
+
+    # 1. 画像兜底: 无快照则自动补画像并落盘 (绝不裸跑无画像参数)。
+    prof_snap = vt_state.get_audio_profile(outdir, base)
+    if prof_snap is None:
+        try:
+            prof = analyze_audio(input_path)
+        except Exception:  # noqa: BLE001
+            prof = None
+        rec = profile_recommendation(prof, default_style=getattr(cfg, "style", None) or "film")
+        vt_state.record_audio_profile(outdir, base, rec)
+        prof_snap = rec.to_dict()
+
+    # 2. 已落盘 routing (用户/Agent 决策点的产物)。
+    routing = vt_state.get_routing(outdir, base)
+
+    # 3. 合并: CLI 显式 flag > routing > 画像推荐兜底。
+    #    store_true 的 flag 只有显式传了才为 True；default=None 的字段非 None 即显式。
+    def cbool(name: str) -> bool:
+        return bool(getattr(args, name, False))
+
+    def cset(name: str) -> bool:
+        return getattr(args, name, None) is not None
+
+    explicit: list[str] = []
+
+    if cset("style"):
+        style = args.style
+        explicit.append("style")
+    elif routing:
+        style = routing["style"]
+    else:
+        style = prof_snap.get("style", getattr(cfg, "style", None) or "film")
+
+    if cbool("vad"):
+        vad = True
+        explicit.append("vad")
+    elif routing:
+        vad = bool(routing["vad"])
+    else:
+        vad = bool(prof_snap.get("vad", False))
+
+    if cbool("adaptive_vad"):
+        adaptive_vad = True
+        explicit.append("adaptive_vad")
+    elif routing:
+        adaptive_vad = bool(routing["adaptive_vad"])
+    else:
+        adaptive_vad = bool(prof_snap.get("adaptive_vad", False))
+
+    if cbool("separate_vocals"):
+        separate_vocals = True
+        explicit.append("separate_vocals")
+    elif routing:
+        separate_vocals = bool(routing["separate_vocals"])
+    else:
+        separate_vocals = bool(prof_snap.get("separate_vocals", False))
+
+    if cset("vad_threshold"):
+        vad_threshold = args.vad_threshold
+        explicit.append("vad_threshold")
+    elif routing and routing.get("vad_threshold") is not None:
+        vad_threshold = routing["vad_threshold"]
+    else:
+        vad_threshold = prof_snap.get("vad_threshold")
+
+    # 4. origin 分级: 有显式 flag 即 explicit; 否则沿用 routing 的 origin; 否则 profile。
+    if explicit:
+        origin = "explicit"
+    elif routing:
+        st = vt_state.load(outdir, base)
+        entry = st.get("decisions", {}).get(vt_state.ROUTING_KEY)
+        origin = entry.get("origin", "profile") if isinstance(entry, dict) else "profile"
+    else:
+        origin = "profile"
+
+    final = {
+        "style": style,
+        "vad": vad,
+        "adaptive_vad": adaptive_vad,
+        "separate_vocals": separate_vocals,
+        "vad_threshold": vad_threshold,
+    }
+    # 落盘最终三决策 (可追溯)。显式转换确保类型稳定 (final 的 value 是混合类型)。
+    vt_state.record_routing(
+        outdir, base,
+        style=str(style), vad=bool(vad), adaptive_vad=bool(adaptive_vad),
+        separate_vocals=bool(separate_vocals),
+        vad_threshold=(float(vad_threshold) if vad_threshold is not None else None),
+        origin=origin,
+    )
+    return final, origin
+
+
 def _record_generate_stage(segments_path: str, outdir: str,
                            base: str, style: object = None) -> None:
     """Generate 完成落盘：generate ok + translate 指纹锚（generate 所校验的段）。"""
@@ -940,6 +1083,22 @@ def cmd_run(args: argparse.Namespace) -> int:
          "align": getattr(args, "align", None)},
         cwd=os.getcwd(),
     )
+
+    # ADR-032: P0->P1 自动路由——画像兜底 (无快照自动补并落盘) + 三决策合并
+    # (CLI flag > routing > 画像推荐)。即使 Agent 失守直接 run 也绝不裸跑无画像。
+    final, origin = _resolve_routing(args, outdir, base, input_path, cfg)
+    if final is None:
+        return EXIT_GATE_FAIL
+    args.vad = final["vad"]
+    args.adaptive_vad = final["adaptive_vad"]
+    args.separate_vocals = final["separate_vocals"]
+    args.vad_threshold = final["vad_threshold"]
+    args.style = final["style"]
+    cfg.style = final["style"]
+    print(f"[route] style={final['style']} vad={final['vad']} "
+          f"adaptive_vad={final['adaptive_vad']} "
+          f"separate_vocals={final['separate_vocals']} "
+          f"vad_threshold={final['vad_threshold']} (origin={origin})")
 
     if "transcribe" not in skip:
         rc = cmd_transcribe(argparse.Namespace(
@@ -1858,6 +2017,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="legacy: write final outputs flat into --outdir (no per-video subfolder)")
     r.add_argument("--prune-old", action="store_true",
                    help="keep only the 2 newest versioned outputs in the subfolder")
+    r.add_argument("--require-profile", action="store_true",
+                   help="(ADR-032 硬闸) P0→P1 必须经由人工决策点: 要求已存在 "
+                        "origin=explicit 的 routing (decisions.routing)。缺失则 run "
+                        "直接失败 (exit 8), 防止 Agent 失守时裸跳过 P0 画像与决策点。")
     r.set_defaults(func=cmd_run)
 
     rs = sub.add_parser("resegment",

@@ -27,12 +27,12 @@ from typing import Any
 STAGES: tuple[dict[str, Any], ...] = (
     {
         "id": "preflight",
-        "title": "环境自检 (doctor)",
+        "title": "环境自检 + 音频画像 + 决策点 (doctor --video)",
         "requires": [],
         "caps": [],
         "gate": None,
         "produces": "",
-        "cli": "uv run video-translate doctor",
+        "cli": "uv run video-translate doctor --video <video>",
         "stop_point": False,
     },
     {

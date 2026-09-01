@@ -39,6 +39,16 @@ DEFAULT_PERSONA = (
 # bilingual_study：双语精读，直译为主 + 生僻词括号注记
 VALID_STYLES = ("film", "literal", "bilingual_study")
 
+# --- T5 (决策点 / decision point) defaults -----------------------------------
+# Default VAD threshold — kept manually in sync with `transcribe.VAD_THRESHOLD`.
+DEFAULT_VAD_THRESHOLD = 0.35
+
+# How long the Agent waits at the P0 -> P1 decision point for the user to pick
+# the three routing options (style / VAD / vocal separation) before falling back
+# to the audio-profile recommendation. This is an Agent-side wait (the user
+# answers in chat) — the CLI never sleeps on it.
+DEFAULT_DECISION_TIMEOUT_SECONDS = 300  # 5 minutes
+
 
 @dataclass
 class StyleDef:
@@ -121,6 +131,15 @@ class Config:
     # T4 (ADR-028 / Spec 22): forced-acoustic-alignment backend.
     # "auto" (default, T4 默认化): whisperx when CUDA + whisperx available, else none.
     align: str = "auto"             # --align / VT_ALIGN / [transcribe].align
+    # T5 (决策点 / ADR-032): VAD routing + decision-point timeout. `vad` /
+    # `adaptive_vad` used to be CLI-only flags that silently defaulted to False,
+    # so the routing decision could never be persisted or audited. They now flow
+    # through the same defaults <- toml <- env <- CLI chain as every other option.
+    vad: bool = False               # --vad / VT_VAD
+    adaptive_vad: bool = False      # --adaptive-vad / VT_ADAPTIVE_VAD
+    vad_threshold: float = DEFAULT_VAD_THRESHOLD          # --vad-threshold / VT_VAD_THRESHOLD
+    # Agent-side wait at the decision point; never a CLI sleep.
+    decision_timeout_seconds: int = DEFAULT_DECISION_TIMEOUT_SECONDS  # VT_DECISION_TIMEOUT_SECONDS
     _sources: dict[str, str] = field(default_factory=dict, repr=False)
 
 
@@ -146,9 +165,10 @@ def load_toml(path: str) -> dict[str, Any]:
     return flat
 
 
-_FLOAT_ENV = {"chunk", "merge_max_dur", "merge_max_gap"}
-_INT_ENV = {"merge_max_chars"}
-_BOOL_ENV = {"merge_enabled", "full_transcript", "separate_vocals"}
+_FLOAT_ENV = {"chunk", "merge_max_dur", "merge_max_gap", "vad_threshold"}
+_INT_ENV = {"merge_max_chars", "decision_timeout_seconds"}
+_BOOL_ENV = {"merge_enabled", "full_transcript", "separate_vocals",
+             "vad", "adaptive_vad"}
 
 
 def _coerce_env(attr: str, raw: str) -> Any:
@@ -205,11 +225,17 @@ def resolve_config(
         "engine": "VT_ENGINE", "persona": "VT_PERSONA",
         "merge_max_dur": "VT_MERGE_MAX_DUR", "merge_max_gap": "VT_MERGE_MAX_GAP",
         "merge_max_chars": "VT_MERGE_MAX_CHARS", "glossary": "VT_GLOSSARY",
+        "merge_enabled": "VT_MERGE_ENABLED",
         "source": "VT_SOURCE", "full_transcript": "VT_FULL_TRANSCRIPT",
         "separate_vocals": "VT_SEPARATE_VOCALS",
         "demucs_model": "VT_DEMUCS_MODEL",
         "style": "VT_STYLE",
         "align": "VT_ALIGN",
+        # T5 (决策点): VAD routing + decision-point timeout.
+        "vad": "VT_VAD",
+        "adaptive_vad": "VT_ADAPTIVE_VAD",
+        "vad_threshold": "VT_VAD_THRESHOLD",
+        "decision_timeout_seconds": "VT_DECISION_TIMEOUT_SECONDS",
     }
     for attr, envkey in env_map.items():
         if envkey in env and env[envkey]:
