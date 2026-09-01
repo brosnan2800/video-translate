@@ -106,9 +106,18 @@ rebuild 前先 `load()`；已有 state 携带 dict 型 `decisions`（及 `video`
   「闸门只依赖产物文件，state 是增强」的原则：计数器是增强，真正的 gate 判
   据仍来自 segments_en.json / zh_segments.json。
 
-**P0→P1 批准门**：P0（守卫补丁）完成后，Agent 打印变更摘要 + ADR/test 引用，
-停 1 分钟等待人工批准（超时自动继续），才能进入 P1 优化。纯 AGENTS.md 执行约束，
-零代码变更。
+**P0→P1 决策点（翻译流水线）**：翻译流水线 P0（环境体检 + 音频画像）与 P1（转写）之间的
+引导选择式决策点，现**已代码化**（非纯 AGENTS.md 约束，零代码时代已结束）：
+
+- `audio_profile.profile_recommendation()` 产出风格 / VAD / 人声分离三项结构化推荐，
+  doctor 与 run 共用同一纯函数，杜绝双份逻辑漂移（ADR-032）。
+- `cmd_run` 入口强制：`decisions.audio_profile` 无快照则自动补画像并落盘，**绝不裸跑无画像**；
+  三决策按 `CLI flag > routing > 画像推荐` 合并，以 origin 分级（explicit/profile）落盘
+  `decisions.routing`。
+- `--require-profile` 为可选硬闸：要求已存在 `origin=explicit` 的 routing，缺失则 run 直接
+  exit 8，防止 Agent 失守时裸跳过决策点。
+- Agent 协议层（决策点提问 + 5 分钟超时）见 AGENTS.md「Agent 决策点协议」；超时值由
+  `VT_DECISION_TIMEOUT_SECONDS`（默认 300s）配置。
 
 ## 测试
 

@@ -6,6 +6,7 @@
 > 修订：2026-08-25（对标研究 [Voice-Pro](docs/RESEARCH-voice-pro.md) 后新增 **E1-E4 环境确定性工程**为下一阶段最高优先级；固化「依赖与外部工具管理规则」§3.2；原 T3-T7 顺延）
 > 修订：2026-08-28（**T3 双轨翻译风格体系已落地**：ADR-027 + Spec 21，三轨 Persona 矩阵 + `--style` + 双轨输出，全部单测绿；**T4 WhisperX 强制声学对齐已落地**：ADR-028 + Spec 22，`--align whisperx` 词级时间戳精修，独立 pass + 独立缓存层 + 8GB 分步调度 + 优雅降级，全部单测绿）
 > 修订：2026-08-29（**T4 默认化**：`--align` 默认 `none` → `auto`，CUDA + whisperx 可用即自动 whisperx，否则降级 none；同步 AGENTS/README/Spec 22/ADR-013/references 口径）
+> 修订：2026-09-01（新增 **T8 Pipeline 单一入口 + Agent 协议瘦身**：控制平面收口，编排权从 Agent 收回引擎，AGENTS.md 瘦身为纯「Agent 行为协议」）
 > 目标分支：`feat/v5-cuda-windows`（已合并至 master）
 > 当前版本：`4.0.0` $\rightarrow$ 目标版本：`5.0.0`
 
@@ -55,6 +56,7 @@ flowchart TD
     T4 --> T5[T5. 说话人分离 Diarization<br/>🔒 待落地 pyannote 角色标签]
     T5 --> T6[T6. 独立大模型直连引擎<br/>🤖 DeepSeek / OpenAI API / Ollama]
     T6 --> T7[T7. 批量常驻服务 & Web 校对看板<br/>🖥️ FastAPI + Inspector UI]
+    T7 --> T8[T8. Pipeline 单一入口 + Agent 协议瘦身<br/>🔧 控制平面收口 / 入口统一]
 ```
 
 ---
@@ -203,6 +205,49 @@ flowchart TD
 
 ---
 
+### T8 — Pipeline 单一入口 + Agent 协议瘦身（控制平面收口）【P0】
+> **背景**：状态机流程已剥离为 `pipeline_def.STAGES`（纯数据）+ `pipeline.py`（引擎），
+> 但入口仍是 `run` / `generate` / `verify` 三个离散子命令，Agent 须按 AGENTS.md §3 的
+> Phase 0–4 编排散文记命令顺序。「该跑哪一步」仍是 Agent 软判断，与代码状态机两套说法
+> 易打架（review 反馈：「为什么 p0→p1 要这么加、为什么 agents 里还要写流程」）。本任务把
+> 编排权从 Agent 进一步收归引擎，并同步瘦身 AGENTS.md 为纯「Agent 行为协议」。
+
+**核心设计：**
+1. **`pipeline` = 幂等推进器**（新增子命令，底层 `run`/`generate`/`verify` 保留为原语）：
+   每次调用先 `resolve_position()`，再执行「当前该做的下一步」，推进到下一个挂起点。
+   全程两个停点：**决策点（preflight 后）** 与 **翻译（transcribe 后，exit 6）**。每次挂起后
+   Agent 接手（问人 / 翻译），落盘产物（routing / `zh_segments.json`）后**重跑 `pipeline`**
+   自动续下一段。Agent 不再记 generate/verify 参数。
+2. **决策点默认挂起（可配置三档，用户拍板）**：pipeline 跑到 preflight（doctor + 画像落盘）后
+   **默认挂起在决策点**（`[NEXT] stage=preflight (STOP POINT)`，复用 exit 6 停点语义）——
+   Agent 按 §4.5 引导选择式问人，等 `VT_DECISION_TIMEOUT_SECONDS`（默认 300s）；用户回复 →
+   落盘 `origin=explicit` routing；超时未回 → 按画像推荐落盘 `origin=profile`。重跑 `pipeline`
+   见 routing 已存在即续 transcribe。三档开关：`--prompt always`（默认，问人 + 超时自动）/
+   `--prompt never`（不挂，直接按推荐自动路由）/ `--require-profile`（硬闸：必须 explicit，
+   超时/失守即 exit 8）。
+3. **AGENTS.md 分工瘦身**：删 Phase 0–4 逐命令编排散文，只留四类代码覆盖不到的内容——
+   ① 入口调用（`uv run video-translate pipeline <video>`）；② 挂起时 Agent 职责（决策点问人 +
+   翻译 + 语义回读）；③ §4.5 决策点协议（P0→P1 问人）；④ §1 红线反模式。§3.5 退出码速查保留
+   （Agent 读 exit code 的接口）。
+
+**涉及文件**：`src/video_translate/cli.py`（新增 `pipeline` 子命令 + `--prompt` 旗标）、
+  `src/video_translate/config.py`（新增 `prompt` 配置项，默认 `always`）、
+  `src/video_translate/pipeline.py`（引擎扩展「推进到下一挂起点」驱动）、
+  `AGENTS.md`（§3 瘦身 + 退出码表 exit 6 语义扩展）、`docs/TRANSLATION-WORKFLOW.md`
+  （数据流改为 pipeline 入口，§2.1 / §5 决策点语义同步）、`tests/test_pipeline_advance.py`（新增）
+
+**落地文档**：ADR-033（控制平面收口）+ Spec 23（pipeline 行为契约）；TDD 先行。
+
+**验收标准**：
+- `pipeline` 首次调用：preflight 后**挂起在决策点**（`[NEXT] stage=preflight STOP POINT`）；
+  落盘 routing 后重跑自动续 transcribe → **翻译挂起（exit 6）**；翻译后重跑自动续 generate→verify；
+- `--prompt never` 决策点不挂、直接按画像推荐自动路由；`--require-profile` 无 explicit 即 exit 8；
+- 底层 run/generate/verify 行为不变（向后兼容，golden 不回归）；
+- AGENTS.md 不再有「Phase 1→2→3 逐命令编排」散文，只剩入口 + 挂起职责 + 红线 + 决策点协议；
+- 全量 pytest 绿。
+
+---
+
 ## 3. 依赖与环境隔离矩阵
 
 | 特性模块 | 依赖项 | 依赖分组 (pyproject.toml) | 运行环境要求 |
@@ -291,6 +336,7 @@ flowchart TD
 - **T5**：多人视频 cue 带 `Speaker N:` 标签。
 - **T6**：`--engine llm` 支持直接调用 DeepSeek / OpenAI API 自动完成翻译与格式自愈。
 - **T7**：Web 提交 → 产出全流程跑通，Inspector 看板高亮 `verify` 异常行并支持在线微调。
+- **T8**：`pipeline` 首次在决策点挂起、翻译后重跑自动续 generate→verify；`--prompt never` 自动路由 / `--require-profile` 硬闸；底层 run/generate/verify 行为不变；AGENTS.md 无逐命令编排散文；全量 pytest 绿。
 
 ---
 

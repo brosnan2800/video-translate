@@ -260,6 +260,38 @@ uv run video-translate resegment --segments "<base>.segments_en.json" --video "<
 > 纯执行约束，零代码变更（由 AGENTS.md 协议而非状态机强制）；与 verify 重试限制
 > （§3 Phase 4）互为表里：P0→P1 管「怎么修」，retry limit 管「修几轮」。
 
+### 4.5 Agent 决策点协议（翻译流水线 P0→P1，ADR-032）
+
+> **一句话使用方式**：用户只说「翻译 XXX 视频」，全程不敲命令。Agent 自动完成 P0 画像后，
+> 在聊天里停下来，用**引导选择式**把三个决策项（含推荐默认值）摆给用户，默认等待
+> **5 分钟**（`VT_DECISION_TIMEOUT_SECONDS`，可在 `.env` / `.video-translate.toml` 改），
+> 用户回复按其选择执行，**超时未回复则按画像推荐自动执行**，随后全自动完成转写→翻译→生成→校验→交付。
+
+**决策点三个项（含推荐默认）**：
+| 决策项 | flag | 推荐默认来自 | 说明 |
+|---|---|---|---|
+| 翻译风格 | `--style` | `config.style`（默认 `film`） | film / literal / bilingual_study；画像无依据，仅用户偏好 |
+| VAD 策略 | `--vad` / `--adaptive-vad` | `profile_recommendation()` | 干净录音开 `--vad`；连续噪声走 `--adaptive-vad` 分块路由 |
+| 人声分离 | `--separate-vocals` | `profile_recommendation()` | 强 BGM / 伴奏 / 噪音时开（需 demucs） |
+
+**协议步骤**（Agent 在聊天里执行；CLI 无法感知聊天，故 5 分钟是 Agent 等待行为而非 CLI sleep）：
+1. 跑 `uv run video-translate doctor --video <video>` 完成环境体检 + 音频画像，读其
+   `recommendation:` 输出（风格 / VAD / 分离 / 阈值 + rationale）。该推荐来自
+   `audio_profile.profile_recommendation()`，会落盘 `decisions.audio_profile`。
+2. 在聊天里输出引导选择式提问，列出三项 + 推荐默认，并说明等待 `VT_DECISION_TIMEOUT_SECONDS`（默认 300s）。
+3. 用户回复 → 按其选择构造 `run` 命令（`--style/--vad/--adaptive-vad/--separate-vocals` 显式传参，
+   以 `origin=explicit` 落盘）；超时未回复 → 不带这些 flag 直接 `run`，由 `cmd_run` 按画像推荐自动路由（origin=profile）。
+4. 跑 `uv run video-translate run "<video>"`（无快照时 `cmd_run` 自动补画像并落盘，**绝不裸跑无画像**；
+   三决策按 `CLI flag > routing > 画像推荐` 合并）。
+
+> **兜底**：即便 Agent 失守直接 `run`，`cmd_run` 也会自动画像 + 自动路由（origin=profile），不会跳过 P0。
+> 若要强制「必须人工决策」，加 `--require-profile` 硬闸：无 `origin=explicit` 的 routing 时 `run` 直接 exit 8。
+
+**配置位置（用户自行修改）**：
+- 决策点超时：`VT_DECISION_TIMEOUT_SECONDS`（默认 300） → `.env` 或 `.video-translate.toml` 的 `decision_timeout_seconds`
+- 默认风格 / VAD 阈值等：对应 `VT_STYLE` / `VT_VAD_THRESHOLD`（默认 0.35）等，见
+  [config.py](../src/video_translate/config.py) 与 `.env.example`
+
 ---
 
 ## 5. 跨工具执行备忘
