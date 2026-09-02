@@ -47,6 +47,10 @@ import tempfile
 from typing import Any
 
 from .ffmpeg_utils import extract_chunk, probe_duration
+from .audio_profile import (
+    CLEAN_SILENCE_FRACTION,
+    probe_window_silence_fraction,
+)
 from .review import (
     MISSING,
     find_word_uncovered_subwindows,
@@ -376,16 +380,23 @@ def _load_review_cache(path: str, digest: str,
 
 
 def _save_review_cache(path: str, digest: str, params: dict[str, Any],
-                       merged: list[dict[str, Any]]) -> None:
+                       merged: list[dict[str, Any]],
+                       g3_unrecoverable: list[dict[str, Any]] | None = None
+                       ) -> None:
     """Best-effort persistence. The cache is an optimisation — never fail the
-    pipeline (or change its exit code) because it could not be written."""
+    pipeline (or change its exit code) because it could not be written.
+
+    ``g3_unrecoverable`` 落盘供人工复盘（用户翻产物文件看结果，不看 stdout）。
+    """
     try:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         with open(path, "w", encoding="utf-8") as fh:
             json.dump({"schema": REVIEW_CACHE_SCHEMA,
                        "segments_digest": digest,
                        "params": params,
-                       "merged": merged}, fh, ensure_ascii=False)
+                       "merged": merged,
+                       "g3_unrecoverable": list(g3_unrecoverable or [])},
+                      fh, ensure_ascii=False)
     except Exception:  # noqa: BLE001
         pass
 
@@ -462,6 +473,129 @@ def find_collapsed(
     ]
 
 
+# --------------------------------------------------------------------------- #
+# ADR-034 §6.3 — G3 局部 separate-vocals：四组进入条件（纯函数，全部可单测）
+# --------------------------------------------------------------------------- #
+# G3 只兜「强 BGM / 连续噪声掩盖真音」；**不兜笑声**（笑声是人声，demucs 分不
+# 开，属能力边界外，ADR-034 §1.4）。四组门控全部是纯函数，demucs 侧全部 mock
+# 即可覆盖，见 tests/test_g3_entry.py。
+
+def group_short_windows(
+    windows: list[tuple[float, float]],
+    *,
+    min_dur: float = 5.0,
+    max_merge_gap: float = 2.0,
+) -> list[tuple[float, float]]:
+    """组1：把 < min_dur 的短窗与邻近可疑窗合并后一起分离。
+
+    demucs 在 <5s 窗上质量很差（ADR-034 §3.4 组1），所以短窗不单独分离，而是
+    与间隔 <= max_merge_gap 的相邻可疑窗并成一组；已 >= min_dur 的窗不强行拖
+    邻居进来（避免把干净语音卷进分离）。
+    """
+    if not windows:
+        return []
+    ordered = sorted(windows, key=lambda w: (float(w[0]), float(w[1])))
+    groups: list[list[float]] = []          # [start, end]
+    for (s, e) in ordered:
+        s, e = float(s), float(e)
+        if (groups and (s - groups[-1][1]) <= max_merge_gap
+                and (groups[-1][1] - groups[-1][0]) < min_dur):
+            groups[-1][1] = max(groups[-1][1], e)
+        else:
+            groups.append([s, e])
+    return [(round(g[0], 2), round(g[1], 2)) for g in groups]
+
+
+def g3_prescreen(
+    silence_fraction: float | None,
+    *,
+    threshold: float = CLEAN_SILENCE_FRACTION,
+) -> bool:
+    """组2(c)：画像预筛——窗内几乎无静音气口 = 连续噪声/BGM 嫌疑 → 放行。
+
+    阈值与 `audio_profile.CLEAN_SILENCE_FRACTION` 同源（连续噪声判据）。未知
+    （None）时放行，交给 (a) 能量复核兜底——双门设计：预筛粗、能量复核准。
+    """
+    if silence_fraction is None:
+        return True
+    return silence_fraction < threshold
+
+
+def g3_energy_verdict(
+    vocals_db: float | None,
+    other_db: float | None,
+    *,
+    other_min_db: float = -45.0,
+    other_gap_db: float = 15.0,
+) -> bool:
+    """组2(a)：demucs 能量复核——other（伴奏）轨是否真有货。
+
+    other 轨能量够高（>= other_min_db）且与 vocals 相差不大（<= other_gap_db）
+    → demucs 真把 BGM 剥下来了 → 继续重解码。
+    笑声/欢呼留 vocals、other 轨近乎静音 → 没东西可剥 → 跳过（**不白跑
+    demucs**，这是笑声窗的止损点）。探测失败（None）一律保守返回 False。
+    """
+    if vocals_db is None or other_db is None:
+        return False
+    if other_db < other_min_db:
+        return False
+    return other_db >= vocals_db - other_gap_db
+
+
+def select_g3_windows(
+    candidates: list[dict[str, Any]],
+    *,
+    total_duration: float | None,
+    budget_frac: float = 0.30,
+    budget_abs: float = 600.0,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """组3：性能预算——总窗长 < 30% 视频时长 且 < 10min（两者取小）。
+
+    按 ``score``（可疑度）降序贪心装入，超限的窗原样返回到 ``dropped`` 供报告。
+    单个窗就超预算时不放行——验收要求预算是**硬上限**（G3 demucs 极贵）。
+    """
+    if not candidates:
+        return [], []
+    budget = (budget_abs if not total_duration
+              else min(budget_frac * float(total_duration), budget_abs))
+    ordered = sorted(candidates,
+                     key=lambda c: (-float(c.get("score") or 0.0),
+                                    float(c.get("start") or 0.0)))
+    kept: list[dict[str, Any]] = []
+    dropped: list[dict[str, Any]] = []
+    used = 0.0
+    for c in ordered:
+        dur = float(c.get("end") or 0.0) - float(c.get("start") or 0.0)
+        if used + dur <= budget:
+            kept.append(c)
+            used += dur
+        else:
+            dropped.append(c)
+    kept.sort(key=lambda c: float(c.get("start") or 0.0))   # 确定性：按时间
+    return kept, dropped
+
+
+def g3_self_check_ok(
+    segments: list[dict[str, Any]],
+    silence_intervals: list[tuple[float, float]] | None,
+    *,
+    no_speech_thr: float = 0.6,
+    logprob_thr: float = -1.0,
+) -> bool:
+    """组4：自校验退出——重解码结果再过一次双信号 review。
+
+    仍被判 MISSING（有能量 + Whisper 自报可疑）→ False，标记「当前架构救不
+    了」（典型：笑声与真音时间完全重叠，需未来的语音分类模型）。空结果也算
+    没救回。
+    """
+    if not segments:
+        return False
+    verdicts = review_segments(
+        segments, silence_intervals,
+        no_speech_thr=no_speech_thr, logprob_thr=logprob_thr)
+    return not any(v["verdict"] == MISSING for v in verdicts)
+
+
 def fill_gaps(
     input_path: str,
     segments: list[dict[str, Any]],
@@ -496,6 +630,19 @@ def fill_gaps(
     g1_min_sub: float = 1.0,
     g2_min_dur: float = 1.5,
     g2_max_windows: int = 20,
+    # ADR-034 §6.3 — G3 局部 separate-vocals：只兜「强 BGM / 连续噪声掩盖真音」，
+    # 不兜笑声（笑声是人声，demucs 分不开）。
+    g3: bool = True,
+    g3_min_dur: float = 5.0,
+    g3_budget_frac: float = 0.30,
+    g3_budget_abs: float = 600.0,
+    g3_other_min_db: float = -45.0,
+    g3_other_gap_db: float = 15.0,
+    g3_demucs_model: str = "htdemucs",
+    # G3 的 demucs 设备：默认 "auto" —— 在 Whisper 已占显存的前提下探测**剩余
+    # 显存**，够（~1.5GB + 安全余量）就上 GPU，不够退 CPU（8GB 红线，ADR-034
+    # §1.4）。可显式传 "cuda" / "cpu" 覆盖。
+    g3_device: str = "auto",
     no_speech_thr: float = 0.6,
     logprob_thr: float = -1.0,
     min_energy_frac: float = 0.25,
@@ -539,6 +686,12 @@ def fill_gaps(
             "min_gap": min_gap, "collapse_min_dur": collapse_min_dur,
             "collapse_ratio": collapse_ratio, "lang": lang,
             "model": model_name,
+            # G3 参数进缓存键：改 G3 配置即重算（与 review 同层，不进转写指纹）
+            "g3": g3, "g3_min_dur": g3_min_dur,
+            "g3_budget_frac": g3_budget_frac, "g3_budget_abs": g3_budget_abs,
+            "g3_other_min_db": g3_other_min_db,
+            "g3_other_gap_db": g3_other_gap_db,
+            "g3_demucs_model": g3_demucs_model,
         }
         cached = _load_review_cache(cache_path, cache_digest, cache_params)
         if cached is not None:
@@ -945,11 +1098,187 @@ def fill_gaps(
                      f"+{added} word(s) merged back")
         return fixes
 
+    def _decode_from_file(wav: str, base_start: float,
+                          dedupe_pool: list[dict[str, Any]],
+                          ) -> list[dict[str, Any]]:
+        """解码一段**本身就是窗口长度**的 wav（G3 的 demucs 人声轨）。
+
+        与 ``_decode_once`` 的区别：源音频已经是窗口切片，不需要再裁剪，只需
+        把解码结果的时间戳整体平移回 ``base_start``（绝对时间轴）。
+        """
+        try:
+            segs, _ = model.transcribe(
+                wav, language=lang, task="transcribe",
+                beam_size=BEAM_SIZE, best_of=BEST_OF,
+                condition_on_previous_text=CONDITION_ON_PREVIOUS_TEXT,
+                repetition_penalty=REPETITION_PENALTY,
+                # 同 fill_gaps 一贯立场：恢复解码恒为裸跑
+                vad_filter=False,
+                no_speech_threshold=0.0,
+                temperature=temperature or TEMPERATURE_FALLBACK,
+                word_timestamps=True,
+            )
+        except Exception:  # noqa: BLE001 - 解码失败 = 这个窗没救回
+            return []
+        out: list[dict[str, Any]] = []
+        for s in segs:
+            text = (s.text or "").strip()
+            if not text or _is_echo(text, dedupe_pool):
+                continue
+            cand = {
+                "start": round(float(s.start) + base_start, 2),
+                "end": round(float(s.end) + base_start, 2),
+                "text": text,
+                "words": [
+                    {"word": w.word,
+                     "start": round(float(w.start) + base_start, 2),
+                     "end": round(float(w.end) + base_start, 2)}
+                    for w in (s.words or [])
+                ],
+                "_recovered": True,
+            }
+            for fld in ("avg_logprob", "no_speech_prob", "compression_ratio"):
+                v = getattr(s, fld, None)
+                if v is not None:
+                    cand[fld] = v
+            # check_overlap=False: 窗口本就落在可疑段自己的跨度内
+            if _is_recovered_hallucination(cand, dedupe_pool,
+                                           check_overlap=False):
+                continue
+            out.append(cand)
+        return out
+
+    def _apply_g3() -> tuple[int, list[dict[str, Any]]]:
+        """G3 — 对 G1/G2 都救不回的可疑窗做局部 demucs 分离后重解码。
+
+        ADR-034 §3.4 四组门控，缺一不可：
+          组1 硬前置：review 判 MISSING ∧ 该段未被 G1/G2 救回 ∧ 窗长 ≥5s（短窗合并）
+          组2 双门：(c) 画像预筛（连续噪声）→ (a) demucs 能量复核（other 轨有货）
+          组3 预算：总窗长 < 30% 视频 且 < 10min
+          组4 自校验：重解码后再过 review，仍 MISSING → 标记救不了、**不缝合**
+        """
+        unrecoverable: list[dict[str, Any]] = []
+        # 组1：G1/G2 跑完仍 MISSING、且未被救回过的段（即 G1 空 ∧ G2 空）
+        remaining = [
+            r for r in review_segments(
+                merged, silences,
+                no_speech_thr=no_speech_thr, logprob_thr=logprob_thr,
+                min_energy_frac=min_energy_frac, min_energy_abs=min_energy_abs,
+                min_sub=g1_min_sub, raw_segments=raw_segments,
+            )
+            if r["verdict"] == MISSING
+            and not merged[r["index"]].get("_g2_recovered")
+            and not merged[r["index"]].get("_recovered")
+        ]
+        if not remaining:
+            return 0, unrecoverable
+
+        windows = group_short_windows(
+            [(float(r["start"]), float(r["end"])) for r in remaining],
+            min_dur=g3_min_dur)
+
+        # 组2(c) 画像预筛：**窗级** silencedetect 探测连续噪声/BGM（贴合
+        # ADR §3.4「该窗所在 chunk 画像」）。候选窗受预算封顶（≤10min），每窗
+        # 一次短窗 ffmpeg 探测（亚秒级）；探测失败返回 None → 预筛放行，交给
+        # (a) 能量复核兜底（双门）。
+        candidates: list[dict[str, Any]] = []
+        for (a, b) in windows:
+            sf = probe_window_silence_fraction(
+                input_path, a, b,
+                noise=silencedetect_noise, d=silencedetect_d)
+            if not g3_prescreen(sf):
+                shown = f"{sf:.2f}" if sf is not None else "unknown"
+                progress(f"[audit] G3 {a:.1f}->{b:.1f}s: pre-screen blocked "
+                         f"(silence fraction {shown}) — not a BGM/continuous "
+                         f"masker, skipping demucs")
+                continue
+            candidates.append({"start": a, "end": b, "score": b - a})
+        if not candidates:
+            return 0, unrecoverable
+
+        # 组3 性能预算
+        kept, dropped = select_g3_windows(
+            candidates, total_duration=total,
+            budget_frac=g3_budget_frac, budget_abs=g3_budget_abs)
+        if dropped:
+            progress(f"[audit] G3: {len(dropped)} window(s) over budget "
+                     f"({g3_budget_frac:.0%} of video, cap {g3_budget_abs:.0f}s)"
+                     f" — only the most suspicious {len(kept)} processed")
+
+        from .audio_profile import probe_volume_window
+        fixes = 0
+        for cand in kept:
+            a, b = float(cand["start"]), float(cand["end"])
+            idxs = [r["index"] for r in remaining
+                    if float(r["start"]) < b and float(r["end"]) > a]
+            pool = [s for j, s in enumerate(merged) if j not in idxs]
+            # 局部分离（按窗缓存；demucs 不可用时返回 (None, None)）
+            try:
+                from .vocal_sep import pick_separation_device, separate_window
+                vocals_wav, other_wav = separate_window(
+                    input_path, a, b, outdir or os.path.dirname(input_path) or ".",
+                    base=base or "", model_name=g3_demucs_model,
+                    device=pick_separation_device(g3_device, progress=progress),
+                    progress=progress)
+            except Exception as exc:  # noqa: BLE001
+                progress(f"[audit] G3 {a:.1f}->{b:.1f}s: separation failed "
+                         f"({exc}) — skipped")
+                continue
+            if not vocals_wav:
+                progress(f"[audit] G3 {a:.1f}->{b:.1f}s: demucs unavailable — "
+                         f"skipped (install demucs or pass --no-g3)")
+                continue
+
+            # 组2(a) 能量复核：other 轨有货才说明真剥下了 BGM
+            try:
+                v_mean, _ = probe_volume_window(vocals_wav, 0.0, b - a)
+                o_mean, _ = (probe_volume_window(other_wav, 0.0, b - a)
+                             if other_wav else (None, None))
+            except Exception:  # noqa: BLE001
+                v_mean = o_mean = None
+            if not g3_energy_verdict(v_mean, o_mean,
+                                     other_min_db=g3_other_min_db,
+                                     other_gap_db=g3_other_gap_db):
+                progress(f"[audit] G3 {a:.1f}->{b:.1f}s: energy recheck says "
+                         f"nothing separated (vocals={v_mean}, other={o_mean}) "
+                         f"— laughter-like window, skipped (no wasted decode)")
+                continue
+
+            recovered = _decode_from_file(vocals_wav, a, pool)
+            # 组4 自校验：仍 MISSING = 当前架构救不了（完全重叠的笑声+真音）
+            if not g3_self_check_ok(recovered, silences,
+                                    no_speech_thr=no_speech_thr,
+                                    logprob_thr=logprob_thr):
+                unrecoverable.append({
+                    "start": round(a, 2), "end": round(b, 2),
+                    "reason": "self-check still MISSING (likely fully "
+                              "overlapping laughter+speech)"})
+                progress(f"[audit] G3 {a:.1f}->{b:.1f}s: self-check still "
+                         f"MISSING — marked unrecoverable, NOT spliced")
+                continue
+            if not recovered:
+                continue
+            orig_len = sum(len((merged[i].get("text") or "").strip())
+                           for i in idxs)
+            new_len = sum(len(r["text"]) for r in recovered)
+            if len(recovered) >= 2 or new_len > orig_len * 1.6:
+                for i in sorted(idxs, reverse=True):
+                    del merged[i]
+                for r in recovered:
+                    r["_g3_recovered"] = True
+                merged.extend(recovered)
+                fixes += 1
+                progress(f"[audit] G3 {a:.1f}->{b:.1f}s: demucs separation "
+                         f"recovered {len(recovered)} seg(s), "
+                         f"{orig_len} -> {new_len} chars")
+        return fixes, unrecoverable
+
     merged = [s for i, s in enumerate(segments) if i not in drop] + inserts
     merged.sort(key=lambda x: float(x["start"]))
 
-    # 4) G1 then G2, on the merged timeline (indices are valid HERE).
-    g1_fixes = g2_fixes = 0
+    # 4) G1 then G2 then G3, on the merged timeline (indices are valid HERE).
+    g1_fixes = g2_fixes = g3_fixes = 0
+    g3_unrecoverable: list[dict[str, Any]] = []
     if review_on and silences_ready:
         if g1:
             g1_fixes = _apply_g1()
@@ -957,9 +1286,20 @@ def fill_gaps(
             g2_fixes = _apply_g2()
         if g1_fixes or g2_fixes:
             merged.sort(key=lambda x: float(x["start"]))
+        if g3:
+            g3_fixes, g3_unrecoverable = _apply_g3()
+            if g3_fixes:
+                merged.sort(key=lambda x: float(x["start"]))
 
     progress(f"[audit] +{len(inserts)} recovered / -{len(drop)} collapsed "
-             f"+{g1_fixes} G1 +{g2_fixes} G2 -> {len(merged)} total")
+             f"+{g1_fixes} G1 +{g2_fixes} G2 +{g3_fixes} G3 "
+             f"-> {len(merged)} total")
+    if g3_unrecoverable:
+        shown = ", ".join(f"{w['start']:.1f}-{w['end']:.1f}s"
+                          for w in g3_unrecoverable[:5])
+        progress(f"[audit] G3 unrecoverable {len(g3_unrecoverable)} window(s) "
+                 f"(current architecture cannot separate): {shown}")
     if cache_path:
-        _save_review_cache(cache_path, cache_digest, cache_params, merged)
+        _save_review_cache(cache_path, cache_digest, cache_params, merged,
+                           g3_unrecoverable=g3_unrecoverable)
     return merged

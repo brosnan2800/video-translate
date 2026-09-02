@@ -727,6 +727,9 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                 audio_source=_audio_src,
                 # ADR-034 §6.2: dual-signal review + G1/G2 re-processing.
                 review=not getattr(args, "no_review", False),
+                # ADR-034 §6.3: G3 局部 separate-vocals（强 BGM 兜底）。随
+                # review 一并可关，也能单独用 --no-g3 逃生。
+                g3=not getattr(args, "no_g3", False),
                 # ADR-034 §5.2: independent cache layer, so a re-run only
                 # re-processes suspect windows instead of the whole video.
                 outdir=outdir, base=base,
@@ -1182,6 +1185,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             adaptive_vad=getattr(args, "adaptive_vad", False),
             no_audit=getattr(args, "no_audit", False),
             no_review=getattr(args, "no_review", False),
+            no_g3=getattr(args, "no_g3", False),
             no_drift_snap=getattr(args, "no_drift_snap", False),
             device=cfg.device, compute_type=cfg.compute_type,
             # T2 / ADR-017: forward the vocal-separation flags verbatim
@@ -1975,6 +1979,10 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--no-review", action="store_true",
                    help="(ADR-034 §6.2) skip the post-transcribe dual-signal "
                         "review + G1/G2 re-processing (review runs by default)")
+    t.add_argument("--no-g3", action="store_true",
+                   help="(ADR-034 §6.3) skip G3 local vocal separation "
+                        "(strong-BGM recovery); G3 runs by default when "
+                        "review is enabled")
     t.add_argument("--align", choices=["auto", "none", "whisperx"], default=None,
                    help="(T4 / ADR-028 / Spec 22) forced-acoustic word alignment "
                         "backend. 'auto' (default) = WhisperX wav2vec2 word-level "
@@ -2094,6 +2102,10 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--no-review", action="store_true",
                    help="(ADR-034 §6.2) skip the post-transcribe dual-signal "
                         "review + G1/G2 re-processing (review runs by default)")
+    r.add_argument("--no-g3", action="store_true",
+                   help="(ADR-034 §6.3) skip G3 local vocal separation "
+                        "(strong-BGM recovery); G3 runs by default when "
+                        "review is enabled")
     r.add_argument("--align", choices=["auto", "none", "whisperx"], default=None,
                    help="(T4 / ADR-028 / Spec 22) forced-acoustic word alignment "
                         "backend. See 'transcribe --align'. 'auto' (default) runs "

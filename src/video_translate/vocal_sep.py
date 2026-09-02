@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 from typing import Any, Callable
 
-from .ffmpeg_utils import probe_duration
+from .ffmpeg_utils import extract_chunk, probe_duration
 
 # ---------------------------------------------------------------------------
 # Lazy backend probe (NOTHING import demucs/torch at module toplevel)
@@ -144,29 +144,29 @@ def _auto_device() -> str:
     return "cpu"
 
 
-def _extract_vocals_via_cli(
+def _extract_two_stems_via_cli(
     input_path: str,
     tmpdir: str,
     model_name: str,
     device: str,
-) -> str | None:
-    """Call ``demucs`` CLI as a subprocess; returns the raw vocals wav path.
+) -> tuple[str | None, str | None]:
+    """Call ``demucs --two-stems vocals``; return **both** stems.
+
+    Returns ``(vocals, other)`` raw wav paths (sr 44100 stereo), either may be
+    None on failure. The accompaniment (``no_vocals``) track is what G3's energy
+    recheck reads (ADR-034 §3.4 组2a): laughter/cheering stays in the vocals
+    track and leaves ``other`` near-silent, which is exactly the signal that
+    demucs had nothing to strip — so those windows must NOT be re-decoded.
 
     We fall back to the CLI when the Python API surface isn't stable. The CLI
-    guarantees:
-      * output length == input length (Demucs invariant we rely on)
-      * two-step process: demucs writes {model}/{stem}/{name}.wav, then we
-        resample with ffmpeg to 16kHz mono.
-
-    Returns abs path to the DEMUCS-PRODUCED wav (raw sr, usually 44100 stereo),
-    or None on failure.
+    guarantees output length == input length (the Demucs invariant we rely on).
     """
     # Rule 3: resolve via the central registry instead of a per-call PATH search,
     # so the binary found here is the same one every other stage uses.
     from .toolchain import resolve_tool, tool_available
 
     if not tool_available("demucs"):
-        return None
+        return None, None
     demucs_bin = resolve_tool("demucs")
     out_tmp = Path(tmpdir) / "demucs_out"
     out_tmp.mkdir(parents=True, exist_ok=True)
@@ -182,12 +182,90 @@ def _extract_vocals_via_cli(
     try:
         subprocess.run(cmd, check=True, capture_output=True, timeout=None)
     except Exception:
-        return None
+        return None, None
     # Convention: demucs -o dir/ input → dir/{model}/{stem}/{name}.wav
-    produced = out_tmp / model_name / name / "vocals.wav"
-    if not produced.is_file():
+    stem_dir = out_tmp / model_name / name
+    vocals = stem_dir / "vocals.wav"
+    other = stem_dir / "no_vocals.wav"
+    return (str(vocals) if vocals.is_file() else None,
+            str(other) if other.is_file() else None)
+
+
+def _extract_vocals_via_cli(
+    input_path: str,
+    tmpdir: str,
+    model_name: str,
+    device: str,
+) -> str | None:
+    """Call ``demucs`` CLI; returns the raw vocals wav path (main-pass form)."""
+    vocals, _other = _extract_two_stems_via_cli(
+        input_path, tmpdir, model_name, device)
+    return vocals
+
+
+def _release_gpu_memory() -> None:
+    """Release CUDA memory after a separation (8GB red line, single big model)."""
+    try:
+        import torch  # type: ignore
+
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
+def cuda_free_memory_gb() -> float | None:
+    """Return the currently **free** CUDA memory in GiB; ``None`` without CUDA.
+
+    The main pass can rely on "demucs → release → whisper" ordering, but G3
+    runs while Whisper is already resident in VRAM — so "is CUDA available"
+    is not enough. What matters is "is there room left for a second model".
+    """
+    try:
+        import torch  # lazy — keeps base CLI importable without a heavy import
+
+        if not torch.cuda.is_available():
+            return None
+        free, _total = torch.cuda.mem_get_info()
+        return float(free) / (1024 ** 3)
+    except Exception:
         return None
-    return str(produced)
+
+
+def pick_separation_device(
+    requested: str = "auto",
+    *,
+    required_gb: float = 1.5,
+    safety_gb: float = 0.5,
+    progress: Callable[..., None] = print,
+) -> str:
+    """Decide which device a **window** separation (G3) should run on.
+
+    Context (ADR-034 §6.3 / §1.4): G3 runs after the Whisper model is loaded,
+    so the main pass's "demucs → release → whisper" ordering does not apply
+    here, and reloading Whisper per window would be far more expensive than
+    just separating on CPU.
+
+    * An explicit ``"cpu"`` / ``"cuda"`` is always honored (never overridden).
+    * ``"auto"`` measures the **free** VRAM and picks CUDA only when
+      ``required_gb + safety_gb`` still fits; otherwise it degrades to CPU —
+      no OOM, no Whisper reload, decision logged.
+    """
+    if requested and requested != "auto":
+        return requested
+    free = cuda_free_memory_gb()
+    if free is None:
+        progress("[vsep] G3: no CUDA device — separating on CPU (~10x slower)")
+        return "cpu"
+    need = required_gb + safety_gb
+    if free >= need:
+        progress(f"[vsep] G3: {free:.1f}GiB VRAM free (>= {need:.1f}GiB) "
+                 f"— separating on GPU")
+        return "cuda"
+    progress(f"[vsep] G3: only {free:.1f}GiB VRAM free (< {need:.1f}GiB) "
+             f"— separating on CPU to avoid OOM")
+    return "cpu"
 
 
 def _resample_to_16k_mono(src: str, dst: str) -> bool:
@@ -297,13 +375,7 @@ def separate_vocals(
     # ------------------------------
     # Explicit GPU memory release
     # ------------------------------
-    try:
-        import torch  # type: ignore
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-    except Exception:
-        pass
+    _release_gpu_memory()
 
     # Final invariant check before we hand this off to transcribe:
     try:
@@ -328,3 +400,111 @@ def separate_vocals(
     progress(f"[vsep] vocals ready: {Path(vocals_path).name} "
              f"({probe_duration(vocals_path):.1f}s)")
     return vocals_path
+
+
+# --------------------------------------------------------------------------- #
+# ADR-034 §6.3 (G3): per-window separation
+# --------------------------------------------------------------------------- #
+# The main pass separates the WHOLE file once (cache keyed by an input
+# fingerprint). G3 needs a *local* separation for a handful of suspect windows,
+# plus the accompaniment track so the G3 energy recheck can tell "BGM actually
+# stripped" from "laughter, nothing to strip".
+
+def window_fingerprint(
+    input_path: str,
+    start: float,
+    end: float,
+    backend: str = "demucs",
+    model_name: str = "htdemucs",
+) -> str:
+    """Content hash of everything that influences a per-window separation.
+
+    Mirrors :func:`separate_fingerprint` but keyed on the window boundaries too,
+    so two windows of the same video never share a cache entry.
+    """
+    payload: dict[str, Any] = {
+        "input_hash": _input_fingerprint(input_path),
+        "start": round(float(start), 3),
+        "end": round(float(end), 3),
+        "backend": backend,
+        "model": model_name,
+        "output_sr": 16000,
+        "output_ch": 1,
+        "version": 1,  # bump when the algorithm changes
+    }
+    return hashlib.sha1(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:8]
+
+
+def separate_window(
+    input_path: str,
+    start: float,
+    end: float,
+    outdir: str,
+    *,
+    base: str | None = None,
+    backend: str = "demucs",
+    model_name: str = "htdemucs",
+    device: str = "auto",
+    progress: Callable[..., None] = print,
+) -> tuple[str | None, str | None]:
+    """Separate **one window** ``[start, end)`` into vocals + accompaniment.
+
+    Returns ``(vocals_16k, other_16k)``, or ``(None, None)`` when demucs is
+    unavailable / the separation failed — the caller then degrades to "no G3 for
+    this window" (never a hard failure).
+
+    Notes:
+      * The window is extracted first, so Demucs only ever sees the few seconds
+        that matter (the main pass would pay for the whole file).
+      * Cached per window: ``{base}.{fp}.w{start}-{end}.vocals.wav`` /
+        ``.other.wav``.
+      * GPU memory is released afterwards — G3 runs while the Whisper model is
+        still loaded, so we must not hold two big models at once (8GB red line).
+    """
+    if backend != "demucs":
+        return None, None
+    if base is None:
+        base = Path(input_path).stem
+    Path(outdir).mkdir(parents=True, exist_ok=True)
+
+    fp = window_fingerprint(input_path, start, end, backend, model_name)
+    dur = max(float(end) - float(start), 0.01)
+    tag = f"w{round(float(start), 2)}-{round(float(end), 2)}"
+    vocals_path = str(Path(outdir) / f"{base}.{fp}.{tag}.vocals.wav")
+    other_path = str(Path(outdir) / f"{base}.{fp}.{tag}.other.wav")
+
+    if all(Path(p).is_file() and Path(p).stat().st_size > 0
+           for p in (vocals_path, other_path)):
+        progress(f"[skip] window vocals cached ({tag}s, reuse)")
+        return vocals_path, other_path
+
+    if not demucs_available():
+        return None, None
+
+    _bind_demucs_cache()
+    dev = device if device and device != "auto" else _auto_device()
+    progress(f"[vsep] separating window {tag}s with {model_name} ({dev}) …")
+
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="vsep_win_") as tmpdir:
+        chunk = str(Path(tmpdir) / "chunk.wav")
+        try:
+            extract_chunk(input_path, chunk, float(start), dur)
+        except Exception:  # noqa: BLE001 - degrade: no G3 for this window
+            progress(f"[warn] window extraction failed ({tag}s)")
+            return None, None
+        raw_vocals, raw_other = _extract_two_stems_via_cli(
+            chunk, tmpdir, model_name, dev)
+        if raw_vocals is None:
+            progress("[warn] demucs CLI failed on window; G3 window skipped")
+            return None, None
+        # Both stems must keep the window length (Demucs invariant) — otherwise
+        # word timestamps would drift off the absolute timeline.
+        if not _resample_to_16k_mono(raw_vocals, vocals_path):
+            return None, None
+        if raw_other is None or not _resample_to_16k_mono(raw_other, other_path):
+            # 伴奏轨缺失不致命：能量复核拿到 None 会保守判定"没剥下东西"→ 跳过
+            other_path = ""
+
+    _release_gpu_memory()
+    return vocals_path, (other_path or None)

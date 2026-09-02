@@ -290,6 +290,16 @@ S2 一期先做（默认 bare + duration 接线），不阻塞 T8。T8 在路线
 
 ### 6.3 三期（兜底）
 
+> **状态（2026-09-03）：已落地** —— `vocal_sep.separate_window()`（按窗分离 + 双
+> stem：人声轨 + 伴奏轨）与 `fill_gaps._apply_g3()` 的四组门控已实现，CLI 提供
+> `--no-g3` 逃生门；四组进入条件单测见 `tests/test_g3_entry.py`（demucs 全部 mock）。
+> 两点实现取舍：① G3 的 demucs 设备**自动探测**（`pick_separation_device`）——
+> G3 运行时 Whisper 已在显存，探测**剩余显存**（≥ 1.5GiB + 0.5GiB 安全余量）才
+> 上 GPU，否则退 CPU；显式 `cpu`/`cuda` 恒被尊重（demucs 本身很小 ~0.5–1.5GB，
+> 8GB 卡在 Whisper 加载后通常放得下，不必固定退 CPU）；② 预筛 (c) 对候选窗
+> **单独跑一次 silencedetect**（窗级，贴合 §3.4「该窗所在 chunk 画像」；候选窗
+> 受预算封顶，单次亚秒级），探测失败放行交给 (a) 能量复核兜底（双门设计）。
+
 **目标**：强 BGM/音乐掩盖的真音自动救回。
 
 **动作**：

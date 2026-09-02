@@ -12,12 +12,18 @@ synthetic ffmpeg stderr. `analyze_audio` is the only function that shells out.
 """
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from dataclasses import dataclass
 from typing import Any
 
-from .ffmpeg_utils import _resolve_binary, build_audio_profile_cmd, probe_duration
+from .ffmpeg_utils import (
+    _resolve_binary,
+    build_audio_profile_cmd,
+    extract_chunk,
+    probe_duration,
+)
 
 # VAD routing thresholds (ADR-011 / V7 operating truth).
 LOW_MEAN_DB = -20.0
@@ -234,6 +240,46 @@ def _probe_duration_best_effort(video_path: str) -> float | None:
         return probe_duration(video_path)
     except Exception:  # noqa: BLE001 - advisory only; never a gate
         return None
+
+
+def probe_window_silence_fraction(
+    video_path: str,
+    start: float,
+    end: float,
+    *,
+    noise: str = "-30dB",
+    d: float = 0.3,
+) -> float | None:
+    """ADR-034 §6.3 组2(c)：对**单个候选窗**测静音占比（连续噪声/BGM 判据）。
+
+    与整片画像（``analyze_audio`` 跑全片）不同，这是**窗级**探测，贴合
+    §3.4「该窗所在 chunk 画像标 strong-BGM/continuous-noise」的表述。代价是
+    每个候选窗一次短窗 silencedetect——G3 候选窗受性能预算封顶（≤10min，
+    通常 1~3 窗），单次亚秒级，可忽略。
+
+    返回窗内静音占比（0.0~1.0）；探测失败返回 ``None``（调用方预筛放行，
+    交给 (a) demucs 能量复核兜底——双门设计）。
+    """
+    import tempfile
+
+    chunk: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
+            chunk = tf.name
+        extract_chunk(video_path, chunk, float(start),
+                      max(float(end) - float(start), 0.01))
+        prof = analyze_audio(chunk, noise=noise, d=d)
+        if prof.ok and prof.duration:
+            return _silence_fraction(prof.silence_intervals, prof.duration)
+        return None
+    except Exception:  # noqa: BLE001 - 预筛是粗门，失败不能拖垮 G3
+        return None
+    finally:
+        try:
+            if chunk and os.path.exists(chunk):
+                os.remove(chunk)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 # ---------------------------------------------------------------------------
