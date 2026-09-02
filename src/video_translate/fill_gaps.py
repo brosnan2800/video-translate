@@ -500,6 +500,8 @@ def fill_gaps(
     logprob_thr: float = -1.0,
     min_energy_frac: float = 0.25,
     min_energy_abs: float = 0.25,
+    # ADR-035 M3（Z2）: 合并视图段的信号 A 按 _raw_indices 回查这里的 raw 源段。
+    raw_segments: list[dict[str, Any]] | None = None,
     # Independent cache layer (ADR-034 §5.2). When omitted the review still runs
     # but nothing is persisted, so a re-run re-processes the suspect windows.
     outdir: str | None = None,
@@ -613,6 +615,7 @@ def fill_gaps(
                     no_speech_thr=no_speech_thr, logprob_thr=logprob_thr,
                     min_energy_frac=min_energy_frac,
                     min_energy_abs=min_energy_abs, min_sub=g1_min_sub,
+                    raw_segments=raw_segments,
                 )
                 if s["verdict"] == MISSING and len(s.get("g1_windows", [])) >= 2
             ])
@@ -861,7 +864,7 @@ def fill_gaps(
                 merged, silences,
                 no_speech_thr=no_speech_thr, logprob_thr=logprob_thr,
                 min_energy_frac=min_energy_frac, min_energy_abs=min_energy_abs,
-                min_sub=g1_min_sub,
+                min_sub=g1_min_sub, raw_segments=raw_segments,
             )
             if s["verdict"] == MISSING and len(s.get("g1_windows", [])) >= 2
         ]

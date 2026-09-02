@@ -8,6 +8,13 @@
 > Agent 协议见 [`../AGENTS.md`](../AGENTS.md) §4.5；状态机定义见
 > [`../src/video_translate/pipeline_def.py`](../src/video_translate/pipeline_def.py)
 > （纯数据声明式流程表）与 ADR-030。
+>
+> **数据契约（ADR-035）**：阶段间产物的命名 / 字段 / 生产者 / 消费者 / 可否重算 /
+> 必须穿透字段，以 [`../src/video_translate/artifacts.py`](../src/video_translate/artifacts.py)
+> 声明式契约表为**唯一事实来源**；本文出现的文件名与契约表不一致时，以契约为准。
+> 要点：`segments_raw.json` 全字段不可变（置信度跟段绑死）；`segments_en.json` 是
+> 带 `_raw_indices` 回查指针的合并视图（不聚合不覆盖）；声学事实
+> （duration / silence_intervals）只在 preflight 算一次落 `vt_state.json`，下游只读。
 
 ---
 

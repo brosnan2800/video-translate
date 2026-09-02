@@ -680,6 +680,37 @@ def rejoin_leading_orphans(
     return out
 
 
+def attach_raw_indices(
+    merged: list[dict[str, Any]],
+    raw: list[dict[str, Any]],
+    *,
+    eps: float = 1e-6,
+) -> list[dict[str, Any]]:
+    """ADR-035 M3（Z2）：为合并视图每段标注 ``_raw_indices`` 回查指针。
+
+    指针指向 ``segments_raw.json``（即 apply_merge 落盘的 pre-merge 原始段，
+    全字段含置信度）。映射规则 = 时间重叠：合并段的跨度是其源段的并集（词级
+    收紧只会内缩），raw 段互不重叠且单调，因此「与某 raw 段有正重叠」⟺「它是
+    该合并段的源之一」；split 切出的多条子 cue 与同一父段重叠，天然映射到同
+    一父段。置信度永不进视图、永不聚合——下游按指针回查 raw 逐段取值（合并
+    前"哪一段可疑"的线索不再丢失）。
+
+    无重叠（时间被改写等理论外情形）时保留空列表，下游回查为空则回退段自身
+    字段。copy-then-override：``{**seg, ...}`` 保留未知字段。
+    """
+    out: list[dict[str, Any]] = []
+    for seg in merged:
+        s = float(seg.get("start") or 0.0)
+        e = float(seg.get("end") or 0.0)
+        idxs = [
+            i for i, r in enumerate(raw)
+            if (min(e, float(r.get("end") or 0.0))
+                - max(s, float(r.get("start") or 0.0))) > eps
+        ]
+        out.append({**seg, "_raw_indices": idxs})
+    return out
+
+
 def apply_merge(
     segments_path: str,
     *,
@@ -717,6 +748,8 @@ def apply_merge(
     """
     raw = load_json(segments_path)
     save_json(raw_path, raw, indent=0)
+    # ADR-035 M3（Z2）: _raw_indices 指向这份落盘的 raw（下游按它回查置信度）。
+    raw_source = raw
     if drop_hallucinations:
         before = len(raw)
         raw = drop_hallucination_segments(
@@ -739,5 +772,8 @@ def apply_merge(
         merged = merge_short_cues(merged, max_dur=max_dur)
     if rejoin_leading:
         merged = rejoin_leading_orphans(merged, max_dur=max_dur)
+    # ADR-035 M3（Z2）: 合并视图标注回查指针——置信度按 _raw_indices 回查
+    # segments_raw.json，视图本身不携带、不聚合（合并前哪段可疑的线索不丢）。
+    merged = attach_raw_indices(merged, raw_source)
     save_json(segments_path, merged, indent=0)
     return segments_path

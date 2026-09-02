@@ -36,6 +36,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .artifacts import raw_sources
+
 _EPS = 1e-3
 
 # Verdicts.
@@ -194,6 +196,40 @@ def signal_a_state(
     }
 
 
+def signal_a_from_raw(
+    seg: dict[str, Any],
+    raw_segments: list[dict[str, Any]] | None,
+    *,
+    no_speech_thr: float = 0.6,
+    logprob_thr: float = -1.0,
+) -> dict[str, Any]:
+    """对合并视图段按 ``_raw_indices`` 回查 raw 源段的置信度（ADR-035 Z2）。
+
+    merge 白名单重建丢弃了视图段自身的置信度字段，信号 A 因此在合并后时间轴
+    上"失明"（G1/G3 休眠的根因）。Z2 之后视图段带 ``_raw_indices``，这里逐段
+    回查 raw。判定规则保守：**任一源段可疑 ⇒ 整段可疑**（宁可多查不可漏查），
+    reasons 带源段下标（``raw#2:high_no_speech_prob``）便于定位到具体源段。
+    """
+    reasons: list[str] = []
+    nsp: float | None = None
+    alp: float | None = None
+    for i, r in enumerate(raw_sources(seg, raw_segments)):
+        sub = signal_a_state(r, no_speech_thr=no_speech_thr,
+                             logprob_thr=logprob_thr)
+        if sub["suspect"]:
+            reasons.extend(f"raw#{i}:{x}" for x in sub["reasons"])
+        if nsp is None and sub["no_speech_prob"] is not None:
+            nsp = sub["no_speech_prob"]
+        if alp is None and sub["avg_logprob"] is not None:
+            alp = sub["avg_logprob"]
+    return {
+        "suspect": bool(reasons),
+        "reasons": reasons,
+        "no_speech_prob": nsp,
+        "avg_logprob": alp,
+    }
+
+
 # --------------------------------------------------------------------------- #
 # the review pass
 # --------------------------------------------------------------------------- #
@@ -207,6 +243,7 @@ def review_segments(
     min_energy_frac: float = 0.25,
     min_energy_abs: float = 0.25,
     min_sub: float = 1.0,
+    raw_segments: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Dual-signal review over a segment list. Pure (no I/O).
 
@@ -236,8 +273,15 @@ def review_segments(
         energetic = is_energetic(
             s, e, silences, min_frac=min_energy_frac, min_abs=min_energy_abs
         )
-        a = signal_a_state(seg, no_speech_thr=no_speech_thr,
-                           logprob_thr=logprob_thr)
+        # ADR-035 Z2: 合并视图段优先按 _raw_indices 回查 raw 置信度（信号 A 在
+        # 合并后时间轴复明）；无指针的段（恢复段等）用自身字段。
+        if raw_segments and seg.get("_raw_indices") is not None:
+            a = signal_a_from_raw(seg, raw_segments,
+                                  no_speech_thr=no_speech_thr,
+                                  logprob_thr=logprob_thr)
+        else:
+            a = signal_a_state(seg, no_speech_thr=no_speech_thr,
+                               logprob_thr=logprob_thr)
 
         if energetic and a["suspect"]:
             verdict = MISSING

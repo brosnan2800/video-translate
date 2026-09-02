@@ -27,6 +27,7 @@ from . import __version__
 from .config import DEFAULT_HF_CACHE, DEFAULT_PERSONA, resolve_config
 from .io_utils import load_json, save_json
 from .proxy import detect_proxy, setup_http_proxy
+from .artifacts import artifact_path
 from .audio_profile import analyze_audio, probe_volume_window
 from .ffmpeg_utils import probe_duration
 from .toolchain import init_toolchain, resolve_command_entry
@@ -359,11 +360,16 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                       f"vad_threshold={rec.vad_threshold}")
                 print(f"                  {rec.rationale}")
                 # 落盘快照: 供 cmd_run 复用 (避免重复画像) + 作为决策点依据。
+                # ADR-035 M2: 同时落盘原始声学事实（duration/静音区间/电平）——
+                # 这是 artifact "audio_profile" 的唯一生产点，transcribe/verify
+                # 读它不重算。
                 try:
                     from . import state as vt_state
 
                     vt_state.record_audio_profile(
                         _default_outdir(video), _default_base(video), rec)
+                    vt_state.record_acoustics(
+                        _default_outdir(video), _default_base(video), prof)
                 except Exception:  # noqa: BLE001
                     pass
             else:
@@ -624,6 +630,17 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
     _sep_on, _audio_src, _vsep_backend, _vsep_model, _vsep_ihash = _vocal_sep_step(
         args, cfg, input_path, outdir, base,
     )
+    # ADR-035 M2: T2 分离产物关联显式落盘（artifact "audio_source"），
+    # 下游 resegment / verify / fill_gaps 不再靠 separate_fingerprint 反推。
+    if _sep_on and _audio_src:
+        try:
+            from . import state as vt_state
+            vt_state.record_audio_source(
+                outdir, base, vocals_wav=_audio_src,
+                vsep_backend=_vsep_backend, vsep_model=_vsep_model,
+                vsep_input_hash=_vsep_ihash)
+        except Exception:  # noqa: BLE001 - state 是增强，永不阻断
+            pass
 
     try:
         from .transcribe import transcribe_video
@@ -644,20 +661,38 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
             align_backend=cfg.align,
             align_allow_degrade=getattr(args, "allow_degrade", False),
         )
-        segs_path = os.path.join(outdir, f"{base}.segments_en.json")
+        segs_path = artifact_path("segments", outdir, base)
         # ADR-012: compute the independent silence reference ONCE and share it
         # with both the hallucination filter (merge) and the gap audit.
         # Spec 19 Invariant #4: this reference ALWAYS consults the original
         # input_path (never a cleaned audio_source) — no change here.
+        # ADR-035 M2: silencedetect 全链只算一次（artifact "audio_profile"，
+        # 单一生产 = preflight）。读 state 落盘的声学事实；缺失（老目录/直调
+        # transcribe）才兜底重算并回写，绝不作为常规路径。空区间列表是
+        # "探测成功但全片无静音"的真实结果，不是缓存缺失。
         silences: list[tuple[float, float]] | None = None
         try:
-            prof = analyze_audio(input_path)
-            silences = prof.silence_intervals if prof.ok else None
-        except Exception:  # noqa: BLE001
+            from . import state as vt_state
+            ac = vt_state.get_acoustics(outdir, base)
+            if ac is not None and ac.get("silence_intervals") is not None:
+                silences = [tuple(iv) for iv in ac["silence_intervals"]]
+        except Exception:  # noqa: BLE001 - state 是增强，永不阻断
             silences = None
+        if silences is None:
+            try:
+                prof = analyze_audio(input_path)
+                silences = prof.silence_intervals if prof.ok else None
+                if prof is not None and prof.ok:
+                    try:
+                        from . import state as vt_state
+                        vt_state.record_acoustics(outdir, base, prof)
+                    except Exception:  # noqa: BLE001
+                        pass
+            except Exception:  # noqa: BLE001
+                silences = None
         if cfg.merge_enabled and not args.no_merge:
             from .merge import apply_merge
-            raw_path = os.path.join(outdir, f"{base}.segments_raw.json")
+            raw_path = artifact_path("segments_raw", outdir, base)
             apply_merge(
                 segs_path, raw_path=raw_path,
                 max_dur=cfg.merge_max_dur, max_gap=cfg.merge_max_gap,
@@ -670,8 +705,17 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
         # B: coverage self-audit + automatic gap recovery (skip with --no-audit)
         if not getattr(args, "no_audit", False):
             from .fill_gaps import fill_gaps
-            from .io_utils import load_json, save_json
+            from .io_utils import load_json, save_json, tee_progress
             segs = load_json(segs_path)
+            # ADR-035 M3（Z2）: review 按 _raw_indices 回查 raw 段置信度（G1
+            # 在合并后时间轴复明）。raw 缺失/损坏时降级为旧行为，不阻断。
+            raw_segs = None
+            try:
+                _rp = artifact_path("segments_raw", outdir, base)
+                if os.path.isfile(_rp):
+                    raw_segs = load_json(_rp)
+            except Exception:  # noqa: BLE001
+                raw_segs = None
             recovered = fill_gaps(
                 input_path, segs, lang=cfg.lang,
                 model_name=cfg.model,
@@ -686,6 +730,11 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                 # ADR-034 §5.2: independent cache layer, so a re-run only
                 # re-processes suspect windows instead of the whole video.
                 outdir=outdir, base=base,
+                # ADR-035 M3（Z2）: 信号 A 经 _raw_indices 回查 raw 源段。
+                raw_segments=raw_segs,
+                # ADR-035 可观测性: [audit] 审计行同时落盘 <base>.review.log
+                # （用户翻产物文件看结果，不依赖 stdout）。
+                progress=tee_progress(artifact_path("review_log", outdir, base)),
             )
             if recovered is not segs:
                 save_json(segs_path, recovered, indent=0)
@@ -928,6 +977,8 @@ def _resolve_routing(
             duration=prof.duration if prof else None,
         )
         vt_state.record_audio_profile(outdir, base, rec)
+        # ADR-035 M2: 兜底画像时同样落盘声学事实（此路径也是生产者之一）。
+        vt_state.record_acoustics(outdir, base, prof)
         prof_snap = rec.to_dict()
 
     # 2. 已落盘 routing (用户/Agent 决策点的产物)。
@@ -1639,21 +1690,52 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
     segments = load_json(segments_path)
 
+    # ADR-035 M3（Z2）: 低置信道按 _raw_indices 回查 raw 段置信度；缺失/损坏
+    # 时降级为旧行为（只查段自身字段），永不阻断。
+    raw_segs = None
+    try:
+        _rp = artifact_path("segments_raw", outdir, base)
+        if os.path.isfile(_rp):
+            raw_segs = load_json(_rp)
+    except Exception:  # noqa: BLE001
+        raw_segs = None
+
     # ---- Lane 1: acoustic -------------------------------------------------
     # 静默点 7: a profile failure is a RED lane — "couldn't check" must never
     # masquerade as "checked, all clear".
+    # ADR-035 M2: 声学事实读 preflight 落盘的 state（单一生产，全链只算一次）。
+    # 仅当探测参数与生产时一致才复用（noise/d 是 artifact 身份的一部分），
+    # 缺失或参数不一致才兜底重算（verify 是消费者，不回写 state）。
     silences: list[tuple[float, float]] = []
     prof_error: str | None = None
+    prof = None
+    ac_hit = False
     try:
-        prof = analyze_audio(video, noise=noise, d=d)
-    except Exception as exc:  # noqa: BLE001 - profile probe crashed
-        prof = None
-        prof_error = f"audio profile probe failed: {exc}"
+        from . import state as vt_state
+        ac = vt_state.get_acoustics(outdir, base)
+    except Exception:  # noqa: BLE001 - state 是增强，永不阻断
+        ac = None
+    if (ac is not None and ac.get("silence_intervals") is not None
+            and ac.get("noise") == noise and ac.get("d") == d):
+        from .audio_profile import AudioProfile
+        prof = AudioProfile(
+            mean_vol=ac.get("mean_db"), max_vol=ac.get("max_db"),
+            silence_intervals=[tuple(iv) for iv in ac["silence_intervals"]],
+            duration=ac.get("duration"), ok=True,
+        )
+        ac_hit = True
+    if prof is None:
+        try:
+            prof = analyze_audio(video, noise=noise, d=d)
+        except Exception as exc:  # noqa: BLE001 - profile probe crashed
+            prof = None
+            prof_error = f"audio profile probe failed: {exc}"
     if prof is not None:
         if prof.ok:
             silences = prof.silence_intervals
-            print(f"[verify:acoustic] {len(silences)} silence gap(s) from "
-                  f"silencedetect (independent reference)")
+            src = ("cached from preflight profile (ADR-035 单一生产)"
+                   if ac_hit else "silencedetect (independent reference)")
+            print(f"[verify:acoustic] {len(silences)} silence gap(s) from {src}")
         else:
             prof_error = ("audio profile unavailable (ffmpeg failed or no "
                           "usable signal)")
@@ -1670,7 +1752,8 @@ def cmd_verify(args: argparse.Namespace) -> int:
     # reference (kathy_meta_vlog: "We'll be right back." nsp=0.906 and the
     # "Is he" prefix riding on "busy." escaped every silence-based check).
     acoustic_issues = (acoustic_issues
-                       + find_low_confidence_segments(segments)
+                       + find_low_confidence_segments(segments,
+                                                      raw_segments=raw_segs)
                        + find_adjacent_overlaps(segments))
 
     # ADR-016 (T2b): uncovered-audio detection — audio present but no cue.

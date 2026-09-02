@@ -239,6 +239,7 @@ def find_low_confidence_segments(
     *,
     no_speech_thr: float = 0.6,
     logprob_thr: float = -1.0,
+    raw_segments: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Flag segments Whisper itself scored as non-speech / low confidence (D3).
 
@@ -247,21 +248,35 @@ def find_low_confidence_segments(
     the fallback). kathy_meta_vlog delivered "We'll be right back." (nsp=0.906)
     and "Wait." (nsp=0.851) because nothing downstream ever re-checked the
     stored confidence fields — this inspection closes that blind spot for BOTH
-    new and existing timelines. Segments without confidence fields (main-pass
-    segments after merge) are skipped.
+    new and existing timelines.
+
+    ADR-035 M3（Z2）: merge 白名单重建曾把主通路段的置信度字段剥掉，本道因此
+    在合并后时间轴上"失明"。现提供 ``raw_segments``（segments_raw.json 的段列
+    表）：带 ``_raw_indices`` 的视图段逐段回查源段置信度，任一源段可疑即报告
+    该 cue（hits 取首个可疑源段的值）。无指针/未提供 raw 的段按自身字段判定
+    （兼容恢复段等自带置信度的段）。
 
     Pure (no I/O). Returns issue dicts: ``{index, type, no_speech_prob?,
     avg_logprob?, start?, end?}``.
     """
+    from .artifacts import raw_sources
+
     issues: list[dict[str, Any]] = []
     for i, s in enumerate(segments):
         hits: dict[str, float] = {}
-        nsp = s.get("no_speech_prob")
-        if nsp is not None and float(nsp) >= no_speech_thr:
-            hits["no_speech_prob"] = float(nsp)
-        alp = s.get("avg_logprob")
-        if alp is not None and float(alp) < logprob_thr:
-            hits["avg_logprob"] = float(alp)
+        # Z2 回查优先：合并视图段的置信度在 raw 源段上；无指针回退自身字段。
+        cands = raw_sources(s, raw_segments) or [s]
+        for cand in cands:
+            cand_hits: dict[str, float] = {}
+            nsp = cand.get("no_speech_prob")
+            if nsp is not None and float(nsp) >= no_speech_thr:
+                cand_hits["no_speech_prob"] = float(nsp)
+            alp = cand.get("avg_logprob")
+            if alp is not None and float(alp) < logprob_thr:
+                cand_hits["avg_logprob"] = float(alp)
+            if cand_hits:
+                hits = cand_hits
+                break  # 首个可疑源段即报告（带其置信度值）
         if hits:
             issues.append({"index": i, "type": LOW_CONFIDENCE,
                            "start": s.get("start"), "end": s.get("end"), **hits})

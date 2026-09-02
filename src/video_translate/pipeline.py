@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import state as vt_state
+from .artifacts import artifact_path
 from .capabilities import GateFail, probe as _cap_probe
 from .pipeline_def import STAGES, stage
 
@@ -108,8 +109,9 @@ def build_ctx(outdir: str | Path, base: str,
         "outdir": str(root),
         "base": base,
         "video": video,
-        "segments": str(root / f"{base}.segments_en.json"),
-        "zh": str(root / f"{base}.zh_segments.json"),
+        # ADR-035 M1: 产物路径查契约表（与原字符串逐字一致，零行为变化）
+        "segments": artifact_path("segments", root, base),
+        "zh": artifact_path("zh", root, base),
         "srt": _find_srt(outdir, base),
     }
 

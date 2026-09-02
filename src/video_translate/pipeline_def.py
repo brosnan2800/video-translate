@@ -86,3 +86,8 @@ def stage(stage_id: str) -> dict[str, Any]:
 
 def stage_ids() -> tuple[str, ...]:
     return tuple(s["id"] for s in STAGES)
+
+
+# ADR-035 命名单一来源：阶段顺序即 STAGES 的 id 序。state.STAGE_ORDER 由此引用，
+# 不再维护第二份元组（此前两套 stage id 各自为政，属契约收编对象）。
+STAGE_ORDER: tuple[str, ...] = stage_ids()

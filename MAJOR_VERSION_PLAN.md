@@ -206,6 +206,44 @@ flowchart TD
 
 ---
 
+### T10 — 流水线数据契约总线（声明式 artifacts 表 + 五条铁律）【P0 · 地基】
+> **背景**：阶段间「参数丢失 / 重复重算 / 变换丢字段」已发生两起事故：① `duration`
+> 断线（[ADR-034](docs/adr/034-audio-routing-redesign.md) §1.2，analyze_audio 不
+> probe、_resolve_routing 不传 → 自动推荐永远 False）；② `merge` 合并段时新建 dict
+> 丢 `no_speech_prob/avg_logprob/compression_ratio` → review 的 G1/G3 在合并后时间轴
+> 拿不到信号 A 而休眠、verify 的 LOW_CONFIDENCE 道被削弱。根因是「JSON 文件即接口」
+> 无 schema、白名单式重建、下游补偿不修根、无跨阶段契约测试。本任务是 T8（编排）/
+> T9（音频路由）共同的数据层地基。
+
+**核心设计**（完整设计见 [ADR-035](docs/adr/035-pipeline-data-contract.md)）：
+1. **声明式 artifacts 契约表**：全部数据的命名/文件模板/字段/生产者/消费者/可否
+   重算/必须穿透字段（carry）登记一张纯数据表，命名/校验/定位唯一来源（沿用
+   `STAGES`/`CAPS` 的声明式 idiom）。
+2. **五条铁律**：单一生产 / copy-then-override / 命名单一来源 / 边界校验 /
+   state 永不做 gate。
+3. **Z2 非破坏段存储**：`segments_raw.json` 不可变；merge 产 `_raw_indices`
+   分组视图；置信度按索引回查 raw，不聚合不覆盖。
+4. **消灭重算**：silencedetect/duration 只在 preflight 算一次落盘 state（schema v2），
+   transcribe/verify 改读；audio_source（vocals.wav）显式记录。
+5. **编码规范收敛**：SDD + TDD 收进 `.codebuddy/rules/`
+   （harness）；`AGENTS.md` 保持翻译 Agent 协议定位不含编码规范。
+
+**涉及文件**：`src/video_translate/artifacts.py`（新）、`state.py`、`pipeline_def.py`、
+`pipeline.py`、`merge.py`、`fill_gaps.py`、`review.py`、`verify.py`、`translate.py`、
+`cli.py`、`audio_profile.py`、`vocal_sep.py`、`.codebuddy/rules/`、
+`AGENTS.md`、`docs/TRANSLATION-WORKFLOW.md`、`tests/test_pipeline_field_contract.py`（新）。
+
+**落地文档**：ADR-035（数据契约总线）。
+
+**验收标准**：
+- 契约表覆盖全部 8 类数据且命名唯一；silencedetect 全链只算一次；
+- merge 不再丢任何字段（契约测试 `test_pipeline_field_contract.py` 绿）；
+- G1 能在合并后时间轴拿到信号 A；
+- 全量 pytest 绿；golden 单轨 bare 本地确认不回归；
+- 文档同步（ADR-035 / T10 / T8/T9 引用 / TRANSLATION-WORKFLOW / harness / AGENTS.md）。
+
+---
+
 ### T8 — Pipeline 单一入口 + Agent 协议瘦身（控制平面收口）【P0】
 > **背景**：状态机流程已剥离为 `pipeline_def.STAGES`（纯数据）+ `pipeline.py`（引擎），
 > 但入口仍是 `run` / `generate` / `verify` 三个离散子命令，Agent 须按 AGENTS.md §3 的
@@ -235,7 +273,8 @@ flowchart TD
   `src/video_translate/config.py`（新增 `prompt` 配置项，默认 `always`）、
   `src/video_translate/pipeline.py`（引擎扩展「推进到下一挂起点」驱动）、
   `AGENTS.md`（§3 瘦身 + 退出码表 exit 6 语义扩展）、`docs/TRANSLATION-WORKFLOW.md`
-  （数据流改为 pipeline 入口，§2.1 / §5 决策点语义同步）、`tests/test_pipeline_advance.py`（新增）
+  （数据流改为 pipeline 入口，§2.1 / §5 决策点语义同步）、`tests/test_pipeline_advance.py`（新增）。
+  T10 落地后：产物定位/命名一律查 `artifacts.py` 契约表（`build_ctx` 改查表）。
 
 **落地文档**：ADR-033（控制平面收口）+ Spec 23（pipeline 行为契约）；TDD 先行。
 
@@ -271,6 +310,8 @@ flowchart TD
 
 **涉及文件**：`src/video_translate/audio_profile.py`、`transcribe.py`、`fill_gaps.py`、
 `vocal_sep.py`、`docs/adr/011/012/034`、`docs/TRANSLATION-WORKFLOW.md`、`tests/`。
+T10 落地后：声学数据（silence_intervals/duration）读 state 契约不重算；信号 A 经
+`_raw_indices` 回查 raw 段（[ADR-035](docs/adr/035-pipeline-data-contract.md)）。
 
 **三期计划**（详见 ADR-034 §6）：
 - **一期（止血）**：默认切 bare + recommend_vad 改 + 铁律5路由表同步 + duration 接线 + golden 单轨重跑。

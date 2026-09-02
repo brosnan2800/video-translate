@@ -71,3 +71,25 @@ def write_text(path: str, text: str) -> None:
         if os.path.exists(tmp):
             os.remove(tmp)
         raise
+
+
+def tee_progress(log_path: str):
+    """返回一个 progress 回调：stdout 打印 + 追加落盘（ADR-035 可观测性铁律）。
+
+    用户翻 ``videos/`` 下的产物文件看结果、不看终端——``[audit]`` / ``[contract]``
+    审计行必须同时落盘（如 ``<base>.review.log``）。落盘失败绝不阻断管道（仅打印）。
+    """
+    def _progress(msg: Any, *args: Any, **kwargs: Any) -> None:
+        try:
+            text = str(msg) % args if args else str(msg)
+        except Exception:  # noqa: BLE001 - 格式化失败按原样输出
+            text = str(msg)
+        print(text, flush=True)
+        try:
+            directory = os.path.dirname(os.path.abspath(log_path))
+            os.makedirs(directory, exist_ok=True)
+            with open(log_path, "a", encoding="utf-8") as fh:
+                fh.write(text.rstrip("\n") + "\n")
+        except Exception:  # noqa: BLE001 - 日志是增强，永不阻断
+            pass
+    return _progress

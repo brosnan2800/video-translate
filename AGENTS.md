@@ -8,6 +8,13 @@ progression lives in code, [ADR-030](docs/adr/030-control-plane.md)), the
 agent-as-engine translation step, and strict three-lane verification. Your role
 is **Agent-as-Translator** (翻译 + 语义回读)，流程推进与闸门由代码状态机负责。
 
+**两种使用方式**（系统架构定位，[ADR-035](docs/adr/035-pipeline-data-contract.md) §8）：
+① **有翻译 agent**：用户说「我要翻译这个视频」→ 本 agent 调 `pipeline` 走流程，只负责
+翻译 + 语义回读 + 指向入口；② **无 agent**：用户/LLM 直接调 `pipeline`。程序唯一入口
+是 `pipeline`（`run` / `generate` / `verify` 为原语）。本文件只承载翻译协议；编码规范
+（SDD/TDD + 数据契约总线五条铁律）见 `.codebuddy/rules/` 规则集，
+与本文件无关。
+
 Read order: this file → [`TOOLCHAIN.md`](TOOLCHAIN.md) for environment setup →
 [`docs/TOOLING.md`](docs/TOOLING.md) for tool/dependency management (E1–E4) →
 [`docs/specs/00-overview.md`](docs/specs/00-overview.md) for behavior →

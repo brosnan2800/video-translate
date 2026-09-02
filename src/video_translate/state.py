@@ -28,17 +28,14 @@ from typing import Any
 
 from .io_utils import load_json_default, save_json
 
-SCHEMA_VERSION = 1
+# ADR-035 命名单一来源：阶段顺序唯一定义在 pipeline_def.STAGES，这里只引用，
+# 不再维护第二份元组（此前两套 stage id 各自为政，属契约收编对象）。
+from .pipeline_def import STAGE_ORDER
 
-# The linear pipeline the control plane enforces. Extra stages (e.g. a future
-# OCR burn-in) extend this tuple; set_stage validates against it.
-STAGE_ORDER: tuple[str, ...] = (
-    "preflight",
-    "transcribe",
-    "translate",
-    "generate",
-    "verify",
-)
+# ADR-035 M2: schema v2 —— 顶层新增声学事实数据段 audio_profile（duration /
+# silence_intervals 等，preflight 单一生产、全链只算一次）与 audio_source
+# （vocals.wav 显式记录）。v1 文件由 load() 兼容迁移（仅升版本号，不丢内容）。
+SCHEMA_VERSION = 2
 
 
 def state_path(outdir: str | Path, base: str) -> Path:
@@ -82,9 +79,21 @@ def load(outdir: str | Path, base: str) -> dict[str, Any]:
     raw = load_json_default(str(path), None)
     if not isinstance(raw, dict):
         return {}
-    if raw.get("schema_version") != SCHEMA_VERSION:
-        return {}
-    return raw
+    return _migrate_schema(raw)
+
+
+def _migrate_schema(raw: dict[str, Any]) -> dict[str, Any]:
+    """旧 schema 兼容迁移（ADR-035 M2）：v1 仅升版本号（decisions/stages 原样
+    保留，ADR-031 D6 的决策不丢）；未知/未来 schema 当缺失（防漂移，走既有的
+    从产物重建路径）。"""
+    v = raw.get("schema_version")
+    if v == SCHEMA_VERSION:
+        return raw
+    if isinstance(v, int) and 1 <= v < SCHEMA_VERSION:
+        migrated = dict(raw)
+        migrated["schema_version"] = SCHEMA_VERSION
+        return migrated
+    return {}
 
 
 def save(outdir: str | Path, base: str, state: dict[str, Any]) -> str:
@@ -368,3 +377,87 @@ def record_routing(
 def get_routing(outdir: str | Path, base: str) -> dict[str, Any] | None:
     """Return the persisted routing decision, or None when never recorded."""
     return _decision_value(outdir, base, ROUTING_KEY)
+
+
+# ---------------------------------------------------------------------------
+# ADR-035 M2: 声学事实数据段（artifact id "audio_profile"，单一生产 = preflight）
+# ---------------------------------------------------------------------------
+# 与 decisions.audio_profile（ADR-032 的 P0 推荐决策）不同：这里是 analyze_audio
+# 的原始声学事实（duration / 静音区间 / 电平），全链只算一次落盘，transcribe /
+# verify 读它，禁止重算（artifacts.ARTIFACTS["audio_profile"].recompute = False）。
+
+AUDIO_DATA_KEY = "audio_profile"
+AUDIO_SOURCE_KEY = "audio_source"
+
+
+def record_acoustics(
+    outdir: str | Path,
+    base: str,
+    prof: Any,
+    *,
+    noise: str = "-30dB",
+    d: float = 0.3,
+) -> dict[str, Any] | None:
+    """把 analyze_audio 的声学事实落盘（生产者唯一入口）。
+
+    探测参数 ``noise`` / ``d`` 是 artifact 身份的一部分：消费者（verify）仅在
+    参数一致时复用，避免"用 -30dB 的缓存回应 -25dB 的提问"。probe 失败返回
+    None，不写 state。
+    """
+    if prof is None or not getattr(prof, "ok", False):
+        return None
+    from .audio_profile import _silence_fraction
+
+    duration = getattr(prof, "duration", None)
+    silences = [tuple(iv) for iv in (prof.silence_intervals or [])]
+    data: dict[str, Any] = {
+        "duration": duration,
+        "mean_db": prof.mean_vol,
+        "max_db": prof.max_vol,
+        "silence_fraction": (_silence_fraction(silences, duration)
+                             if duration else None),
+        "silence_intervals": silences,
+        "noise": noise,
+        "d": d,
+    }
+    st = ensure_state(outdir, base)
+    st[AUDIO_DATA_KEY] = data
+    save(outdir, base, st)
+    return data
+
+
+def get_acoustics(outdir: str | Path, base: str) -> dict[str, Any] | None:
+    """读取已落盘的声学事实；缺失/损坏返回 None（永不阻断，铁律⑤）。"""
+    data = load(outdir, base).get(AUDIO_DATA_KEY)
+    return data if isinstance(data, dict) else None
+
+
+def record_audio_source(
+    outdir: str | Path,
+    base: str,
+    *,
+    vocals_wav: str,
+    vsep_backend: str | None = None,
+    vsep_model: str | None = None,
+    vsep_input_hash: str | None = None,
+) -> dict[str, Any]:
+    """显式记录 T2 人声分离产物关联（artifact "audio_source"）。
+
+    此前下游靠 ``separate_fingerprint`` 反推 vocals.wav 归属，路径不在任何
+    状态里——现在显式落盘，resegment / verify / fill_gaps 直接读。
+    """
+    data: dict[str, Any] = {
+        "vocals_wav": vocals_wav,
+        "vsep_backend": vsep_backend,
+        "vsep_model": vsep_model,
+        "vsep_input_hash": vsep_input_hash,
+    }
+    st = ensure_state(outdir, base)
+    st[AUDIO_SOURCE_KEY] = data
+    save(outdir, base, st)
+    return data
+
+
+def get_audio_source(outdir: str | Path, base: str) -> dict[str, Any] | None:
+    data = load(outdir, base).get(AUDIO_SOURCE_KEY)
+    return data if isinstance(data, dict) else None

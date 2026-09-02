@@ -48,7 +48,7 @@ def test_save_load_roundtrip(tmp_path):
     assert loaded["decisions"]["align"]["resolved"] == "whisperx"
     assert loaded["decisions"]["separate_vocals"]["origin"] == "explicit"
     assert loaded["stages"]["transcribe"]["n_segments"] == 42
-    assert loaded["schema_version"] == 1
+    assert loaded["schema_version"] == 2
 
 
 def test_load_missing_returns_empty(tmp_path):
