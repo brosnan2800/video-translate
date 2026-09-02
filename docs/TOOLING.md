@@ -66,7 +66,7 @@ python -c "import torch; print(torch.__version__)"   # Win/Linux 应含 +cu124
 |---|---|---|
 | 下载函数 | `src/video_translate/toolchain.py` 的 `ensure_ffmpeg(dest="tools/ffmpeg")` | 按 `sys.platform` **先选平台再选源**：Win→gyan.dev release-full(zip)；Linux→静态构建(tar.xz)；macOS→evermeet/镜像(zip)。走 `proxy.detect_proxy` |
 | CLI 旗标 | `cli.py` 的 `setup` 子命令 `--ffmpeg` | 缺失时下载、解压至 `tools/ffmpeg/`，并把 `VT_FFMPEG_DIR` 写入 `.env.local`（gitignore，机器私有） |
-| doctor 提示 | ffmpeg `[MISS]` → 打印 `run: video-translate setup --ffmpeg` | Agent 看到即知跑哪条 |
+| doctor 提示 | ffmpeg/ffprobe `[MISS]` → 默认以 `EXIT_DOCTOR_FAIL(7)` 退出并打印 `run: video-translate setup --ffmpeg` | **硬依赖**：缺 ffmpeg/ffprobe 默认即闸（不依赖 `--strict`）；其余可选依赖（whisperx/demucs/nltk/proxy）仍仅 `--strict` 才拦 |
 | 探测收敛 | `TOOLCHAIN.md` §2.1 三步→两步：① 系统 PATH → ② `setup --ffmpeg` | 「全盘搜」已删除，仅作人工兜底不再写协议 |
 | 二进制不进 git | `tools/` 加入 `.gitignore` | 与 `models/` 同理 |
 

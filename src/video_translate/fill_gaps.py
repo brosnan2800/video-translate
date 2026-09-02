@@ -38,6 +38,8 @@ deduplicates against *every* existing segment, not just the immediate neighbours
 from __future__ import annotations
 
 import difflib
+import hashlib
+import json
 import os
 import re
 import statistics
@@ -45,6 +47,11 @@ import tempfile
 from typing import Any
 
 from .ffmpeg_utils import extract_chunk, probe_duration
+from .review import (
+    MISSING,
+    find_word_uncovered_subwindows,
+    review_segments,
+)
 from .transcribe import (
     BEAM_SIZE, BEST_OF, resolve_device,
     CONDITION_ON_PREVIOUS_TEXT, REPETITION_PENALTY,
@@ -317,6 +324,72 @@ def _cps(seg: dict[str, Any]) -> float:
 _EPS = 1e-3
 
 
+# --------------------------------------------------------------------------- #
+# ADR-034 §5.2 — independent review cache layer
+# --------------------------------------------------------------------------- #
+# review + G1/G2 results live in their OWN cache, keyed by a digest of the
+# timeline they were computed from. Exactly like the align pass, this cache
+# never enters ``transcribe_fingerprint``: toggling review must NOT invalidate
+# (or silently re-trigger) the bare transcription pass, and a re-run must only
+# re-process suspect windows instead of re-decoding the whole video.
+REVIEW_CACHE_SCHEMA = 1
+
+
+def review_cache_path(outdir: str, base: str) -> str:
+    """Path of the independent review cache for one video."""
+    return os.path.join(outdir, f"{base}.review.json")
+
+
+def review_digest(segments: list[dict[str, Any]]) -> str:
+    """Stable digest of the timeline the review ran on.
+
+    Any change to the segment list (re-transcription, merge tweak, resegment,
+    fill_gaps recovery) changes the digest, so a stale cache can never splice
+    recoveries onto a different timeline.
+    """
+    h = hashlib.sha1()
+    h.update(json.dumps(segments, sort_keys=True, default=str,
+                        ensure_ascii=False).encode("utf-8"))
+    return "sha1:" + h.hexdigest()
+
+
+def _load_review_cache(path: str, digest: str,
+                       params: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """Return the cached ``merged`` timeline, or None on any miss/mismatch."""
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            blob = json.load(fh)
+    except Exception:  # noqa: BLE001 - a corrupt cache is just a miss
+        return None
+    if not isinstance(blob, dict):
+        return None
+    if blob.get("schema") != REVIEW_CACHE_SCHEMA:
+        return None
+    if blob.get("segments_digest") != digest:
+        return None
+    if blob.get("params") != params:
+        return None
+    merged = blob.get("merged")
+    return merged if isinstance(merged, list) else None
+
+
+def _save_review_cache(path: str, digest: str, params: dict[str, Any],
+                       merged: list[dict[str, Any]]) -> None:
+    """Best-effort persistence. The cache is an optimisation — never fail the
+    pipeline (or change its exit code) because it could not be written."""
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"schema": REVIEW_CACHE_SCHEMA,
+                       "segments_digest": digest,
+                       "params": params,
+                       "merged": merged}, fh, ensure_ascii=False)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _hole_in_silence(gs: float, ge: float,
                      silences: list[tuple[float, float]]) -> bool:
     """True when a hole window lies entirely inside a detected silence interval.
@@ -342,6 +415,25 @@ def _profile_silences(input_path: str, noise: str, d: float) -> list[tuple[float
         return prof.silence_intervals if prof.ok else []
     except Exception:  # noqa: BLE001
         return []
+
+
+def _probe_silences_or_none(
+    input_path: str, noise: str, d: float,
+) -> list[tuple[float, float]] | None:
+    """silencedetect reference, or None when the probe could not run at all.
+
+    Distinct from ``_profile_silences`` (which collapses "probe failed" and
+    "no silence found" into the same ``[]``): the dual-signal review needs to
+    know whether signal B is genuinely AVAILABLE, because B is the main judge.
+    An empty-but-successful result means "no silence anywhere" (every window is
+    energetic) — the opposite of "we have no idea".
+    """
+    try:
+        from .audio_profile import analyze_audio
+        prof = analyze_audio(input_path, noise=noise, d=d)
+        return list(prof.silence_intervals) if prof.ok else None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def find_collapsed(
@@ -397,6 +489,21 @@ def fill_gaps(
     # (Spec 19 Invariant #4) — the acoustic-fact reference is always the
     # original unmodified audio, never the cleaned source.
     audio_source: str | None = None,
+    # ADR-034 §6.2 — post-transcribe dual-signal review + G1/G2 re-processing.
+    review: bool = True,
+    g1: bool = True,
+    g2: bool = True,
+    g1_min_sub: float = 1.0,
+    g2_min_dur: float = 1.5,
+    g2_max_windows: int = 20,
+    no_speech_thr: float = 0.6,
+    logprob_thr: float = -1.0,
+    min_energy_frac: float = 0.25,
+    min_energy_abs: float = 0.25,
+    # Independent cache layer (ADR-034 §5.2). When omitted the review still runs
+    # but nothing is persisted, so a re-run re-processes the suspect windows.
+    outdir: str | None = None,
+    base: str | None = None,
     progress=print,
 ) -> list[dict[str, Any]]:
     """Audit `segments` for dropped speech in `input_path` and recover it.
@@ -415,6 +522,29 @@ def fill_gaps(
     if not segments:
         return segments
 
+    # ADR-034 §5.2 — independent review cache. A re-run against an unchanged
+    # timeline reuses the previous verdicts instead of re-decoding suspect
+    # windows ("重跑只重处理可疑窗，不重跑全片").
+    cache_path = review_cache_path(outdir, base) if (outdir and base) else None
+    cache_digest = review_digest(segments) if cache_path else ""
+    cache_params: dict[str, Any] = {}
+    if cache_path:
+        cache_params = {
+            "review": review, "g1": g1, "g2": g2,
+            "g1_min_sub": g1_min_sub, "g2_min_dur": g2_min_dur,
+            "no_speech_thr": no_speech_thr, "logprob_thr": logprob_thr,
+            "min_energy_frac": min_energy_frac, "min_energy_abs": min_energy_abs,
+            "min_gap": min_gap, "collapse_min_dur": collapse_min_dur,
+            "collapse_ratio": collapse_ratio, "lang": lang,
+            "model": model_name,
+        }
+        cached = _load_review_cache(cache_path, cache_digest, cache_params)
+        if cached is not None:
+            progress(f"[audit] review cache hit — reusing {len(cached)} "
+                     f"segment(s), no re-decode "
+                     f"({os.path.basename(cache_path)})")
+            return cached
+
     threads = threads or os.cpu_count()
     total = probe_duration(input_path)
 
@@ -429,37 +559,81 @@ def fill_gaps(
     if total and float(segments[-1]["end"]) < total - min_gap:
         holes.append((float(segments[-1]["end"]), float(total)))
 
+    # Resolve the independent acoustic reference ONCE: the hole filter, the
+    # dual-signal review, G1 slicing and G2 sub-window detection all read the
+    # same silencedetect intervals (ADR-012 / Spec 19 Invariant #4). It is only
+    # probed when something actually needs it, so a clean timeline stays free.
+    review_on = review and (g1 or g2)
+    if silence_intervals is not None:
+        silences: list[tuple[float, float]] = list(silence_intervals)
+        silences_ready = True
+    elif holes or review_on:
+        probed = _probe_silences_or_none(input_path, silencedetect_noise,
+                                         silencedetect_d)
+        silences = probed if probed is not None else []
+        # B is the main judge, so it must be genuinely AVAILABLE. Note that an
+        # empty-but-successful probe means "no silence anywhere" (every window
+        # is energetic) — which must NOT be confused with "no reference", and is
+        # precisely the case where G2 has the most to recover.
+        silences_ready = probed is not None
+    else:
+        silences = []
+        silences_ready = False
+
     # 1a) ADR-012: drop holes that are *genuine* silence (detected silence
     # interval fully covers the hole). Force-decoding these is what resurrects
     # isolated hallucinations into the timeline — leave them as silence.
-    if holes:
-        silences = (
-            silence_intervals
-            if silence_intervals is not None
-            else _profile_silences(input_path, silencedetect_noise, silencedetect_d)
-        )
-        if silences:
-            kept: list[tuple[float, float]] = []
-            for (gs, ge) in holes:
-                if _hole_in_silence(gs, ge, silences):
-                    progress(f"[audit] hole {gs:.1f}->{ge:.1f}s: genuine silence "
-                             f"(silencedetect) — skipped, not force-decoded")
-                else:
-                    kept.append((gs, ge))
-            holes = kept
+    if holes and silences:
+        kept: list[tuple[float, float]] = []
+        for (gs, ge) in holes:
+            if _hole_in_silence(gs, ge, silences):
+                progress(f"[audit] hole {gs:.1f}->{ge:.1f}s: genuine silence "
+                         f"(silencedetect) — skipped, not force-decoded")
+            else:
+                kept.append((gs, ge))
+        holes = kept
 
     # 1b) collect in-segment collapses (continuous timeline, missing speech)
     collapsed = find_collapsed(
         segments, min_dur=collapse_min_dur, ratio=collapse_ratio
     )
 
-    if not holes and not collapsed:
-        progress(f"[audit] no holes >= {min_gap}s, no collapsed segments — "
-                 f"coverage complete ({len(segments)} segs)")
+    # 1c) ADR-034 §6.2 — dual-signal review + G2 detection. Both are pure, so
+    # they run here only to decide whether the (expensive) Whisper model has to
+    # be loaded at all. The authoritative detection re-runs after the
+    # hole/collapse phase, on the merged timeline (step 4), so every index
+    # refers to the list actually being mutated.
+    g1_count = 0
+    g2_count = 0
+    if review_on and silences_ready:
+        if g1:
+            g1_count = len([
+                s for s in review_segments(
+                    segments, silences,
+                    no_speech_thr=no_speech_thr, logprob_thr=logprob_thr,
+                    min_energy_frac=min_energy_frac,
+                    min_energy_abs=min_energy_abs, min_sub=g1_min_sub,
+                )
+                if s["verdict"] == MISSING and len(s.get("g1_windows", [])) >= 2
+            ])
+        if g2:
+            g2_count = sum(
+                len(find_word_uncovered_subwindows(seg, silences,
+                                                   min_dur=g2_min_dur))
+                for seg in segments
+            )
+
+    if not holes and not collapsed and not g1_count and not g2_count:
+        progress(f"[audit] no holes >= {min_gap}s, no collapsed segments, "
+                 f"no suspect windows — coverage complete "
+                 f"({len(segments)} segs)")
+        if cache_path:
+            _save_review_cache(cache_path, cache_digest, cache_params, segments)
         return segments
 
     progress(f"[audit] {len(holes)} hole(s) >= {min_gap}s + "
-             f"{len(collapsed)} collapsed segment(s) to probe")
+             f"{len(collapsed)} collapsed segment(s) + "
+             f"{g1_count} G1 + {g2_count} G2 suspect window(s) to probe")
 
     # 2) force-decode each suspect window, drop echoes, splice real speech back
     os.environ.setdefault("HF_HUB_OFFLINE", "1")
@@ -628,8 +802,161 @@ def fill_gaps(
             progress(f"[audit] collapse {gs:.1f}->{ge:.1f}s: no extra speech — "
                      f"kept original")
 
+    # ------------------------------------------------------------------ #
+    # ADR-034 §6.2 — G1 / G2 re-processing.
+    # Nested so they close over the already-loaded Whisper model, the probe
+    # helpers and the single silencedetect reference.
+    # ------------------------------------------------------------------ #
+    def _merge_words_into(seg: dict[str, Any],
+                          recovered: list[dict[str, Any]]) -> int:
+        """Merge recovered WORDS back into `seg` (in place). Returns count added.
+
+        G2 splices words, not whole cues: the recovered window sits INSIDE the
+        parent's own span, so adding it as a sibling cue would produce an
+        overlapping timeline and a duplicated subtitle. Merging the word stream
+        keeps the timeline monotonic while restoring the lost speech — exactly
+        ADR-034 §3.3's "拿补回 words".
+        """
+        if not seg.get("words"):
+            return 0
+        words = list(seg["words"])
+        added = 0
+        for r in recovered:
+            for w in (r.get("words") or []):
+                words.append(w)
+                added += 1
+        if not added:
+            return 0
+        words.sort(key=lambda w: (float(w.get("start") or 0.0),
+                                  float(w.get("end") or 0.0)))
+        for w in words:
+            w["start"] = round(float(w.get("start") or 0.0), 2)
+            w["end"] = round(float(w.get("end") or 0.0), 2)
+        seg["words"] = words
+        # Rebuild text from the (now complete) word stream: faster-whisper words
+        # carry their own leading whitespace, so a plain concat stays faithful to
+        # the model's own tokenisation.
+        rebuilt = "".join(str(w.get("word") or "") for w in words).strip()
+        if rebuilt:
+            seg["text"] = rebuilt
+        cur_s = float(seg.get("start") or words[0]["start"])
+        cur_e = float(seg.get("end") or words[-1]["end"])
+        seg["start"] = round(min(cur_s, float(words[0]["start"])), 2)
+        seg["end"] = round(max(cur_e, float(words[-1]["end"])), 2)
+        # ADR-031 D2 spirit: make the amendment visible to verify / reread.
+        seg["_g2_recovered"] = True
+        return added
+
+    def _apply_g1() -> int:
+        """G1 — re-decode the silence-sliced sub-windows of suspect segments.
+
+        ADR-034 §3.2: speech glued to laughter/noise only decodes correctly once
+        the silence gap between them is used as a cut point. Requires >= 2
+        slices — with no silence inside, G1 cannot cut and the window falls
+        through to G2/G3.
+        """
+        fixes = 0
+        suspects = [
+            s for s in review_segments(
+                merged, silences,
+                no_speech_thr=no_speech_thr, logprob_thr=logprob_thr,
+                min_energy_frac=min_energy_frac, min_energy_abs=min_energy_abs,
+                min_sub=g1_min_sub,
+            )
+            if s["verdict"] == MISSING and len(s.get("g1_windows", [])) >= 2
+        ]
+        if not suspects:
+            return 0
+        drop_idx: set[int] = set()
+        news: list[dict[str, Any]] = []
+        for rec in suspects:
+            idx = rec["index"]
+            if idx in drop_idx:
+                continue
+            pool = [s for j, s in enumerate(merged) if j != idx]
+            recovered: list[dict[str, Any]] = []
+            for (a, b) in rec["g1_windows"]:
+                # check_overlap=False: every slice sits INSIDE the suspect's own
+                # span, so the guard's overlap signal (A) would always fire.
+                # B (rate), C (confidence) and D (zero-duration words) still apply.
+                recovered.extend(
+                    _decode_once(a, b, _PROBE_PADS[0], pool,
+                                 check_overlap=False)
+                )
+            if not recovered:
+                continue
+            recovered = _dedupe_seams(recovered)
+            orig_len = len(rec["text"])
+            new_len = sum(len(r["text"]) for r in recovered)
+            if len(recovered) >= 2 or new_len > orig_len * 1.6:
+                drop_idx.add(idx)
+                news.extend(recovered)
+                fixes += 1
+                progress(f"[audit] G1 {rec['start']:.1f}->{rec['end']:.1f}s: "
+                         f"{len(rec['g1_windows'])} slice(s) -> "
+                         f"{len(recovered)} seg(s), "
+                         f"{orig_len} -> {new_len} chars")
+        if not news:
+            return 0
+        for i in sorted(drop_idx, reverse=True):
+            del merged[i]
+        merged.extend(news)
+        return fixes
+
+    def _apply_g2() -> int:
+        """G2 — recover speech inside segments whose words leave energy gaps.
+
+        ADR-034 §3.3: the timeline is continuous, so a segment-gap scan sees
+        nothing wrong even when most of a segment's speech was collapsed away.
+        We re-decode the energetic, word-uncovered sub-window and merge the
+        recovered words back into the parent.
+        """
+        targets: list[tuple[int, tuple[float, float]]] = []
+        for i, seg in enumerate(merged):
+            for w in find_word_uncovered_subwindows(seg, silences,
+                                                    min_dur=g2_min_dur):
+                targets.append((i, w))
+        if not targets:
+            return 0
+        if len(targets) > g2_max_windows:
+            progress(f"[audit] G2: {len(targets)} suspect sub-window(s) found; "
+                     f"budget {g2_max_windows} — keeping the widest")
+            targets.sort(key=lambda t: (t[1][1] - t[1][0]), reverse=True)
+            targets = targets[:g2_max_windows]
+        targets.sort()  # deterministic: by segment index, then window start
+        fixes = 0
+        for (idx, (a, b)) in targets:
+            seg = merged[idx]
+            pool = [s for j, s in enumerate(merged) if j != idx]
+            # check_overlap=False: the sub-window lies inside the parent's own
+            # span by construction; B/C/D guard signals still apply.
+            recovered = _decode_once(a, b, _PROBE_PADS[0], pool,
+                                     check_overlap=False)
+            if not recovered:
+                continue
+            added = _merge_words_into(seg, recovered)
+            if not added:
+                continue
+            fixes += 1
+            progress(f"[audit] G2 seg#{idx} {a:.1f}->{b:.1f}s: "
+                     f"+{added} word(s) merged back")
+        return fixes
+
     merged = [s for i, s in enumerate(segments) if i not in drop] + inserts
     merged.sort(key=lambda x: float(x["start"]))
-    progress(f"[audit] +{len(inserts)} recovered / -{len(drop)} collapsed -> "
-             f"{len(merged)} total")
+
+    # 4) G1 then G2, on the merged timeline (indices are valid HERE).
+    g1_fixes = g2_fixes = 0
+    if review_on and silences_ready:
+        if g1:
+            g1_fixes = _apply_g1()
+        if g2:
+            g2_fixes = _apply_g2()
+        if g1_fixes or g2_fixes:
+            merged.sort(key=lambda x: float(x["start"]))
+
+    progress(f"[audit] +{len(inserts)} recovered / -{len(drop)} collapsed "
+             f"+{g1_fixes} G1 +{g2_fixes} G2 -> {len(merged)} total")
+    if cache_path:
+        _save_review_cache(cache_path, cache_digest, cache_params, merged)
     return merged

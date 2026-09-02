@@ -347,7 +347,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             from .audio_profile import analyze_audio, profile_recommendation
             prof = analyze_audio(video)
             if prof.ok:
-                rec = profile_recommendation(prof, default_style=cfg.style or "film")
+                rec = profile_recommendation(
+                    prof, default_style=cfg.style or "film",
+                    duration=prof.duration,
+                )
                 print(f"\n  audio profile : mean={prof.mean_vol} dB, max={prof.max_vol} dB, "
                       f"{len(prof.silence_intervals)} silence gap(s)")
                 print(f"  recommendation: style={rec.style} vad={rec.vad} "
@@ -391,6 +394,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print("\n  [FIX] large-v3 model missing. Run:")
         print("        make setup     # or: video-translate setup")
 
+    # ffmpeg/ffprobe 是核心流水线的硬依赖：转写缺它无法 extract_chunk 抽轨 /
+    # probe_duration 取时长，缺失即必崩。故 ffmpeg/ffprobe 缺失默认硬失败
+    # (exit 7)，不再仅依赖 --strict —— 避免 "doctor 全绿却 run 一转写就崩" 的误导。
+    # 其余可选依赖 (whisperx/demucs/nltk/proxy) 保持宽松，仅 --strict 才拦。
+    if ffmpeg_missing:
+        print("\n  [GATE] ffmpeg/ffprobe is a hard dependency of the core "
+              "pipeline; doctor fails by default (run `setup --ffmpeg`).")
+        return EXIT_DOCTOR_FAIL
     if strict and failed:
         return EXIT_DOCTOR_FAIL
     return EXIT_OK
@@ -670,6 +681,11 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                 # T2 / Spec 19 §(B): recovery decodes from the SAME source as
                 # the main pass — either vocals.wav (if used) or original video.
                 audio_source=_audio_src,
+                # ADR-034 §6.2: dual-signal review + G1/G2 re-processing.
+                review=not getattr(args, "no_review", False),
+                # ADR-034 §5.2: independent cache layer, so a re-run only
+                # re-processes suspect windows instead of the whole video.
+                outdir=outdir, base=base,
             )
             if recovered is not segs:
                 save_json(segs_path, recovered, indent=0)
@@ -907,7 +923,10 @@ def _resolve_routing(
             prof = analyze_audio(input_path)
         except Exception:  # noqa: BLE001
             prof = None
-        rec = profile_recommendation(prof, default_style=getattr(cfg, "style", None) or "film")
+        rec = profile_recommendation(
+            prof, default_style=getattr(cfg, "style", None) or "film",
+            duration=prof.duration if prof else None,
+        )
         vt_state.record_audio_profile(outdir, base, rec)
         prof_snap = rec.to_dict()
 
@@ -1111,6 +1130,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             vad=getattr(args, "vad", False),
             adaptive_vad=getattr(args, "adaptive_vad", False),
             no_audit=getattr(args, "no_audit", False),
+            no_review=getattr(args, "no_review", False),
             no_drift_snap=getattr(args, "no_drift_snap", False),
             device=cfg.device, compute_type=cfg.compute_type,
             # T2 / ADR-017: forward the vocal-separation flags verbatim
@@ -1869,6 +1889,9 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--no-audit", action="store_true",
                    help="skip the coverage self-audit + gap recovery step after "
                         "transcription (audit runs by default)")
+    t.add_argument("--no-review", action="store_true",
+                   help="(ADR-034 §6.2) skip the post-transcribe dual-signal "
+                        "review + G1/G2 re-processing (review runs by default)")
     t.add_argument("--align", choices=["auto", "none", "whisperx"], default=None,
                    help="(T4 / ADR-028 / Spec 22) forced-acoustic word alignment "
                         "backend. 'auto' (default) = WhisperX wav2vec2 word-level "
@@ -1985,6 +2008,9 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--no-audit", action="store_true",
                    help="skip the coverage self-audit + gap recovery step after "
                         "transcription (audit runs by default)")
+    r.add_argument("--no-review", action="store_true",
+                   help="(ADR-034 §6.2) skip the post-transcribe dual-signal "
+                        "review + G1/G2 re-processing (review runs by default)")
     r.add_argument("--align", choices=["auto", "none", "whisperx"], default=None,
                    help="(T4 / ADR-028 / Spec 22) forced-acoustic word alignment "
                         "backend. See 'transcribe --align'. 'auto' (default) runs "

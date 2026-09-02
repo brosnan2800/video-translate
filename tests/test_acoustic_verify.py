@@ -41,15 +41,21 @@ def test_parse_silencedetect_trailing_start_closes_at_duration():
 
 
 def test_recommend_vad_low_level():
+    # ADR-034 (S2): recommend_vad is advisory only — low level no longer returns
+    # a tuned-VAD flag; the pipeline defaults to bare (no_speech=0.0 keeps quiet
+    # speech) and quiet-speech recovery is handled by the review loop (二期/三期).
     prof = AudioProfile(mean_vol=-25.0, max_vol=-6.0, ok=True)
     flag, _ = recommend_vad(prof)
-    assert flag == "--vad --vad-threshold 0.1"
+    assert flag == "bare"
 
 
 def test_recommend_vad_clean():
+    # ADR-034 (S2): clean level no longer returns a global "--vad" anchor — global
+    # VAD silently ejects laughter/cheer-masked speech (5:52 miss), worse than the
+    # bounded drift it prevents (E1: < 0.3s).
     prof = AudioProfile(mean_vol=-16.0, max_vol=0.0, ok=True)
     flag, _ = recommend_vad(prof)
-    assert flag == "--vad"
+    assert flag == "bare"
 
 
 def test_recommend_vad_unavailable():

@@ -36,3 +36,16 @@
   `--no-vad` 写法已纠正为 `--vad`（见 [Spec 16](../specs/16-fill-gaps.md) 备注）。
 - 已知限制：耳语段（声学不像语音）VAD 全切、loudnorm 也无效，必须关 VAD 裸跑，
   whisper 可能误识，需按语境 / 原文台词纠正（见 AGENTS.md V7 章节）。
+
+## 更新（ADR-034 S2，2026-09-02）
+
+`recommend_vad` 改为**纯参考、不再驱动路由**：对 ok 画像（低电平 / 正常电平）一律返回
+`bare`，不再返回 `--vad` / `--vad --vad-threshold 0.1`；`profile_recommendation` 同步不再
+推动 `vad` / `adaptive_vad` / `separate_vocals`。
+
+理由（ADR-034 §1）：全局 `--vad` 会把「笑声 + 真音」连成一段 speech segment，Silero VAD
+把笑声当 segment 从而 **ejecting the masked speech**（5:52 漏音根因）；且 E1 验证（IF.mp4
+vad vs bare）证明干净视频裸跑漂移可控（word 级几乎一致、段边界 < 0.3s），「锚静音」收益
+不足以抵消该损失。画像降级为参考信息后，掩码真音改由转写后双信号 review + G1/G2/G3
+梯度重处理救回（二期/三期）。VAD 选开（默认关）这一核心决策不变——用户仍可显式传
+`--vad`。

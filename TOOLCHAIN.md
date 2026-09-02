@@ -122,7 +122,7 @@ CLI 参数 / 系统运行时 os.environ  >  .env.local (本地私有)  >  .env.<
 - **探测顺序**（两步，无"全盘搜"自由发挥）：
   1. **系统 PATH**：`ffmpeg -version` 可直接运行即用。
   2. **`VT_FFMPEG_DIR` 配置**：否则读取 `.env` / `.env.<platform>` / `.env.local` 中的 `VT_FFMPEG_DIR`，程序自动注入运行时 PATH。该变量可由 `setup --ffmpeg` 自动写入 `.env.local`。
-- 两步皆无 → 判为缺失，`doctor` 打印 `[FIX] uv run video-translate setup --ffmpeg`，**禁止** Agent 自行全盘搜索或散落安装。
+- 两步皆无 → 判为缺失，`doctor` 默认以 `EXIT_DOCTOR_FAIL(7)` 退出并打印 `[FIX] uv run video-translate setup --ffmpeg`，**禁止** Agent 自行全盘搜索或散落安装（ffmpeg/ffprobe 是核心流水线硬依赖，缺之转写必崩，故默认即闸，不依赖 `--strict`）。
 
 ### 2.2 CUDA 运行时库（GPU 推理加速）
 - **作用**：faster-whisper 基于 CTranslate2 后端，在 NVIDIA GPU 下可实现 5-10x 实时加速。
@@ -279,7 +279,7 @@ uv run video-translate verify --segments videos/example.segments_en.json --zh vi
 - AGENTS.md §1 Preflight 的 `.venv/bin/video-translate` 是 Linux/macOS 写法；
   Windows 下等价调用为 `uv run video-translate`（由 `uv` 定位项目 `.venv`）。
 - `doctor` 会报告 ffmpeg/ffprobe、HF 模型缓存、依赖、音频画像与 VAD 路由建议，
-  开工前必须先跑（AGENTS.md 铁律）。
+  开工前必须先跑（AGENTS.md 铁律）。ffmpeg/ffprobe 缺失时 `doctor` 默认 `EXIT_DOCTOR_FAIL(7)` 退出（硬依赖，缺之转写必崩）；其余项默认仅打印 `[MISS]`，`--strict` 才把所有 `[MISS]` 升格为失败。
 - 模型（large-v3）**默认落项目根 `models/large-v3/`**（零 C 盘，见 §6 规范）；
   仅当项目根缺失且未设 `HF_HOME` 时才回退 `~\.cache\huggingface`（见 §2.3）。
 

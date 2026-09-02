@@ -84,7 +84,7 @@ full architectural rationale.
 > ```bash
 > cd <repo>                       # 先进入项目根
 > uv run video-translate setup    # 一键装齐：uv sync 依赖 + 预拉 large-v3 模型（约 3GB）
-> uv run video-translate doctor   # 校验：命令入口 entry / FFmpeg / CUDA·CPU / 模型缓存 全绿才继续
+> uv run video-translate doctor   # 校验：FFmpeg/ffprobe 缺失默认 exit 7（硬依赖）；CUDA/模型等其余项 --strict 才拦，全绿才继续
 > ```
 > 未装 uv 时先按官方 installer 安装（Windows `irm https://astral.sh/uv/install.ps1 | iex`；macOS/Linux `curl -LsSf https://astral.sh/uv/install.sh | sh`），见 [TOOLCHAIN.md](TOOLCHAIN.md) §1.3。模型 `[MISS]` → 重跑 `setup` 预拉；FFmpeg / ffprobe `[MISS]` → `uv run video-translate setup --ffmpeg` 自动下载便携版。**不要**手动到处下载、改 `.env` 假设模型配置、或全盘搜（E2 已消灭「全盘搜」）。
 
@@ -183,7 +183,7 @@ uv run video-translate verify \
 | 4 | `EXIT_PROXY` | 代理不可用 | 查代理配置（[TOOLCHAIN.md](TOOLCHAIN.md)） |
 | 5 | `EXIT_KILLED` | 进程被杀（OOM/手动终止） | 断点缓存仍在，直接重跑 |
 | 6 | `EXIT_AWAITING_AGENT` | **停点 A**：转写完成，等翻译 | 进 Phase 2 翻译；**正常停点，勿重试 run** |
-| 7 | `EXIT_DOCTOR_FAIL` | doctor 自检不过 | 按 doctor 输出修环境 |
+| 7 | `EXIT_DOCTOR_FAIL` | doctor 自检不过（**默认 ffmpeg/ffprobe 缺失即触发**；`--strict` 下其余依赖项也拦） | 按 doctor 输出修环境（ffmpeg 缺失 → `setup --ffmpeg`） |
 | 8 | `EXIT_GATE_FAIL` | **闸门拦截**（意图闸 / generate 前置 / verify strict） | 读修复指引；确需降级才显式传逃生门 |
 
 **`status --json` 示例**（字段稳定，机器可解析）：

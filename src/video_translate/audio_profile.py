@@ -17,7 +17,7 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any
 
-from .ffmpeg_utils import _resolve_binary, build_audio_profile_cmd
+from .ffmpeg_utils import _resolve_binary, build_audio_profile_cmd, probe_duration
 
 # VAD routing thresholds (ADR-011 / V7 operating truth).
 LOW_MEAN_DB = -20.0
@@ -116,12 +116,20 @@ def parse_silencedetect(stderr: str, duration: float | None = None) -> list[tupl
 
 
 def recommend_vad(profile: AudioProfile) -> tuple[str, str]:
-    """Recommend a VAD setting from the audio profile (ADR-011 / ADR-012).
+    """Advisory VAD suggestion from the audio profile (ADR-011 / ADR-012 / **ADR-034**).
 
-    Returns (flag, rationale):
-      - ("--vad", ...)               clean studio / recitation -> anchor to silence
-      - ("--vad --vad-threshold 0.1", ...)  low level -> normalize first, tuned VAD
-      - ("bare", ...)                music-heavy / low-SNR / whisper -> default off
+    **ADR-034 (S2): this is advisory ONLY — it no longer drives routing.** The
+    pipeline defaults to bare for every video, because a global ``--vad``
+    *silently ejects speech that sits under laughter / cheering / BGM* (the
+    5:52 miss; ADR-015 §Context documents the failure mode but only mitigated
+    it down to a 240s-chunk granularity). E1 verification on ``IF.mp4``
+    (vad vs bare) showed drift is bounded — word-level timestamps are
+    near-identical and every segment boundary drifted < 0.3s — so the
+    "anchor to silence" benefit does not justify that loss.
+
+    Still returns ``(flag, rationale)`` so ``doctor`` can print the geometry for
+    a human, but callers must NOT feed the flag into routing — see
+    :func:`profile_recommendation`, which now hard-codes ``vad=False``.
     """
     if not profile.ok:
         return ("bare", "audio profile unavailable; default bare run (VAD off) is safest")
@@ -129,15 +137,19 @@ def recommend_vad(profile: AudioProfile) -> tuple[str, str]:
     low = (mean is not None and mean < LOW_MEAN_DB) or (maxv is not None and maxv < LOW_MAX_DB)
     if low:
         return (
-            "--vad --vad-threshold 0.1",
-            f"low level (mean={mean}, max={maxv} dB) -> loudnorm first, then tuned VAD",
+            "bare",
+            f"low level (mean={mean}, max={maxv} dB); ADR-034 default bare — "
+            f"no_speech=0.0 already keeps quiet speech; loudnorm / tuned VAD is "
+            f"advisory only (not applied)",
         )
-    # Normal level. Distingushing music-heavy (level reads normal but VAD drops
-    # speech) from clean studio needs spectral analysis we don't do here; the
-    # safe default for a normal-level clip is clean-studio VAD (anchors segment
-    # boundaries to real silence, kills drift). Agent may override to bare for
-    # known music-heavy content.
-    return ("--vad", f"clean level (mean={mean}, max={maxv} dB) -> VAD anchors to silence")
+    # Normal level. ADR-034: do NOT return VAD — global VAD ejects
+    # laughter-masked speech, which is strictly worse than the drift it prevents
+    # (proven by E1: drift < 0.3s, i.e. bounded).
+    return (
+        "bare",
+        f"clean level (mean={mean}, max={maxv} dB); ADR-034 default bare — VAD "
+        f"anchoring is advisory only (global VAD ejects laughter-masked speech)",
+    )
 
 
 # A chunk whose silence coverage meets/exceeds this fraction is treated as
@@ -201,10 +213,27 @@ def analyze_audio(video_path: str, noise: str = "-30dB", d: float = 0.3) -> Audi
         return AudioProfile(ok=False)
     stderr = proc.stderr
     mean, maxv = parse_volumedetect(stderr)
-    # Best-effort duration from ffprobe-style line is not emitted by this pass;
-    # leave duration None. Callers that need it can probe separately.
     silences = parse_silencedetect(stderr, duration=None)
-    return AudioProfile(mean_vol=mean, max_vol=maxv, silence_intervals=silences, ok=True)
+    # ADR-034 (S2 / 一期): also probe media duration so G3 pre-screening and the
+    # doctor print-out have a complete profile. Best-effort — a probe failure
+    # leaves ``duration=None`` rather than failing the whole profile pass
+    # (analyze_audio never raises for ffmpeg-side failures).
+    duration = _probe_duration_best_effort(video_path)
+    return AudioProfile(mean_vol=mean, max_vol=maxv,
+                        silence_intervals=silences, duration=duration, ok=True)
+
+
+def _probe_duration_best_effort(video_path: str) -> float | None:
+    """Probe media duration, returning ``None`` instead of raising (ADR-034 一期).
+
+    ``analyze_audio`` must never raise for ffmpeg-side failures, so a missing or
+    failing ``ffprobe`` yields ``None`` (callers treat ``duration=None`` as
+    "unknown geometry", exactly as before the wiring).
+    """
+    try:
+        return probe_duration(video_path)
+    except Exception:  # noqa: BLE001 - advisory only; never a gate
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -297,35 +326,37 @@ def profile_recommendation(
                        "bare run is safest (VAD off)"),
         )
 
-    flag, rationale = recommend_vad(prof)
-    wants_vad = flag.startswith("--vad")
-    # The low-level branch of `recommend_vad` asks for a relaxed threshold.
-    vad_threshold = 0.1 if "vad-threshold 0.1" in flag else None
+    # ADR-034 (S2 / 一期): the audio profile is now *advisory reference only* —
+    # it no longer drives routing. Every video defaults to a bare run
+    # (use_vad=False, no_speech=0.0) so a global ``--vad`` can never silently
+    # eject speech sitting under laughter / cheer / BGM (the 5:52 miss;
+    # ADR-015 §Context documents the failure mode). We still compute the silence
+    # geometry for the doctor print-out and G3 pre-screening, but no routing flag
+    # is switched on here; gradient recovery (G1/G2/G3) is driven by the
+    # post-transcribe review (二期/三期), not by this gate.
+    _, rationale = recommend_vad(prof)
 
     sf = _silence_fraction(prof.silence_intervals, duration) if duration else None
     continuous = sf is not None and sf < CLEAN_SILENCE_FRACTION
 
-    # ADR-015: clean-but-continuous audio means speech sits under laughter /
-    # cheer / BGM — route per chunk instead of forcing one global VAD choice.
-    adaptive_vad = wants_vad and continuous
-    vad = wants_vad and not adaptive_vad
-
-    # ADR-017: continuous (high-density) audio is where Demucs actually pays off.
-    separate_vocals = continuous and demucs_available
+    vad = False
+    adaptive_vad = False
+    separate_vocals = False
+    vad_threshold = None
 
     parts = [rationale]
     if sf is not None:
         parts.append(f"silence fraction {sf:.2f}")
         if continuous:
             detail = (f"continuous noise (< {CLEAN_SILENCE_FRACTION}) -> "
-                      f"per-chunk adaptive routing")
+                      f"advisory only (recovery via G3 review, 二期/三期)")
             if demucs_available:
-                detail += " + vocal separation"
+                detail += " (demucs available for G3)"
             parts.append(detail)
     else:
         parts.append("duration unknown -> continuous-noise detection skipped")
     if continuous and not demucs_available:
-        parts.append("demucs not installed, vocal separation unavailable")
+        parts.append("demucs not installed; G3 vocal separation unavailable")
 
     return AudioProfileRecommendation(
         style=default_style,

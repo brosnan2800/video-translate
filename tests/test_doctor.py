@@ -44,3 +44,41 @@ def test_doctor_strict_unreachable_returns_7(monkeypatch, capsys):
     assert rc == cli.EXIT_DOCTOR_FAIL
     out = capsys.readouterr().out
     assert "MISS" in out  # the Google endpoint line prints MISS
+
+
+def _has_for(ffmpeg_present: bool):
+    """_has() that reports ffmpeg/ffprobe per `ffmpeg_present`, everything else OK."""
+    def _has(binary: str) -> bool:
+        if binary in ("ffmpeg", "ffprobe"):
+            return ffmpeg_present
+        return True
+    return _has
+
+
+def test_doctor_ffmpeg_missing_default_returns_7(monkeypatch, capsys):
+    """ffmpeg/ffprobe is a hard dep of the core pipeline: missing by default
+    hard-fails (exit 7) WITHOUT --strict, even when all optional deps are fine."""
+    _patch_all(monkeypatch, reachable=True)  # Google/optional deps OK
+    monkeypatch.setattr(cli, "_has", _has_for(False))
+    rc = cli.cmd_doctor(_args())
+    assert rc == cli.EXIT_DOCTOR_FAIL
+    out = capsys.readouterr().out
+    assert "GATE" in out
+    assert "setup --ffmpeg" in out  # deterministic fix still surfaced
+
+
+def test_doctor_ffprobe_missing_default_returns_7(monkeypatch, capsys):
+    """ffprobe alone missing is also a hard-fail (both binaries are hard deps)."""
+    _patch_all(monkeypatch, reachable=True)
+    monkeypatch.setattr(cli, "_has", lambda b: b != "ffprobe")
+    assert cli.cmd_doctor(_args()) == cli.EXIT_DOCTOR_FAIL
+
+
+def test_doctor_ffmpeg_present_optional_dep_missing_still_ok(monkeypatch, capsys):
+    """With ffmpeg present, an optional-dep MISS (Google unreachable) stays exit 0
+    by default — only --strict would gate it. Confirms the new hard gate scopes to
+    ffmpeg/ffprobe only, not optional deps."""
+    _patch_all(monkeypatch, reachable=False)
+    monkeypatch.setattr(cli, "_has", _has_for(True))
+    assert cli.cmd_doctor(_args()) == cli.EXIT_OK
+

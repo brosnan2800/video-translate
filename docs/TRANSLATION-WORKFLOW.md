@@ -56,9 +56,13 @@
 
 - **推荐逻辑纯函数化**：`audio_profile.profile_recommendation(prof)` 整合 `recommend_vad` + 静音密度
   / 强 BGM 判断，产出统一三决策推荐结构，doctor 与 run 共用，避免双份逻辑漂移。
+  **ADR-034（S2，一期）**：该推荐已降级为**参考信息，不再驱动路由**——`profile_recommendation`
+  恒返回 `vad=False` / `adaptive_vad=False` / `separate_vocals=False`（画像只算静音几何供
+  doctor 打印 + G3 预筛），默认全裸跑，掩码真音交转写后 review + G1/G2/G3 救回。
 - **风格无画像依据，默认 film**：风格由用户偏好决定，画像只决定 VAD 与人声分离；`profile_recommendation`
   的 `style` 恒返回 config 默认，决策点允许用户覆盖。
-- **vad_threshold 默认对齐** `transcribe.VAD_THRESHOLD = 0.35`；低电平场景由推荐函数给出 `0.1` 覆盖值。
+- **vad_threshold 不再由推荐函数给出**：ADR-034 起 `recommend_vad` 恒返回 `bare`，不再下发
+  `0.1` 覆盖值；用户需显式 `--vad --vad-threshold 0.1` 才会传（默认 `transcribe.VAD_THRESHOLD = 0.35`）。
 - **决策落盘双 key**：`decisions.audio_profile`（画像快照 + 推荐）、`decisions.routing`（三决策最终值
   + origin）。复用 `record_decision()` + `save()`，向后兼容。
 - **run 兜底放 cmd_run 入口而非 pipeline gate**：ADR-030 规定 stage gate 只查产物文件，画像快照属增强
@@ -143,18 +147,18 @@ Agent 读配置得到这个值，超时后按画像推荐自动执行。把它�
     "audio_profile": {           // 由 record_audio_profile 写入（doctor / run 兜底）
       "value": {
         "style": "film",
-        "vad": true,
+        "vad": false,            // ADR-034（S2）：画像推荐恒为 false，只作参考
         "adaptive_vad": false,
         "separate_vocals": false,
         "vad_threshold": null,
-        "rationale": "clean level ...; silence fraction 0.18"
+        "rationale": "clean level ...; silence fraction 0.18 (advisory only)"
       },
       "origin": "profile"
     },
     "routing": {                 // 由 record_routing 写入（决策点 / run 合并）
       "value": {
         "style": "film",
-        "vad": true,
+        "vad": false,            // 默认裸跑；显式 --vad 才为 true
         "adaptive_vad": false,
         "separate_vocals": false,
         "vad_threshold": null

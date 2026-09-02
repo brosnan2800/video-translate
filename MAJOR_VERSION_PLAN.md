@@ -37,7 +37,7 @@
 2. **跨平台兼容与优雅降级**：所有 GPU/Windows 专享特性（WhisperX、Demucs 人声分离、CUDA 加速）均为增量可选，在 Mac / CPU 环境下必须**自动平滑降级**或告警回退，绝不破坏基础流水线运行。
 3. **分块断点续跑与缓存指纹防护**：任何影响转写产物的参数（模型、VAD、对齐后端、人声分离）必须纳入 chunk 缓存指纹（sha1），绝不误用脏缓存。
 4. **SDD + TDD 先行**：每项新特性先定 Spec/ADR，测试覆盖（`pytest` 全绿 + 关键 golden 保护），文档随代码同步提交。
-5. **VAD 决策继承主线「自动路由」，不得回退为手动固定开/关**：底层默认 `use_vad=False`（裸跑，ADR-011），但 `doctor --video` 按音频画像自动路由 VAD（ADR-012 `recommend_vad`：低电平 → `--vad --vad-threshold 0.1`、正常电平 → `--vad` 锚静音、画像不可用 / 音乐重 → `bare`）。Windows 版必须沿用这套路由，不得把 VAD 改回写死的默认开。
+5. **音频路由：默认裸跑 + 数据驱动闭环，画像不驱动路由（ADR-034 S2）**：底层默认 `use_vad=False`（裸跑，`no_speech=0.0` 保留真音），`doctor --video` 的音频画像已降级为**参考信息**——`recommend_vad` 恒返回 `bare`，`profile_recommendation` 不再推动 `vad` / `adaptive_vad` / `separate_vocals` 任一项（ADR-034 §6.1 一期）。笑声 / 欢呼 / 音乐掩码下的真音由转写后双信号 review + 梯度重处理 G1/G2/G3 自动救回（二期/三期），**不靠全局 VAD 预切**——全局 VAD 会系统性 eject 笑声下真音（5:52 漏音根因，ADR-015 §Context）。需 VAD / 人声分离时仍由用户显式 `--vad` / `--separate-vocals` 触发；Windows 版沿用此默认，不得把 VAD 改回写死的默认开。
 6. **Mac 路径依赖冻结 + golden 回归口径**：不升级 Mac 路径的 `faster-whisper`（锁 `1.2.1`）；golden fixtures 已停止仓库跟踪，回归改为本地手动确认（`docs/golden/` 缺失时相关用例自动 skip，不构成失败）。
 
 ---
@@ -57,6 +57,7 @@ flowchart TD
     T5 --> T6[T6. 独立大模型直连引擎<br/>🤖 DeepSeek / OpenAI API / Ollama]
     T6 --> T7[T7. 批量常驻服务 & Web 校对看板<br/>🖥️ FastAPI + Inspector UI]
     T7 --> T8[T8. Pipeline 单一入口 + Agent 协议瘦身<br/>🔧 控制平面收口 / 入口统一]
+    T7 --> T9[T9. 音频路由重构：默认裸跑 + 数据驱动闭环<br/>🎯 ADR-034 / 与 T8 正交可并行]
 ```
 
 ---
@@ -248,6 +249,43 @@ flowchart TD
 
 ---
 
+### T9 — 音频路由重构：默认裸跑 + 数据驱动闭环（S2）【P0】
+
+> **背景**：通用流水线默认全局 `--vad` 会系统性 eject 笑声/欢呼下的真音（5:52 漏音根因，
+> ADR-015 §Context 已记录此现象但 adaptive-vad 仅降到 240s chunk 粒度未根治）。画像机制
+> （duration 断线、整片标量脆弱）让 adaptive/separate 自动推荐失效。E1 验证（IF.mp4 vad
+> vs bare 对比）证明干净视频裸跑漂移可控（<0.3s、word 级一致）→ 画像门控废弃，走
+> 「全裸跑 + 数据驱动闭环」。
+
+> **完整设计**：[ADR-034](docs/adr/034-audio-routing-redesign.md)（含整体计划 + 详细设计
+> + 三期计划 + 与 T8/ADR-032 关系 + 铁律5同步清单）。task plan 可按「执行 ADR-034 §6.X」引用。
+
+**核心设计**：
+1. **默认裸跑**（`use_vad=False`，`no_speech=0.0` 保留真音）；画像降级为参考不驱动路由。
+2. **post-transcribe 双信号 review**（塞进 fill_gaps，不新增状态机阶段）：Whisper 自报
+   `no_speech_prob`/`avg_logprob` ∩ 原视频 silencedetect 独立参照，B 主导判定漏译/幻觉。
+3. **梯度重处理 G1/G2/G3**：G1 vad 重切（救笑声后真音）/ G2 fill_gaps 扩展段内补洞 /
+   G3 局部 separate-vocals（只兜音乐掩码，不兜笑声——demucs 能力边界外）。
+4. **与 T8/ADR-032 正交**：S2 改 transcribe/fill_gaps 内部，T8 改 pipeline 编排，不重叠；
+   review 塞 fill_gaps 不破坏 T8 两停点。
+
+**涉及文件**：`src/video_translate/audio_profile.py`、`transcribe.py`、`fill_gaps.py`、
+`vocal_sep.py`、`docs/adr/011/012/034`、`docs/TRANSLATION-WORKFLOW.md`、`tests/`。
+
+**三期计划**（详见 ADR-034 §6）：
+- **一期（止血）**：默认切 bare + recommend_vad 改 + 铁律5路由表同步 + duration 接线 + golden 单轨重跑。
+- **二期（闭环）**：post-transcribe review + G1 vad 重切 + G2 fill_gaps 扩展。
+- **三期（兜底）**：G3 局部 separate-vocals + 能量复核自校验。
+
+**落地文档**：ADR-034（综合：架构决策 + 详细设计 + 三期计划 + 验收 + 风险回退）。
+
+**验收标准**：
+- **一期**：默认 bare 生效；5:52 类不再系统性 eject；铁律5文档同步（§0.2 + ADR-011/012/032）。
+- **二期**：5:52 笑声后真音自动救回；G2 守卫防幻觉；独立缓存层生效。
+- **三期**：强 BGM 真音自动救回；G3 不白跑 demucs（场景预筛挡笑声窗）；性能预算生效。
+
+---
+
 ## 3. 依赖与环境隔离矩阵
 
 | 特性模块 | 依赖项 | 依赖分组 (pyproject.toml) | 运行环境要求 |
@@ -292,6 +330,10 @@ flowchart TD
 5. **里程碑 5 (自动化与可视化闭环)**：
    - 实施 **T6 独立大模型直连引擎**（DeepSeek / 本地 Ollama 自动化）。
    - 实施 **T7 Web UI 批量服务与可视化校对看板**。
+6. **里程碑 6 (音频路由重构，与里程碑 4-5 并行)**：
+   - 实施 **T9 音频路由重构**（[ADR-034](docs/adr/034-audio-routing-redesign.md)）：
+     一期默认 bare 止血 → 二期 post-transcribe 闭环（救笑声后真音）→ 三期 G3 局部
+     separate 兜底（救强 BGM 真音）。与 T8 正交可并行，不进 T5→T8 串行链。
 
 ---
 
@@ -337,6 +379,7 @@ flowchart TD
 - **T6**：`--engine llm` 支持直接调用 DeepSeek / OpenAI API 自动完成翻译与格式自愈。
 - **T7**：Web 提交 → 产出全流程跑通，Inspector 看板高亮 `verify` 异常行并支持在线微调。
 - **T8**：`pipeline` 首次在决策点挂起、翻译后重跑自动续 generate→verify；`--prompt never` 自动路由 / `--require-profile` 硬闸；底层 run/generate/verify 行为不变；AGENTS.md 无逐命令编排散文；全量 pytest 绿。
+- **T9**：见 [ADR-034](docs/adr/034-audio-routing-redesign.md) §6 三期计划验收——一期默认 bare 生效+铁律5路由表同步；二期 5:52 笑声后真音自动救回+G2 守卫防幻觉+独立缓存层；三期强 BGM 真音自动救回+G3 不白跑 demucs+性能预算生效。
 
 ---
 

@@ -86,3 +86,12 @@ Spec 00 的设计不变量写道：
   盒的 WhisperX（T3）。
 - `silencedetect` 参照精度受 `noise` / `d` 阈值影响；默认 `noise=-30dB,d=0.3`，
   与 `audio_profile` 共用，必要可调。
+
+## 更新（ADR-034 S2，2026-09-02）
+
+声学铁律**不变**：`silencedetect` 仍是唯一独立参照，`verify` 声学 lane 与转写后双信号
+review（二期）都对照它，不信任 whisper 自报时间戳。ADR-034 仅改变**路由来源**——
+`audio_profile` / `recommend_vad` 降级为参考信息，不再驱动 `vad` / `adaptive_vad` /
+`separate_vocals` 路由（默认全裸跑）。声学层「以静音为锚」的原则依旧成立，只是锚定改由
+转写后 review 在 `fill_gaps` 内按 silencedetect 边界局部重切（G1），而非转写前全局 VAD
+预切。
