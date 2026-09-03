@@ -243,4 +243,16 @@ wrong. v4 reused v3's mis-aligned translations via `(start,text)` key → inheri
 - The V12 alignment self-check is now **wired into `cmd_generate`** (runs before
   `generate_subtitles`), so drift is caught at render time, not by a human viewer.
 - CLI flags: `--vad` (opt-in Silero VAD; default off), `--no-audit`, `--no-align-check`.
+
+### V14 — fill_gaps recovery 起点回溯（ADR-036）
+
+修复 `emily-blunt.mp4` 实测暴露的 hard-cut prefix collapse：洞起点落在前一句半句处时，recovery 仅 ±0.5s 的 pad 无法绕开 prefix collapse，只掏回洞尾碎片，洞内对白（W2 821.44–832.74s、W3 894.46–905.76s 各约 10s）全部丢失。
+
+- 扩展 `_PROBE_PADS = (0.2, 0.0, 0.5, 2.0, 4.0, 6.0)`，让 `_probe` 尝试回溯到前一句完整开头。
+- 新增 `_coverage_in_hole`：coverage 打分只统计洞内区间 `[gs, ge]`，避免大 pad 拉回的前句尾巴虚高早停（否则洞内对白尚未恢复就误判已覆盖）。
+- `_probe_long_hole` 首个 sub-window 前推至 `gs - max_pad` 并用多 pad 解码，超宽洞头部同样避开半句起点。
+- 守卫层（`_is_recovered_hallucination` / `_dedupe_seams` / `_is_echo`）全部复用，前句回声由既有守卫拦截，下游 verify / 控制平面无感。
+- git 调查确认 ADR-033/034/035 未引入此回归；本案为 v5 起已存在的 recovery 起点设计缺陷（原 `_PROBE_PADS` 假设"洞起点附近即真实起点"）。
+- 测试：`tests/test_fill_gaps_prefix_collapse.py`（5 passed）。
+- 关联：[ADR-036](adr/036-fill-gaps-prefix-collapse-recovery.md)、[ADR-016](adr/016-recall-recovery-net.md)、[spec 16](specs/16-fill-gaps.md)。
   `doctor` stays the preflight entry point.

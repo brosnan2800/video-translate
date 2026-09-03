@@ -66,7 +66,8 @@ full architectural rationale.
 | **内容层**（zh 忠实于 en） | 覆盖与对齐 | `validate_zh`（覆盖率）→ `verify_align`（Pearson 索引对齐）→ 中英混杂词检测 → **语义回读（默认开启）** | Spec 17 / Spec 18 |
 | **表现层**（出入字时机） | 显示窗口 | 保持 `tail 0.3 / min-dur 1.0` 默认值；防剪映缓存碰撞自动 `_vN` 递增 | Spec 04 / ADR-012 |
 
-**VAD 路由决策表（由 `doctor` 自动给出）**：
+**VAD 路由决策表**（ADR-034 起：画像**仅为参考、不驱动路由**，默认裸跑 +
+转写后 G1/G2/G3 自动救回；下表仅适用于用户/Agent **显式**选择 flag 的场景）：
 - 干净单人录音 / 朗诵 → `--vad`（段边界钉在真实静音，根除漂移）
 - 音乐重 / 低信噪比 / 耳语 → 裸跑（默认）+ `fill_gaps` 自动补洞
 - 干净但电平偏低（`mean < -20` 或 `max < -5`）→ 先 `loudnorm` 归一化，再 `--vad --vad-threshold 0.1`
@@ -75,50 +76,38 @@ full architectural rationale.
 
 ---
 
-## 3. 标准执行状态机 (Control-Plane Client Interface)
+## 3. 标准执行状态机 (pipeline 单一入口)
 
-> **流程推进收归代码状态机**（[ADR-030](docs/adr/030-control-plane.md)）：阶段顺序、
-> 闸门、修复指引全部由代码执行与输出。Agent 的职责 = **翻译（Phase 2）+ 语义回读**，
-> 其余只做「按状态机的指示跑命令」。不知道该干什么时，问状态机，不要凭记忆编排：
+> **编排权在代码**（[ADR-030](docs/adr/030-control-plane.md) /
+> [ADR-033](docs/adr/033-control-plane-pipeline-entry.md)）：「该跑哪一步」由
+> 状态机决定，Agent 只做机器做不了的两件事——**决策点问人**与**翻译/语义回读**。
+> 不知道该干什么时，问状态机，不要凭记忆编排：
 > ```bash
-> uv run video-translate status            # 你在哪 / 缺什么 / 下一步（人读）
-> uv run video-translate status --json     # 机器可解析（agent 读这个）
+> uv run video-translate pipeline "<video>"  # 幂等推进器：每次推进到下一停点
+> uv run video-translate status --json       # 你在哪 / 缺什么 / 下一步（agent 读这个）
 > ```
+> `run` / `generate` / `verify` 保留为底层原语（脚本 / golden 回归用），Agent 无需记忆。
 
-### Phase 0: 环境就绪 (Preflight — 一次性协议)
+### 3.1 幂等推进协议
 
-> **环境必须一步到位，禁止自由发挥配环境。** 绝不允许 Agent 自行把 FFmpeg / 模型 / 工具链散落缓存到各处。所有环境就绪动作统一走确定入口（命令一律 `uv run`，恒定位项目 `.venv`，[Spec 23](docs/specs/23-environment-location.md)）：
-> ```bash
-> cd <repo>                       # 先进入项目根
-> uv run video-translate setup    # 一键装齐：uv sync 依赖 + 预拉 large-v3 模型（约 3GB）
-> uv run video-translate doctor   # 校验：FFmpeg/ffprobe 缺失默认 exit 7（硬依赖）；CUDA/模型等其余项 --strict 才拦，全绿才继续
-> ```
-> 未装 uv 时先按官方 installer 安装（Windows `irm https://astral.sh/uv/install.ps1 | iex`；macOS/Linux `curl -LsSf https://astral.sh/uv/install.sh | sh`），见 [TOOLCHAIN.md](TOOLCHAIN.md) §1.3。模型 `[MISS]` → 重跑 `setup` 预拉；FFmpeg / ffprobe `[MISS]` → `uv run video-translate setup --ffmpeg` 自动下载便携版。**不要**手动到处下载、改 `.env` 假设模型配置、或全盘搜（E2 已消灭「全盘搜」）。
+每次调用 `pipeline` 自动 `resolve_position` → 执行下一步 → 推进到下一停点；
+重复调用永远安全（chunk 缓存 / routing / state 指纹保证断点续跑）。环境异常
+（exit 3/7）按退出码表修好（`setup` / `setup --ffmpeg`，[Spec 23](docs/specs/23-environment-location.md)），
+不自由发挥配环境。
 
-1. **定位视频**：优先查找 `videos/` 目录；若为空或多文件，与用户确认目标视频。
-2. **跑 `doctor`（含 `--video`）看环境与音频画像**：doctor 给出的 VAD / 人声分离建议
-   **不再由 agent 重演决策**——`run` 时显式传参（以 origin=explicit 落盘）或直接用默认
-   （自动路由，落盘 origin=default）。全部决策与默认值记录在 `<base>.vt_state.json` 的
-   `decisions` 字段，随时可查；显式选择缺能力时意图闸会硬停（exit 8），见 §3.5。
+**两个停点**（都是 exit 6，靠 `[NEXT]` 块区分）：
 
----
+| 停点 | [NEXT] 标注 | Agent 接手动作 | 解除方式 |
+|---|---|---|---|
+| 决策点（preflight 画像落盘后） | `stage=preflight (STOP POINT — decision point: style only)` | 按 §4.5 问用户翻译风格（默认 film） | 带 `--style <picked>` 重跑 `pipeline`（origin=explicit 落盘） |
+| 翻译（transcribe 完成后） | `stage=translate (STOP POINT — awaiting agent)` | 执行 §3.2 翻译协议，产出 `<base>.zh_segments.json` | 重跑 `pipeline`（自动续 generate → verify） |
 
-### Phase 1: 转写（状态机推进）
-```bash
-# 标准运行（doctor 建议自动路由；显式 flag = origin explicit 落盘）
-uv run video-translate run "videos/<video.mp4>"
+`--prompt` 三档（默认 `always`）：`never` 决策点不挂、直接按画像自动路由；
+`require-profile` 硬闸（无 explicit routing 即 exit 8）。`pipeline` 接受
+`--style / --vad / --adaptive-vad / --separate-vocals / --engine google` 等显式
+flag（原样转发底层 run；显式 flag 即视为决策完成，origin=explicit 落盘）。
 
-# 强 BGM / 伴奏 / 噪音场景（doctor 推荐 RECOMMENDED 时）
-uv run video-translate run "videos/<video.mp4>" --separate-vocals
-```
-- 分块可续跑设计（`chunk_N.json` 自动断点恢复）；**显式 `--separate-vocals` 但 demucs 未装 = exit 8 硬停**（不再静默回退原音频），按指引 `uv sync` 后重跑。
-- **强制声学对齐（T4，默认 `auto`）**：CUDA + whisperx 可用即走 WhisperX 词级时间戳精修（独立缓存层，不重转写）；Mac/未装自动降级 `none`（降级原因落盘 `decisions.align.resolved`）。**显式 `--align whisperx` 而包不可用 = exit 8**；`--align none` 仍是历史字节级路径（golden 保护）。**对齐后段数可能变（实测 40→42）→ 转写完成后必须重译**（generate 闸门会拦陈旧翻译）。
-- 转写 + 断句合并 + 漏音补洞完成后：生成 `<base>.translate_task.json`，状态链推进至 `translate` 停点，尾部打印 **[NEXT] 块**（`--json` 机器可解析），返回 **Exit Code 6 (`[AWAITING_AGENT]`)** —— 这是正常停点，不是错误，勿重试。
-- **翻译风格（T3 / ADR-027）**：`--style {film,literal,bilingual_study}` 选择翻译人设与守则（默认 `film` 影视二创口语感；`literal` 忠实直译；`bilingual_study` 双语精读）。多风格 `--style film,literal` 一次生成多份任务文件（`<base>.film.translate_task.json` 等）。显式 `--persona`/`VT_PERSONA` 覆盖风格预设人设。
-
----
-
-### Phase 2: Agent 翻译 (Agent-as-Engine)
+### 3.2 Agent 翻译协议（翻译停点职责）
 作为翻译引擎，Agent 执行以下步骤：
 1. 读取 `<base>.translate_task.json`（或多风格下的 `<base>.<style>.translate_task.json`），
    阅读 `full_transcript` 全局上下文、`source` 背景提示与 `persona` / `guidelines` 设定。
@@ -133,51 +122,28 @@ uv run video-translate run "videos/<video.mp4>" --separate-vocals
 
 ---
 
-### Phase 3: 字幕生成（enforce 闸门内置）
-```bash
-uv run video-translate generate \
-    --segments "videos/<base>.segments_en.json" \
-    --zh "videos/<base>.zh_segments.json" \
-    --outdir "videos" --base "<base>"
-# 多风格时，对每个风格分别生成（文件名带 .<style> 后缀）：
-uv run video-translate generate \
-    --segments "videos/<base>.segments_en.json" \
-    --zh "videos/<base>.literal.zh_segments.json" \
-    --outdir "videos" --base "<base>" --style literal
-```
-- **前置闸门（exit 8 硬停）**：zh 覆盖率 < 100%、en/zh 段数不匹配、`verify_align` 索引漂移、
-  状态链 `segments_sha` 陈旧（对齐后忘重译）→ 一律**拒绝生成**并给出修复指引。这是 40→42 段
-  错行事故的机器防线，不要绕过；确需降级才显式传逃生门 `--allow-degrade`。
-- 输出 4 个核心产物（`.bilingual.srt`、`.zh.srt`、`.en.srt`、`.txt`）；落地于独立的 `<base>/`
-  子目录，自动 `_vN` 版本递增以规避剪映导入缓存；`--style <name>` 让输出文件名带
-  `.{style}` 后缀。成功后尾部同样打印 [NEXT] 块（下一步 = verify）。
+### 3.3 generate / verify（引擎托管，Agent 只消费退出码）
+
+重跑 `pipeline` 推进到 generate / verify 时会自动带正确参数调用底层原语，
+Agent **不需要记忆命令拼装**。两条 Agent 必须知道的契约：
+
+- **generate 前置闸（exit 8 硬停）**：zh 覆盖率 < 100%、en/zh 段数不匹配、
+  `verify_align` 索引漂移、`segments_sha` 陈旧（对齐后忘重译）→ 拒绝生成并给
+  修复指引（40→42 错行事故的机器防线）。按指引**重译**后重跑 `pipeline`，
+  不要绕闸（确需降级才显式 `--allow-degrade` 走底层原语）。
+- **verify strict 默认 + 重试限制（ADR-031 D8）**：任一 lane 红灯 = exit 8
+  （`--zh`/`--video` 缺失 = exit 2 拒跑，verify 必须全 lane）；同一翻译任务第 3
+  次起自动降级报告模式（打印问题列表、exit 0），看到 `[verify] retry limit
+  reached` 即**人工审阅**问题列表决定修复方向（新增窗口 / 换翻译风格 / 重跑完整
+  `run`），不要陷入「修 fix 的 fix」无限重跑。
+- **语义回读闭环**：verify 消费 `<base>.semantic_reread_result.json`——非 ok
+  判定 = 红灯；缺失则重挂 task 并置 `pending_agent`（SRT 不撤回，但状态链不算
+  完成，Agent 按 §3.4 处理）。
+- **交付**：全绿后向用户汇报最终字幕路径，剪映导入主文件为 `<base>.bilingual.srt`。
 
 ---
 
-### Phase 4: 门禁自检与交付 (Verify — strict 默认)
-```bash
-uv run video-translate verify \
-    --segments "videos/<base>.segments_en.json" \
-    --zh "videos/<base>.zh_segments.json" \
-    --video "videos/<video.mp4>"
-```
-- `--zh` / `--video` **必填**（缺失 = exit 2 拒跑）：verify 必须跑全 lane，局部自检不允许冒充通过。
-- **strict 默认**：任一 lane 红灯 = **exit 8**；报告模式才用 `--no-strict` 显式逃生。
-- **verify 重试限制（ADR-031 D8）**：同一次翻译任务中，`verify` 第 1–2 次为严格门（红灯
-  **exit 8**）；第 3 次及以后**强制降级报告模式**（打印问题列表、exit 0，不再闸门拦截），
-  防止 Agent 陷入「修 fix 的 fix」的本地振荡。计数器 `stages.verify.attempts` 存于
-  `vt_state.json`：`run`（完整流水线）重置为 0；`generate`/`resegment`（局部重跑）**不重置**
-  ——看到 `[verify] retry limit reached` 即表示重试上限已到，请**人工审阅**问题列表决定
-  后续修复（新增窗口、换翻译风格、重跑完整 `run` 等），不要无限重跑 verify。
-1. **声学 Lane**：对照 `silencedetect` 检查静音重叠与漏检 (`uncovered-audio`)；**画像失败 / 探测异常 = 红灯**（不再 skip 或吞异常）；**段级置信度巡检**（`no_speech_prob`≥0.6 / `avg_logprob`<-1.0 = 红灯，ADR-031 D3）与**相邻段重叠/词碰撞巡检**（恢复段前缀骑邻居音频 = 红灯 hint，D4/D5）；uncovered 窗自动对照 vocals.wav 能量分级（`[bgm]`/`[speech]`/`[ambiguous]` 建议行，D7——resegment 选窗不再靠 Agent 临场 volumedetect）；报告打印恢复段清单（高嫌疑提示，D2）。
-2. **内容 Lane**：行数覆盖、索引漂移、未翻译英文残留，并生成 `<base>.semantic_reread_task.json` 供 Agent 结合邻居语境快速回读标记。
-3. **表现 Lane**：检查显示窗口参数完整性。
-4. **语义回读闭环**：verify 会消费 `<base>.semantic_reread_result.json`——存在且含非 ok 判定 = 红灯；**缺失则重挂 task 并置状态 `pending_agent`**（已产出的 SRT 不撤回，但状态链不显示「完成」）。
-5. **交付**：全绿后向用户汇报最终字幕路径，剪映导入主文件为 `<base>.bilingual.srt`。
-
----
-
-### 3.5 状态机速查 (Control-Plane Cheat Sheet)
+### 3.4 状态机速查 (Control-Plane Cheat Sheet)
 
 **退出码（0–8）**：
 
@@ -189,7 +155,7 @@ uv run video-translate verify \
 | 3 | `EXIT_MISSING_DEP` | 依赖缺失（模型残缺等） | 跟指引 `uv run video-translate setup` |
 | 4 | `EXIT_PROXY` | 代理不可用 | 查代理配置（[TOOLCHAIN.md](TOOLCHAIN.md)） |
 | 5 | `EXIT_KILLED` | 进程被杀（OOM/手动终止） | 断点缓存仍在，直接重跑 |
-| 6 | `EXIT_AWAITING_AGENT` | **停点 A**：转写完成，等翻译 | 进 Phase 2 翻译；**正常停点，勿重试 run** |
+| 6 | `EXIT_AWAITING_AGENT` | **停点**：决策点（等 style）或翻译（等 zh） | 按 §3.1 停点表接手；**正常停点，勿盲目重试** |
 | 7 | `EXIT_DOCTOR_FAIL` | doctor 自检不过（**默认 ffmpeg/ffprobe 缺失即触发**；`--strict` 下其余依赖项也拦） | 按 doctor 输出修环境（ffmpeg 缺失 → `setup --ffmpeg`） |
 | 8 | `EXIT_GATE_FAIL` | **闸门拦截**（意图闸 / generate 前置 / verify strict） | 读修复指引；确需降级才显式传逃生门 |
 
@@ -212,8 +178,10 @@ uv run video-translate verify \
 }
 ```
 
-**[NEXT] 块**：`run` / `generate` 尾部输出 `[NEXT] stage=<id>` + `do: <命令>`，是状态机给出的
-**唯一下一步**；`[NEXT] stage=translate (STOP POINT — awaiting agent)` 即停点 A。
+**[NEXT] 块**：`run` / `generate` / `pipeline` 尾部输出 `[NEXT] stage=<id>` +
+`do: <命令>`，是状态机给出的**唯一下一步**；
+`[NEXT] stage=translate (STOP POINT — awaiting agent)` 即翻译停点；
+`[NEXT] stage=preflight (STOP POINT — decision point: style only)` 即决策点停点。
 
 **`pending_agent` 处理**：语义回读未完成。Agent 读 `<base>.semantic_reread_task.json`，逐对
 (en, zh) 标记 `ok / omit / add / wrong / untranslated`，写入
@@ -267,35 +235,41 @@ uv run video-translate resegment --segments "<base>.segments_en.json" --video "<
 > 纯执行约束，零代码变更（由 AGENTS.md 协议而非状态机强制）；与 verify 重试限制
 > （§3 Phase 4）互为表里：P0→P1 管「怎么修」，retry limit 管「修几轮」。
 
-### 4.5 Agent 决策点协议（翻译流水线 P0→P1，ADR-032）
+### 4.5 Agent 决策点协议（ADR-032 / ADR-033 / ADR-034）
 
-> **一句话使用方式**：用户只说「翻译 XXX 视频」，全程不敲命令。Agent 自动完成 P0 画像后，
-> 在聊天里停下来，用**引导选择式**把三个决策项（含推荐默认值）摆给用户，默认等待
-> **5 分钟**（`VT_DECISION_TIMEOUT_SECONDS`，可在 `.env` / `.video-translate.toml` 改），
-> 用户回复按其选择执行，**超时未回复则按画像推荐自动执行**，随后全自动完成转写→翻译→生成→校验→交付。
+> **一句话使用方式**：用户只说「翻译 XXX 视频」，全程不敲命令。`pipeline` 推进到
+> preflight（画像落盘）后自动挂起在决策点，Agent 在聊天里用**引导选择式**问用户
+> 翻译风格，默认等待 **5 分钟**（`VT_DECISION_TIMEOUT_SECONDS`）；超时未回复按
+> 画像默认（film）自动继续，随后全自动转写 →（翻译停点）→ 生成 → 校验 → 交付。
 
-**决策点三个项（含推荐默认）**：
-| 决策项 | flag | 推荐默认来自 | 说明 |
+**决策点只剩一个真选择（ADR-034 调和）**：
+
+| 决策项 | flag | 默认 | 说明 |
 |---|---|---|---|
-| 翻译风格 | `--style` | `config.style`（默认 `film`） | film / literal / bilingual_study；画像无依据，仅用户偏好 |
-| VAD 策略 | `--vad` / `--adaptive-vad` | `profile_recommendation()` | 干净录音开 `--vad`；连续噪声走 `--adaptive-vad` 分块路由 |
-| 人声分离 | `--separate-vocals` | `profile_recommendation()` | 强 BGM / 伴奏 / 噪音时开（需 demucs） |
+| 翻译风格 | `--style` | `film` | film（影视二创口语感）/ literal（忠实直译）/ bilingual_study（双语精读注记）；纯用户偏好，画像无依据 |
 
-**协议步骤**（Agent 在聊天里执行；CLI 无法感知聊天，故 5 分钟是 Agent 等待行为而非 CLI sleep）：
-1. 跑 `uv run video-translate doctor --video <video>` 完成环境体检 + 音频画像，读其
-   `recommendation:` 输出（风格 / VAD / 分离 / 阈值 + rationale）。该推荐来自
-   `audio_profile.profile_recommendation()`，会落盘 `decisions.audio_profile`。
-2. 在聊天里输出引导选择式提问，列出三项 + 推荐默认，并说明等待 `VT_DECISION_TIMEOUT_SECONDS`（默认 300s）。
-3. 用户回复 → 按其选择构造 `run` 命令（`--style/--vad/--adaptive-vad/--separate-vocals` 显式传参，
-   以 `origin=explicit` 落盘）；超时未回复 → 不带这些 flag 直接 `run`，由 `cmd_run` 按画像推荐自动路由（origin=profile）。
-4. 跑 `uv run video-translate run "<video>"`（无快照时 `cmd_run` 自动补画像并落盘，**绝不裸跑无画像**；
-   三决策按 `CLI flag > routing > 画像推荐` 合并）。
+VAD / 人声分离**不再是决策项**（ADR-034：默认裸跑，画像仅供参考、不驱动路由；
+掩码真音由转写后 review + G1/G2/G3 自动救回）。用户/Agent 判断确有需要时直接以
+显式 flag 传给 `pipeline`（origin=explicit 落盘，缺能力时意图闸 exit 8），如强
+BGM 场景 `--separate-vocals`、干净录音 `--vad`。
 
-> **兜底**：即便 Agent 失守直接 `run`，`cmd_run` 也会自动画像 + 自动路由（origin=profile），不会跳过 P0。
-> 若要强制「必须人工决策」，加 `--require-profile` 硬闸：无 `origin=explicit` 的 routing 时 `run` 直接 exit 8。
+**协议步骤**（Agent 在聊天里执行；CLI 无法感知聊天，5 分钟是 Agent 等待行为而非 CLI sleep）：
+1. `pipeline` 停在决策点后，读 `[NEXT]` 块 / `decisions.audio_profile`（已落盘）
+   的 `rationale` 作为参考信息。
+2. 聊天里问翻译风格（列三项 + 推荐默认 film），说明等待
+   `VT_DECISION_TIMEOUT_SECONDS`（默认 300s）。
+3. 用户回复 → `uv run video-translate pipeline "<video>" --style <picked>`
+   （origin=explicit 落盘）；超时未回复 → 不带 flag 重跑 `pipeline`（按画像自动
+   路由，origin=profile）。
+4. 重跑 `pipeline` 见 routing 已存在 → 续 transcribe，直至下一停点（翻译）。
+
+> **兜底**：即便 Agent 失守直接 `run`，`cmd_run` 也会自动画像 + 自动路由
+> （origin=profile），不会跳过 P0。强制「必须人工决策」用
+> `--prompt require-profile`：无 `origin=explicit` 的 routing 时 exit 8。
 
 **配置位置（用户自行修改）**：
 - 决策点超时：`VT_DECISION_TIMEOUT_SECONDS`（默认 300） → `.env` 或 `.video-translate.toml` 的 `decision_timeout_seconds`
+- 决策点模式：`VT_PROMPT`（默认 `always`）→ 同上 `prompt`（[pipeline] 节）
 - 默认风格 / VAD 阈值等：对应 `VT_STYLE` / `VT_VAD_THRESHOLD`（默认 0.35）等，见
   [config.py](../src/video_translate/config.py) 与 `.env.example`
 

@@ -5,7 +5,9 @@
 > 绝不裸跑无画像」的代码硬保证。
 >
 > 配套代码：`../src/video_translate/audio_profile.py`、`state.py`、`toolchain.py`、`cli.py`；
-> Agent 协议见 [`../AGENTS.md`](../AGENTS.md) §4.5；状态机定义见
+> 单一入口推进器见 [`../docs/adr/033-control-plane-pipeline-entry.md`](../docs/adr/033-control-plane-pipeline-entry.md)
+> 与 [`../docs/specs/24-pipeline-behavior.md`](../docs/specs/24-pipeline-behavior.md)；Agent 协议见
+> [`../AGENTS.md`](../AGENTS.md) §4.5；状态机定义见
 > [`../src/video_translate/pipeline_def.py`](../src/video_translate/pipeline_def.py)
 > （纯数据声明式流程表）与 ADR-030。
 >
@@ -25,7 +27,8 @@
 用户只说一句「翻译 XXX 视频」，全程**不敲任何 CLI 命令**。Agent 自动编排：
 
 1. P0：环境体检（`doctor`）+ 音频画像（`analyze_audio`）；
-2. **决策点**：把「这个视频建议怎么处理」用引导选择式摆给用户，列出三个决策项 + 推荐默认值；
+2. **决策点**：把「这个视频建议怎么处理」用引导选择式摆给用户——**只剩翻译风格一项真选择**
+   （VAD/人声分离已按 ADR-034 退为显式 flag 覆盖、默认裸跑），列出风格三项 + 推荐默认值；
 3. 用户回复 → 按其选择执行；**默认等待 5 分钟，超时未回复则按画像推荐自动执行**；
 4. 随后全自动完成：转写 → 翻译 → 生成 → 校验 → 交付。
 
@@ -56,7 +59,7 @@
 | 环节 | 保证方式 | 硬度 |
 |---|---|---|
 | 画像（P0 产出） | `cmd_run` / `pipeline` preflight 强制：转写前查画像快照，无则自动补画像并落盘 | **代码硬控** |
-| 决策点（三决策项 + 5 分钟超时） | `pipeline` **默认挂起在决策点**（停点 A）+ Agent 按 §4.5 问人；超时值可配置；`--prompt never` 跳过 / `--require-profile` 强制 | **代码硬控挂起 + Agent 协议** |
+| 决策点（翻译风格一项 + 5 分钟超时） | `pipeline` **默认挂起在决策点**（停点：style only）+ Agent 按 §4.5 问人；超时值可配置；`--prompt never` 跳过 / `--require-profile` 强制 | **代码硬控挂起 + Agent 协议** |
 | 其余步骤（转写→翻译→生成→校验） | `pipeline` 引擎驱动 + `status` / `[NEXT]` 块 / exit 6·8 追踪 | **代码硬控** |
 
 ### 2.2 关键决策
@@ -109,6 +112,7 @@ analyze_audio(video)
 | 变量 | 默认 | 含义 | 等价 CLI flag |
 |---|---|---|---|
 | `VT_DECISION_TIMEOUT_SECONDS` | `300` | 决策点等待超时（秒，=5 分钟） | —（Agent 侧等待） |
+| `VT_PROMPT` | `always` | 决策点模式（`always` 问人+超时自动 / `never` 直接自动路由 / `require-profile` 硬闸） | `--prompt` |
 | `VT_STYLE` | `film` | 翻译风格 | `--style` |
 | `VT_VAD` | `false` | 全局 VAD（锚定静音） | `--vad` |
 | `VT_ADAPTIVE_VAD` | `false` | 分块自适应 VAD（混合音频） | `--adaptive-vad` |
@@ -124,17 +128,23 @@ analyze_audio(video)
 - **TOML**：写在仓库根 `.video-translate.toml`，例如：
 
   ```toml
-  [app]
+  [pipeline]
   decision_timeout_seconds = 300      # 决策点超时（秒）
-  style = "film"
+  prompt = "always"                   # always / never / require-profile
+
+  [translate]
+  style = "film"                      # 默认翻译风格
+
+  [transcribe]
   vad = false
   adaptive_vad = false
   vad_threshold = 0.35
   separate_vocals = false
-  merge_enabled = true
   ```
 
-> 改完无需代码改动；`doctor` 与 `run` 会自动读取。
+> 改完无需代码改动；`doctor` / `run` / `pipeline` 会自动读取。（TOML 扁平键按
+> `transcribe / translate / hf / llm / merge / pipeline` 六段落到 Config，见
+> `config._TOML_SECTIONS`；`[app]` 不是合法段。）
 
 ### 3.3 决策点超时（重点）
 
@@ -183,17 +193,19 @@ Agent 读配置得到这个值，超时后按画像推荐自动执行。把它�
 
 ## 5. 决策点协议（Agent 侧，详见 AGENTS.md §4.5）
 
-`pipeline` 跑到 preflight（doctor + 画像落盘）后**默认挂起在决策点**（`[NEXT] stage=preflight
-(STOP POINT)`），进程退出等 Agent 介入。Agent 接手后：
+`pipeline` 跑到 preflight（画像落盘）后**默认挂起在决策点**（`[NEXT] stage=preflight
+(STOP POINT — decision point: style only)`），进程退出（exit 6）等 Agent 介入。Agent 接手后：
 
-1. 读 `[NEXT]` 块 / `status --json` 确认停在决策点，取画像推荐（`decisions.audio_profile` 已落盘）。
-2. 在聊天里引导选择式提问，列出三项 + 推荐默认，并说明等待 `VT_DECISION_TIMEOUT_SECONDS`（默认 300s）。
-3. 用户回复 → 落盘 `origin=explicit` routing（或带显式 flag 重跑 `pipeline`）；超时未回复 →
-   按画像推荐落盘 `origin=profile`。
+1. 读 `[NEXT]` 块 / `status --json` 确认停在决策点，取画像推荐（`decisions.audio_profile` 已落盘）的 `rationale` 作参考。
+2. 在聊天里引导选择式提问，**只问翻译风格一项**（film / literal / bilingual_study，默认 film），
+   并说明等待 `VT_DECISION_TIMEOUT_SECONDS`（默认 300s）。VAD/人声分离已按 ADR-034 退为显式 flag，
+   默认裸跑，确有需要才传给 `pipeline`。
+3. 用户回复 → 带显式 flag 重跑 `pipeline --style <picked>`（落盘 `origin=explicit`）；
+   超时未回复 → 不带 flag 重跑 `pipeline`，按画像推荐自动路由（`origin=profile`）。
 4. 重跑 `uv run video-translate pipeline "<video>"` → 见 routing 已存在，续跑 transcribe 至下一停点（翻译）。
 
-**三档开关**（默认 `always`）：`--prompt always` 问人 + 超时自动 / `--prompt never` 全自动 /
-`--require-profile` 硬闸（必须 explicit，缺失 exit 8）。
+**`--prompt` 三档**（默认 `always`）：`always` 问人 + 超时自动 / `never` 全自动 /
+`require-profile` 硬闸（必须 explicit routing，缺失 exit 8）。
 
 ---
 
@@ -217,4 +229,6 @@ Agent 读配置得到这个值，超时后按画像推荐自动执行。把它�
 - `tests/test_profile_recommendation.py`：推荐纯函数（干净/低电平/强 BGM/混合四类几何、往返序列化）。
 - `tests/test_run_profile_gate.py`：run 兜底（无快照自动补画像、有快照复用、routing origin 分级、
   显式 flag 覆盖、`--require-profile` 硬闸）。
-- 全量回归基线：`uv run pytest`（`467 passed / 12 skipped`，含上述新增 19 项）。
+- `tests/test_pipeline_advance.py`：`pipeline` 幂等推进器契约（`next_action` 六动作决策表、
+  `--prompt` 三档校验、分派到 run/generate/verify、决策点挂起与显式 flag 解锁、require-profile 硬闸）。
+- 全量回归基线：`uv run pytest`。

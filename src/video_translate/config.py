@@ -43,6 +43,9 @@ VALID_STYLES = ("film", "literal", "bilingual_study")
 # Default VAD threshold — kept manually in sync with `transcribe.VAD_THRESHOLD`.
 DEFAULT_VAD_THRESHOLD = 0.35
 
+# --- T8 / ADR-033: `pipeline` advancer decision-point mode -------------------
+VALID_PROMPTS = ("always", "never", "require-profile")
+
 # How long the Agent waits at the P0 -> P1 decision point for the user to pick
 # the three routing options (style / VAD / vocal separation) before falling back
 # to the audio-profile recommendation. This is an Agent-side wait (the user
@@ -140,11 +143,17 @@ class Config:
     vad_threshold: float = DEFAULT_VAD_THRESHOLD          # --vad-threshold / VT_VAD_THRESHOLD
     # Agent-side wait at the decision point; never a CLI sleep.
     decision_timeout_seconds: int = DEFAULT_DECISION_TIMEOUT_SECONDS  # VT_DECISION_TIMEOUT_SECONDS
+    # T8 (ADR-033 / Spec 24): `pipeline` advancer decision-point mode —
+    # "always" (default) stops at the preflight decision point (style only,
+    # ADR-034 reconciliation); "never" auto-routes; "require-profile" is the
+    # hard gate (no explicit routing -> exit 8).
+    prompt: str = "always"          # --prompt / VT_PROMPT / [pipeline].prompt
     _sources: dict[str, str] = field(default_factory=dict, repr=False)
 
 
 # TOML sections flattened into Config fields. [hf] cache_dir -> hf_cache_dir.
-_TOML_SECTIONS = ("transcribe", "translate", "hf", "llm", "merge")
+# T8: [pipeline] carries the `pipeline` advancer options (prompt).
+_TOML_SECTIONS = ("transcribe", "translate", "hf", "llm", "merge", "pipeline")
 
 
 def load_toml(path: str) -> dict[str, Any]:
@@ -193,6 +202,14 @@ def _coerce_env(attr: str, raw: str) -> Any:
                   f"falling back to 'auto'", file=sys.stderr)
             return "auto"
         return val
+    if attr == "prompt":
+        # T8 (Spec 24): invalid value -> warn + fall back to "always" (never crash).
+        val = raw.strip().lower()
+        if val not in VALID_PROMPTS:
+            print(f"[config] WARNING: invalid VT_PROMPT '{raw}', "
+                  f"falling back to 'always'", file=sys.stderr)
+            return "always"
+        return val
     return raw
 
 
@@ -236,6 +253,7 @@ def resolve_config(
         "adaptive_vad": "VT_ADAPTIVE_VAD",
         "vad_threshold": "VT_VAD_THRESHOLD",
         "decision_timeout_seconds": "VT_DECISION_TIMEOUT_SECONDS",
+        "prompt": "VT_PROMPT",
     }
     for attr, envkey in env_map.items():
         if envkey in env and env[envkey]:
@@ -264,6 +282,12 @@ def resolve_config(
                 print(f"[config] WARNING: invalid --align '{v}', "
                       f"falling back to 'auto'", file=sys.stderr)
                 v = "auto"
+        if k == "prompt":
+            # T8 (Spec 24): invalid value -> warn + fall back to "always".
+            if v not in VALID_PROMPTS:
+                print(f"[config] WARNING: invalid --prompt '{v}', "
+                      f"falling back to 'always'", file=sys.stderr)
+                v = "always"
         setattr(cfg, k, v)
         cfg._sources[k] = "cli"
 

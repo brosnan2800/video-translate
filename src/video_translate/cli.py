@@ -24,7 +24,12 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from . import __version__
-from .config import DEFAULT_HF_CACHE, DEFAULT_PERSONA, resolve_config
+from .config import (
+    DEFAULT_HF_CACHE,
+    DEFAULT_PERSONA,
+    VALID_PROMPTS,
+    resolve_config,
+)
 from .io_utils import load_json, save_json
 from .proxy import detect_proxy, setup_http_proxy
 from .artifacts import artifact_path
@@ -932,6 +937,35 @@ def _record_run_decisions(args: argparse.Namespace, segments_path: str) -> None:
         pass
 
 
+def _ensure_audio_profile(outdir: str, base: str, input_path: str,
+                          cfg: Any) -> dict[str, Any]:
+    """P0 画像兜底 (ADR-032 / ADR-035 M2): analyze once, persist once.
+
+    No-op when a snapshot already exists in state. Shared by
+    ``_resolve_routing`` (run) and ``cmd_pipeline`` (decision point) — this is
+    the single producer of the audio-profile / acoustics snapshot, so
+    silencedetect 与 duration 全链只算一次（T10 铁律：消灭重算）。
+    """
+    from . import state as vt_state
+    from .audio_profile import analyze_audio, profile_recommendation
+
+    prof_snap = vt_state.get_audio_profile(outdir, base)
+    if prof_snap is not None:
+        return prof_snap
+    try:
+        prof = analyze_audio(input_path)
+    except Exception:  # noqa: BLE001
+        prof = None
+    rec = profile_recommendation(
+        prof, default_style=getattr(cfg, "style", None) or "film",
+        duration=prof.duration if prof else None,
+    )
+    vt_state.record_audio_profile(outdir, base, rec)
+    # ADR-035 M2: 兜底画像时同样落盘声学事实（此路径也是生产者之一）。
+    vt_state.record_acoustics(outdir, base, prof)
+    return rec.to_dict()
+
+
 def _resolve_routing(
     args: argparse.Namespace,
     outdir: str,
@@ -955,7 +989,6 @@ def _resolve_routing(
         ``(final, origin)``；硬闸未通过时 ``final`` 为 ``None``。
     """
     from . import state as vt_state
-    from .audio_profile import analyze_audio, profile_recommendation
 
     # 可选硬闸: 必须经人工决策点 (origin=explicit 的 routing)。
     if getattr(args, "require_profile", False):
@@ -969,20 +1002,7 @@ def _resolve_routing(
             return None, "explicit"
 
     # 1. 画像兜底: 无快照则自动补画像并落盘 (绝不裸跑无画像参数)。
-    prof_snap = vt_state.get_audio_profile(outdir, base)
-    if prof_snap is None:
-        try:
-            prof = analyze_audio(input_path)
-        except Exception:  # noqa: BLE001
-            prof = None
-        rec = profile_recommendation(
-            prof, default_style=getattr(cfg, "style", None) or "film",
-            duration=prof.duration if prof else None,
-        )
-        vt_state.record_audio_profile(outdir, base, rec)
-        # ADR-035 M2: 兜底画像时同样落盘声学事实（此路径也是生产者之一）。
-        vt_state.record_acoustics(outdir, base, prof)
-        prof_snap = rec.to_dict()
+    prof_snap = _ensure_audio_profile(outdir, base, input_path, cfg)
 
     # 2. 已落盘 routing (用户/Agent 决策点的产物)。
     routing = vt_state.get_routing(outdir, base)
@@ -1251,6 +1271,127 @@ def cmd_run(args: argparse.Namespace) -> int:
         if rc != EXIT_OK:
             return rc
     return EXIT_OK
+
+
+# --------------------------- T8 / ADR-033 / Spec 24 -------------------------
+# `pipeline` — the idempotent single-entry advancer. Decision logic lives in
+# pipeline.next_action (pure); this executor only maps actions onto the
+# existing run/generate/verify primitives (never re-implements their gates).
+
+
+def _pipeline_run_ns(args: argparse.Namespace, outdir: str, base: str,
+                     extra: list[str] | None = None) -> argparse.Namespace:
+    """Build a full `run` namespace from pipeline args (delegation, not copy).
+
+    Re-parsing through ``build_parser`` inherits every run-flag default, so
+    the delegated executor behaves byte-identically to a direct `run` call.
+    """
+    argv = ["run", args.input, "--outdir", outdir, "--base", base]
+    for flag, attr in (("--style", "style"), ("--engine", "engine"),
+                       ("--vad-threshold", "vad_threshold"),
+                       ("--demucs-model", "demucs_model")):
+        val = getattr(args, attr, None)
+        if val is not None:
+            argv += [flag, str(val)]
+    for flag, attr in (("--vad", "vad"), ("--adaptive-vad", "adaptive_vad"),
+                       ("--separate-vocals", "separate_vocals"),
+                       ("--allow-degrade", "allow_degrade")):
+        if getattr(args, attr, False):
+            argv.append(flag)
+    if extra:
+        argv += extra
+    return build_parser().parse_args(argv)
+
+
+def cmd_pipeline(args: argparse.Namespace) -> int:
+    """T8 / ADR-033 / Spec 24: idempotent single-entry advancer.
+
+    Resolves the current position, executes exactly the next step, and stops
+    at the next collaboration stop point. Re-running is always safe: routing,
+    chunk caches and state fingerprints make every step resumable. The
+    underlying run/generate/verify primitives keep their own gates and exit
+    codes (this executor only dispatches and propagates).
+    """
+    from . import state as vt_state
+    from .pipeline import build_ctx, next_action, resolve_position
+
+    input_path = args.input
+    outdir = args.outdir or _default_outdir(input_path)
+    base = args.base or _default_base(input_path)
+    cfg = resolve_config({"style": getattr(args, "style", None)},
+                         cwd=os.getcwd())
+    prompt_mode = getattr(args, "prompt", None) or cfg.prompt
+    if prompt_mode not in VALID_PROMPTS:  # defensive; parser already limits
+        prompt_mode = "always"
+
+    ctx = build_ctx(outdir, base, video=input_path)
+    pos = resolve_position(ctx)
+    routing = vt_state.get_routing(outdir, base)
+    # Explicit flags satisfy the decision point: the user already picked, and
+    # cmd_run's _resolve_routing persists them with origin=explicit.
+    has_explicit = (getattr(args, "style", None) is not None
+                    or getattr(args, "vad", False)
+                    or getattr(args, "adaptive_vad", False)
+                    or getattr(args, "separate_vocals", False))
+    if has_explicit and routing is None:
+        routing = {"origin": "explicit"}
+    action = next_action(pos, prompt_mode=prompt_mode, routing=routing)
+
+    if action == "done":
+        print("[NEXT] pipeline complete — bilingual SRT verified.")
+        if pos.get("pending_agent"):
+            print("  (semantic reread still pending: write "
+                  f"{base}.semantic_reread_result.json)")
+        return EXIT_OK
+
+    if action == "stop_decision_point":
+        # Preflight first (ADR-035 M2: analyze once, persist once) so the
+        # rationale is available even if the user never proceeds.
+        prof = _ensure_audio_profile(outdir, base, input_path, cfg)
+        print("[decision point] translation style only (ADR-034: VAD / "
+              "vocal separation are explicit-flag overrides; default bare run)")
+        rationale = prof.get("rationale") if isinstance(prof, dict) else None
+        if rationale:
+            print(f"  profile: {rationale}")
+        print("  pick one: film (default, 影视二创) / literal (忠实直译) / "
+              "bilingual_study (双语精读)")
+        print(f"  reply, then run: uv run video-translate pipeline "
+              f"\"{input_path}\" --style <picked>")
+        print("  no reply by timeout -> just re-run `pipeline` (auto-route, "
+              "origin=profile)")
+        print("[NEXT] stage=preflight  (STOP POINT — decision point: "
+              "style only)")
+        return EXIT_AWAITING_AGENT
+
+    if action == "transcribe":
+        extra = (["--require-profile"]
+                 if prompt_mode == "require-profile" else None)
+        return cmd_run(_pipeline_run_ns(args, outdir, base, extra=extra))
+
+    if action == "stop_translate":
+        task = os.path.join(outdir, f"{base}.translate_task.json")
+        if not os.path.isfile(task):
+            # Interrupted before task emission: self-heal by re-emitting the
+            # task via `run --skip transcribe` instead of a dangling pointer.
+            return cmd_run(_pipeline_run_ns(
+                args, outdir, base, extra=["--skip", "transcribe"]))
+        print(_RUN_AWAITING_AGENT_INSTRUCTIONS.format(
+            task=task, segments=ctx["segments"], zh=ctx["zh"],
+            outdir=outdir, base=base))
+        _print_pipeline_next(outdir, base, video=input_path)
+        return EXIT_AWAITING_AGENT
+
+    if action == "generate":
+        return cmd_generate(build_parser().parse_args([
+            "generate", "--segments", ctx["segments"], "--zh", ctx["zh"],
+            "--outdir", outdir, "--base", base,
+        ]))
+
+    # action == "verify"
+    return cmd_verify(build_parser().parse_args([
+        "verify", "--segments", ctx["segments"], "--zh", ctx["zh"],
+        "--video", input_path,
+    ]))
 
 
 def cmd_resegment(args: argparse.Namespace) -> int:
@@ -2143,6 +2284,43 @@ def build_parser() -> argparse.ArgumentParser:
                         "origin=explicit 的 routing (decisions.routing)。缺失则 run "
                         "直接失败 (exit 8), 防止 Agent 失守时裸跳过 P0 画像与决策点。")
     r.set_defaults(func=cmd_run)
+
+    pl = sub.add_parser(
+        "pipeline",
+        help="(T8 / ADR-033) idempotent single-entry advancer: resolve the "
+             "current position, execute the next step, stop at the next "
+             "collaboration stop point. Re-running is always safe.")
+    pl.add_argument("input", help="path to the video/audio file")
+    pl.add_argument("--outdir", default=None,
+                    help="artifact dir (default: video's own directory)")
+    pl.add_argument("--base", default=None,
+                    help="output basename (default: video filename stem)")
+    pl.add_argument("--prompt", choices=list(VALID_PROMPTS), default=None,
+                    help="decision-point mode (default from config, always): "
+                         "always = stop for the style pick; never = auto-route "
+                         "by profile; require-profile = hard gate requiring an "
+                         "explicit routing (exit 8 otherwise)")
+    pl.add_argument("--style", default=None,
+                    choices=["film", "literal", "bilingual_study"],
+                    help="explicit style pick (persists origin=explicit; "
+                         "satisfies the decision point)")
+    pl.add_argument("--vad", action="store_true",
+                    help="explicit VAD override (default bare run, ADR-034)")
+    pl.add_argument("--adaptive-vad", action="store_true",
+                    help="explicit per-chunk VAD routing override (ADR-015)")
+    pl.add_argument("--separate-vocals", action="store_true",
+                    help="explicit Demucs vocal separation override (T2)")
+    pl.add_argument("--vad-threshold", type=float, default=None,
+                    help="Silero VAD speech threshold override")
+    pl.add_argument("--demucs-model", default=None,
+                    help="Demucs model name override (default htdemucs)")
+    pl.add_argument("--engine", default=None, choices=["agent", "google"],
+                    help="agent (default) stops at the translate stop point; "
+                         "google runs the translation headless")
+    pl.add_argument("--allow-degrade", action="store_true",
+                    help="forwarded to run: permit degradation of explicit "
+                         "--align whisperx / --separate-vocals when unavailable")
+    pl.set_defaults(func=cmd_pipeline)
 
     rs = sub.add_parser("resegment",
                         help="Re-transcribe time windows with a forced language and splice into segments_en.json")

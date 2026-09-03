@@ -8,6 +8,9 @@ table or the capability layer):
   - ``enforce``           check_stage with teeth (raises capabilities.GateFail)
   - ``resolve_position``  where am I / what's next (state first, artifacts as
                           the independent fallback — gates never depend on state)
+  - ``next_action``       T8/ADR-033: pure decision for the ``pipeline``
+                          advancer (done / decision point / translate stop /
+                          transcribe / generate / verify)
   - ``render_next``       the NEXT block appended by run/generate/verify, with
                           a machine-parseable ``--json`` twin
 Hard-stop mechanics stay in the stage executors themselves (generate/verify own
@@ -213,6 +216,45 @@ def resolve_position(ctx: dict[str, Any],
                       for k in ("video", "segments", "zh", "srt")},
         "verify_status": verify_status,
     }
+
+
+# ---------------------------------------------------------------------------
+# T8 / ADR-033 / Spec 24: the idempotent advancer's pure decision function
+# ---------------------------------------------------------------------------
+
+def next_action(pos: dict[str, Any], *, prompt_mode: str,
+                routing: dict[str, Any] | None) -> str:
+    """Pure decision for ``cmd_pipeline`` (Spec 24 §1): zero I/O.
+
+    Returns one of: ``done | stop_decision_point | transcribe |
+    stop_translate | generate | verify``.
+
+    Args:
+        pos: output of :func:`resolve_position` (only ``done`` and
+            ``current_stage`` are read).
+        prompt_mode: ``always`` | ``never`` | ``require-profile``
+            (Config.prompt; explicit CLI flags already folded into
+            ``routing`` by the caller).
+        routing: the persisted ``decisions.routing`` value, or ``None`` when
+            no decision has been made yet.
+    """
+    if pos.get("done"):
+        return "done"
+    cur = pos.get("current_stage")
+    if cur == "translate":
+        return "stop_translate"
+    if cur == "generate":
+        return "generate"
+    if cur == "verify":
+        return "verify"
+    # transcribe (or a fresh base): the decision point applies only on the
+    # first pass — any persisted routing (explicit OR profile) means a
+    # decision was already made (T8: 重跑见 routing 已存在即续 transcribe).
+    # require-profile never stops here; its hard gate lives in cmd_run
+    # (--require-profile -> _resolve_routing -> exit 8).
+    if prompt_mode == "always" and routing is None:
+        return "stop_decision_point"
+    return "transcribe"
 
 
 # ---------------------------------------------------------------------------

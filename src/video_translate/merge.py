@@ -149,26 +149,81 @@ def _has_zero_dur(seg: dict[str, Any]) -> bool:
     return any(w.get("start", 0) >= w.get("end", 0) for w in (seg.get("words") or []))
 
 
+def _jaccard(a: list[str], b: list[str]) -> float:
+    """Token-set Jaccard similarity (order-independent)."""
+    A, B = set(a), set(b)
+    if not A and not B:
+        return 0.0
+    return len(A & B) / len(A | B)
+
+
+def _is_overlap_duplicate(
+    seg: dict[str, Any],
+    prev: dict[str, Any] | None,
+    nxt: dict[str, Any] | None,
+    *,
+    overlap_eps: float = 0.15,
+    jaccard_thr: float = 0.3,
+) -> bool:
+    """V5 / ADR-020 sixth signal (addendum): a segment that starts *before* its
+    predecessor ends (genuine time overlap, not boundary blur) AND repeats the
+    predecessor's wording is a Whisper re-decode / echo of the same audio — not a
+    second real utterance.
+
+    Safety gates:
+      * overlap must exceed `overlap_eps` (0.15s). Genuine adjacent speech only
+        blurs at the boundary (<~0.1s); it is never dropped.
+      * text must be a near-duplicate (Jaccard >= `jaccard_thr`). Pure
+        continuations that merely share a word — "We're out of soy milk." /
+        "milk. This is tragic news for the lactose intolerant." — sit at
+        Jaccard < 0.3 and survive (dropping them would lose real content).
+      * the segment must not *also* overlap its successor (middle of a chained
+        overlap). Those carry unique content, so they are kept; the echo tail is
+        dropped by its own later iteration instead.
+    """
+    if prev is None:
+        return False
+    # seg starts before prev ends => real temporal overlap (not boundary blur)
+    if seg["start"] >= prev["end"] - overlap_eps:
+        return False
+    # middle of a chained overlap -> keep (it owns unique content)
+    if nxt is not None and seg["end"] > nxt["start"] + overlap_eps:
+        return False
+    return _jaccard(_tokens(seg.get("text") or ""),
+                   _tokens(prev.get("text") or "")) >= jaccard_thr
+
+
 def _low_confidence(seg: dict[str, Any],
                     avg_logprob_thr: float,
                     no_speech_thr: float) -> bool:
-    """V5 / ADR-020 fifth signal: a Whisper segment emitted with a low acoustic
-    confidence is a likely hallucination.
+    """V5 / ADR-020 fifth signal (revised by ADR-020 addendum): a Whisper
+    segment emitted with low acoustic confidence is a likely hallucination.
 
-    Uses faster-whisper's own per-segment confidence fields (carried by
-    transcribe.py). avg_logprob is the more reliable of the two — for
-    tail-echo hallucinations the model re-emits text with little acoustic
-    backing, so its token log-probs sag well below genuine speech. no_speech_prob
-    alone is unreliable on laughter/applause (energy present, low no-speech), so
-    it is gated behind a *low* avg_logprob to avoid false positives.
+    Two tails:
+      * (a) very low avg_logprob alone is sufficient. Genuine speech in this
+        corpus floors near -0.9 (large-v3); anything below ~-0.95 is effectively
+        always a confabulation ("I don't know." / "I just think." sit at -0.969).
+        A naive -0.85 floor over-deletes real low-confidence speech that merely
+        carries low no_speech_prob — "Or champagne." (-0.894), "Ah, thank you
+        very much." (-0.895), "I'm out." (-0.911) are genuine utterances, so the
+        floor is set at -0.95 (the gap between -0.933 and -0.969 in this corpus).
+      * (b) coherent non-speech hallucination: Whisper is highly confident the
+        window is silence (high no_speech_prob) yet still emits text with only
+        moderately low avg_logprob — e.g. a phantom "thanks for watching" over a
+        quiet outro (nsp=0.779 / alp=-0.621). avg_logprob alone is not low
+        enough, but high nsp is the decisive tell. Laughter/applause beds show
+        LOW nsp, so a high-nsp gate does not false-fire on real energetic speech.
+        The alp < -0.4 companion keeps it from touching the F3 fill-gaps recovery
+        segments (nsp=0.892 but alp=-0.235, genuine).
     """
     alp = seg.get("avg_logprob")
     nsp = seg.get("no_speech_prob")
     if alp is None:
         return False
     if alp < avg_logprob_thr:
-        if nsp is None or nsp >= no_speech_thr:
-            return True
+        return True
+    if nsp is not None and nsp >= no_speech_thr and alp < -0.4:
+        return True
     return False
 
 
@@ -191,8 +246,11 @@ def drop_hallucination_segments(
     silence_intervals: list[tuple[float, float]] | None = None,
     # V5 / ADR-020 new signals:
     nested_eps: float = 0.1,
-    avg_logprob_thr: float = -1.0,
+    avg_logprob_thr: float = -0.95,
     no_speech_thr: float = 0.6,
+    # V5 / ADR-020 addendum: overlapping near-duplicate (Whisper re-decode / echo)
+    overlap_eps: float = 0.15,
+    overlap_jaccard_thr: float = 0.3,
     progress=print,
 ) -> list[dict[str, Any]]:
     """Drop hallucination segments (see module comment above). Pure filter:
@@ -204,28 +262,36 @@ def drop_hallucination_segments(
     hallucination (no acoustic backing), independently of the collapse/repeat
     dual signal.
 
-    V5 / ADR-020: adds two more signals to catch tail-echo hallucinations that
-    the dual-signal misses (the echo's tokens get DTW-aligned onto the neighbor's
-    word boundaries, so neither the collapse ratio nor the shared n-gram clears
-    the original thresholds):
+    V5 / ADR-020 (and addendum): adds four signals beyond the collapse+repeat
+    dual signal to catch hallucinations the dual signal misses:
       * Fourth signal (time-nested echo): the segment's window is *contained
         within* a neighbor's window AND it contains at least one zero-duration
         word — the deterministic fingerprint of an audio-sharing echo. Genuine
         adjacent cues never nest (they only blur at the boundary).
-      * Fifth signal (low confidence): Whisper's own avg_logprob is low, gated by
-        no_speech_prob, using confidence fields carried from transcribe.py.
+      * Fifth signal (low confidence, revised): Whisper's avg_logprob is very low
+        (below `avg_logprob_thr`, default -0.95) OR Whisper is highly confident
+        the window is silence (no_speech_prob >= `no_speech_thr`) with shaky
+        avg_logprob (alp < -0.4). The -0.95 floor (not -0.85) preserves real
+        low-confidence speech that merely carries low no_speech_prob.
+      * Sixth signal (overlapping near-duplicate): a segment starts *before* its
+        predecessor ends (overlap > `overlap_eps`) AND repeats the predecessor's
+        wording (Jaccard >= `overlap_jaccard_thr`) — a Whisper re-decode / echo.
+        Gated so genuine continuations (Jaccard < 0.3) and chained-overlap middles
+        survive.
     """
     kept: list[dict[str, Any]] = []
     n = len(segs)
     for i, s in enumerate(segs):
         words = s.get("words") or []
         dropped = False
+        prev = segs[i - 1] if i > 0 else None
+        nxt = segs[i + 1] if i + 1 < n else None
         if len(words) >= min_words and _collapse_ratio(s) >= collapse_ratio:
             toks = _tokens(s.get("text") or "")
-            prev = _tokens(segs[i - 1].get("text") or "") if i > 0 else []
-            nxt = _tokens(segs[i + 1].get("text") or "") if i + 1 < n else []
-            if (_max_shared_ngram(toks, prev) >= ngram
-                    or _max_shared_ngram(toks, nxt) >= ngram):
+            prev_tok = _tokens(segs[i - 1].get("text") or "") if i > 0 else []
+            nxt_tok = _tokens(segs[i + 1].get("text") or "") if i + 1 < n else []
+            if (_max_shared_ngram(toks, prev_tok) >= ngram
+                    or _max_shared_ngram(toks, nxt_tok) >= ngram):
                 progress(f"[hallucination] drop seg#{i} "
                          f"({s.get('start')}-{(s.get('end'))}): "
                          f"{(s.get('text') or '')!r} "
@@ -233,8 +299,6 @@ def drop_hallucination_segments(
                 dropped = True
         # Fourth signal: time-nested audio-sharing tail-echo (deterministic).
         if not dropped:
-            prev = segs[i - 1] if i > 0 else None
-            nxt = segs[i + 1] if i + 1 < n else None
             for nb in (prev, nxt):
                 if nb is None:
                     continue
@@ -252,6 +316,14 @@ def drop_hallucination_segments(
                      f"{(s.get('text') or '')!r} "
                      f"[low acoustic confidence avg_logprob="
                      f"{s.get('avg_logprob')}]")
+            dropped = True
+        # Sixth signal: overlapping near-duplicate of the predecessor (re-decode / echo).
+        if not dropped and _is_overlap_duplicate(
+                s, prev, nxt, overlap_eps=overlap_eps, jaccard_thr=overlap_jaccard_thr):
+            progress(f"[hallucination] drop seg#{i} "
+                     f"({s.get('start')}-{(s.get('end'))}): "
+                     f"{(s.get('text') or '')!r} "
+                     f"[overlapping near-duplicate of neighbor]")
             dropped = True
         if not dropped and silence_intervals:
             st = float(s.get("start", 0.0))

@@ -40,6 +40,8 @@
 - 跨平台一致：Windows（`.venv\Scripts\`）与 macOS/Linux（`.venv/bin/`）
   均由 `uv run` 处理，文档无需区分平台路径。
 - **禁止**裸 `python` / `video-translate` / `make`（PATH 残留旧环境时必然漂移）。
+- 本 Spec 只定**入口**；命令**语法**随宿主 shell 而定（bash vs PowerShell），
+  规则见 `.codebuddy/rules/powershell-command-harness.mdc`（H0 环境判定 + H1-H5）。
 
 ### 2. 入口自检：`doctor` 状态行
 

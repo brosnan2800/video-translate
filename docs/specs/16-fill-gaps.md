@@ -55,15 +55,18 @@ On `emily-blunt.mp4` the five cheer-masked windows (4:06, 4:24, 4:59, 6:15,
 15:29) were recovered only because the recovery ran bare. See also
 [ADR-015](adr:/015-adaptive-per-chunk-vad.md) for preventing the miss upstream.
 
-### Prefix-collapse probe (`_probe`)
+### Prefix-collapse probe (`_probe`, ADR-036)
 Whisper latches onto whatever sits at the *start* of the decode window: if the
 pad reaches back far enough to catch the previous line's tail, the decoder emits
 that fragment then predicts end-of-transcript for the whole remaining window. So
-the probe does **not** bet on one pad. It tries `_PROBE_PADS = (0.2, 0.0, 0.5)`
+the probe does **not** bet on one pad. It tries `_PROBE_PADS = (0.2, 0.0, 0.5, 2.0, 4.0, 6.0)`
 (windows `< _MULTI_PROBE_MIN_WINDOW = 4.0 s` get a single decode with pad `0.2`),
-scores each result by how much of the window it covers, and keeps the best. Scan
-stops early once a probe covers `≥ _PROBE_GOOD_COVERAGE = 0.6` of the window, so
-the common case still costs a single decode.
+scores each result by how much of the **hole** `[gs, ge]` it covers (via
+`_coverage_in_hole`), and keeps the best. The larger pads exist for the case where
+the hole boundary itself lands mid-sentence: the real speech starts several
+seconds before gs, and only a large pad can pull the decode window back to a clean
+sentence start. Scan stops early once a probe covers `≥ _PROBE_GOOD_COVERAGE = 0.6`
+of the hole, so the common case still costs a single decode.
 
 ### Long-hole sub-windowing (`_probe_long_hole`, ADR-016 T2c)
 A single forced decode over a **very wide** hole (e.g. a 40 s gap) is itself
@@ -98,7 +101,7 @@ a 41 s gap at 922→963 s).
 | `min_gap` | `2.0` | minimum hole width to probe |
 | `collapse_min_dur` | `4.0` | a segment must be this long to be a collapse candidate |
 | `collapse_ratio` | `0.45` | cps below `median × ratio` ⇒ collapse |
-| `_PROBE_PADS` | `(0.2, 0.0, 0.5)` | prefix-collapse mitigation |
+| `_PROBE_PADS` | `(0.2, 0.0, 0.5, 2.0, 4.0, 6.0)` | prefix-collapse mitigation; larger pads pull the decode start back to a clean sentence boundary when the hole begins mid-sentence (ADR-036) |
 | `_SUBWIN` | `12.0` | holes wider than this are sliced into sub-windows (ADR-016 T2c) |
 | `_SUBWIN_OVERLAP` | `0.5` | overlap between sub-windows so cuts don't clip sentences |
 | `use_vad` | `False` | **ignored by the decode** — recovery is always bare (ADR-016) |

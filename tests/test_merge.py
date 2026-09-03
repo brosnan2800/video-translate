@@ -274,6 +274,106 @@ def test_hallucination_no_words_is_kept():
     assert len(out) == 2
 
 
+def _conf_seg(text, start, end, alp, nsp, words=None):
+    """Build a segment carrying Whisper confidence fields (ADR-020)."""
+    s = {"start": start, "end": end, "text": text,
+         "avg_logprob": alp, "no_speech_prob": nsp}
+    if words is not None:
+        s["words"] = words
+    return s
+
+
+def test_hallucination_moderate_alp_filler_dropped():
+    """Accident geometry (2:48, Walken birthday bit): 'they have a cake.' (real)
+    followed by two low-confidence filler hallucinations 'I don't know.' /
+    'I just think.' at avg_logprob=-0.969. The -0.95 floor (not -0.85) drops them
+    while keeping the real neighbor — caught by signal 5(a)."""
+    real = _conf_seg("they have a cake.", 168.01, 168.56, -0.30, 0.10)
+    h1 = _conf_seg("I don't know.", 168.56, 169.10, -0.969, 0.252)
+    h2 = _conf_seg("I just think.", 169.76, 171.70, -0.969, 0.252)
+    out = drop_hallucination_segments([real, h1, h2], progress=lambda *_: None)
+    assert [s["text"] for s in out] == ["they have a cake."]
+
+
+def test_hallucination_high_nsp_non_speech_dropped():
+    """Accident geometry (~39s): phantom Norwegian 'Takk for at du så på.'
+    ('thanks for watching') over a quiet window — nsp=0.779, alp=-0.621. High
+    no_speech_prob alone (previously gated behind low alp) now drops it via signal
+    5(b)."""
+    real = _conf_seg("some real speech before.", 35.0, 36.5, -0.30, 0.10)
+    halluc = _conf_seg("Takk for at du så på.", 37.08, 39.52, -0.621, 0.779)
+    real2 = _conf_seg("and then more speech.", 39.70, 41.68, -0.30, 0.10)
+    out = drop_hallucination_segments([real, halluc, real2], progress=lambda *_: None)
+    assert [s["text"] for s in out] == [
+        "some real speech before.", "and then more speech."]
+
+
+def test_hallucination_real_low_conf_speech_kept():
+    """Regression guard: a -0.85 floor would wrongly delete genuine low-confidence
+    speech that merely carries low no_speech_prob — 'Or champagne.' (-0.894),
+    'Ah, thank you very much.' (-0.895), 'I'm out.' (-0.911),
+    "I'm a f***ing..." (-0.933). All must survive at the -0.95 floor (signal 5
+    alone is insufficient; nsp is too low to trigger signal 5(b))."""
+    segs = [
+        _conf_seg("Or champagne.", 175.58, 176.64, -0.894, 0.185),
+        _conf_seg("Ah, thank you very much.", 700.0, 701.5, -0.895, 0.361),
+        _conf_seg("I'm out.", 710.0, 711.0, -0.911, 0.374),
+        _conf_seg("I'm a f***ing...", 720.0, 721.0, -0.933, 0.058),
+    ]
+    out = drop_hallucination_segments(segs, progress=lambda *_: None)
+    assert len(out) == 4
+
+
+def test_hallucination_f3_recovery_kept():
+    """Regression guard: fill-gaps recovery segments carry high no_speech_prob
+    (0.892) but genuine avg_logprob (-0.235). The signal 5(b) high-nsp branch is
+    gated by alp < -0.4, so these real recovered cues survive (not mis-dropped as
+    the 821s Norwegian-style hallucination)."""
+    seg = _conf_seg(
+        "There's one guy who could do and I think we all would watch that guy is Chris Walken.",
+        821.44, 826.76, -0.235, 0.892)
+    out = drop_hallucination_segments([seg], progress=lambda *_: None)
+    assert len(out) == 1
+
+
+def test_hallucination_overlap_duplicate_dropped():
+    """Accident geometry (~2:33, near the 2:48 landmark): 'it's my birthday and i'm
+    in all alone.' overlaps its echo 'You know, i'm all alone.' by 0.2s with
+    Jaccard 0.30 -> the echoing later segment is dropped (signal 6)."""
+    real = _conf_seg("it's my birthday and i'm in all alone.", 153.01, 154.59, -0.30, 0.10)
+    echo = _conf_seg("You know, i'm all alone.", 154.39, 156.01, -0.387, 0.06)
+    out = drop_hallucination_segments([real, echo], progress=lambda *_: None)
+    assert [s["text"] for s in out] == [
+        "it's my birthday and i'm in all alone."]
+
+
+def test_hallucination_overlap_continuation_kept():
+    """Safety gate: an overlapping *continuation* that merely shares a word
+    ('We're out of soy milk.' / 'milk. This is tragic news...', Jaccard 0.08) must
+    survive — dropping it would lose real content. Only near-duplicates (Jaccard
+    >= 0.3) are echoes."""
+    a = _conf_seg("We're out of soy milk.", 100.0, 101.3, -0.30, 0.10)
+    b = _conf_seg("milk. This is tragic news for the lactose intolerant.",
+                 101.1, 103.0, -0.50, 0.10)
+    out = drop_hallucination_segments([a, b], progress=lambda *_: None)
+    assert len(out) == 2
+
+
+def test_hallucination_overlap_chain_middle_kept():
+    """Safety gate: a 3-way chained overlap (each segment overlaps its neighbor)
+    carries unique content in the middle — only the trailing echo is dropped, the
+    middle is kept so no content is lost."""
+    head = _conf_seg("and the jelly would go into the donut and it was very",
+                     200.0, 202.0, -0.27, 0.10)
+    mid = _conf_seg("would go into the doughnut and it was very exciting and while some skits age",
+                    201.0, 204.0, -0.27, 0.10)
+    tail = _conf_seg("exciting and while some skits age beautifully",
+                     203.0, 206.0, -0.27, 0.10)
+    out = drop_hallucination_segments([head, mid, tail], progress=lambda *_: None)
+    # head kept, mid kept (middle of chain), tail dropped as echo of mid
+    assert [s["text"] for s in out] == [head["text"], mid["text"]]
+
+
 # --- V4: short-cue rejoin ---
 
 

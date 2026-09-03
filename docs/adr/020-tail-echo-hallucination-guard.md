@@ -58,3 +58,49 @@ V4 的 `drop_hallucination_segments` 用**双信号**（word 塌缩率 ≥50% + 
 - 第四信号要求段含 word 时间戳且能判定窗口嵌套；若某段缺 words 或窗口不嵌套邻居，信号 inert（不会误杀，但也不会拦截该回音）。
 - 第五信号的 `avg_logprob` 阈值依赖模型规模/语言；large-v3 实测 -1.0 安全，换小模型可能需要放宽。
 - 多说话人同时发言（叠音）且 Whisper 拆成两段、两段均含零时长词且一段整体嵌套进另一段时，第四信号理论上可能误杀——但影视场景 Whisper 通常会把叠音合并进单段，实战未观测到该误杀。如未来出现，可加「文本不相似则不触发」的二次 gate。
+
+## 追加修订（2026-09-03）：信号 5b（高 nsp 连贯非语音）+ 信号 6（重叠近重复）
+
+实战复现两类原第五信号漏网的幻觉（见 `video-translate` 仓库 `videos/` 下
+Walken 单口视频，`segments_en.json` 事故几何）：
+
+1. **连贯非语音幻觉**：`~39s` 出现挪威语 `Takk for at du så på.`（"感谢收看"），
+   `no_speech_prob=0.779`（Whisper 78% 判定非语音）、`avg_logprob=-0.621`。原第五信号
+   要 `avg_logprob < -1.0` 才丢，这条 -0.621 不到；而 `no_speech_prob` 被设计**故意压在
+   low-alp 之后**（避免笑声/掌声 bed 误杀），于是高 nsp 连贯幻觉漏网。
+2. **临界带低置信填充句**：`~2:48` "they have a cake." 后跟 "I don't know." /
+   "I just think."，`avg_logprob=-0.969`（刚好高于 -1.0）、`nsp=0.252`。漏网。
+3. **重叠/重复段**（用户"同时间段多个字幕重叠"的直觉对应）：全片 16 对相邻段时间重叠，
+   其中 `#46→#47`（"…i'm in all alone." ‖ "You know, i'm all alone."，0.2s 重叠）紧邻 2:48；
+   另有 `#96→#97`、`#211→#212` 等整句重复。原守卫第四信号只查 time-nested、不查
+   time-overlap，纯重复不塌缩的漏掉。
+
+### 决策
+
+- **信号 5 修订为两条尾**：
+  - (a) `avg_logprob < avg_logprob_thr`（默认 **-0.95**）——极低 alp 独立判删。
+    阈值**不能**取 -0.85：该视频真实低置信语音（"Or champagne." -0.894、
+    "Ah, thank you very much." -0.895、"I'm out." -0.911、"I'm a f***ing..." -0.933）
+    均带低 nsp 且为真实语句，会误删；真实语音 alp 下限约 -0.93，与幻觉 -0.969 之间
+    的间隙定在 -0.95。
+  - (b) **高 nsp 连贯非语音**（新增独立信号）：`no_speech_prob >= no_speech_thr`(0.6)
+    **且** `avg_logprob < -0.4` → 判删。覆盖 #1。高 nsp 在笑声/掌声 bed 表现为**低**值，
+    故高 nsp gate 不误杀真说话；`-0.4` 伴随闸挡住 F3 fill-gaps 恢复段（nsp=0.892 但
+    alp=-0.235，真实）。
+- **信号 6（重叠近重复，新增）**：段 B 起点早于前驱 A 终点（`overlap > overlap_eps`=0.15s，
+  排除 <~0.1s 边界模糊）**且** 与前驱文本 Jaccard ≥ `overlap_jaccard_thr`(0.3) → 判删 B。
+  安全闸：纯续句（"…soy milk." / "milk. this is tragic…" Jaccard 0.08）不删，避免丢内容；
+  **链式中段**（B 同时重叠其前驱与后继，拥有独立内容）保留，回声尾由其后一次迭代删。
+  覆盖 #3（#46→#47 等）。
+
+### 后果
+
+- `merge.py` `drop_hallucination_segments`：`avg_logprob_thr` 默认 -1.0→**-0.95**；
+  新增参数 `overlap_eps=0.15`、`overlap_jaccard_thr=0.3`；新增辅助 `_jaccard`、`_is_overlap_duplicate`。
+- `tests/test_merge.py`：新增 7 个事故几何回归用例（#11/#53/#54 删除；真实低置信
+  `#56/#464/#471/#473` 与 F3 恢复 `#294-296` 保留；overlap 删回声/留续句/留链式中段）。
+- 已知限制更新：信号 6 的 Jaccard 闸对**改写式**回声（如 #46→#47 改写 "all alone"，
+  Jaccard 恰 0.30）临界，低于 0.3 的改写回声不拦截；链式中段保留策略会少删尾部 1~2 词
+  （如 "beautifully"），属可接受的轻微内容保留，优先保证不丢真实内容。
+
+
