@@ -89,7 +89,7 @@ docs/
 ### 幻觉拦截
 | ADR | 主题 | 状态 |
 |---|---|---|
-| [020](adr/020-tail-echo-hallucination-guard.md) | 尾部回音幻觉守卫 | 接受 |
+| [020](adr/020-tail-echo-hallucination-guard.md) | 尾部回音幻觉守卫（**含补遗二**：5b 加静音窗闸、信号 6 已回退） | 接受 |
 | [021](adr/021-fill-gaps-recovered-hallucination-guard.md) | 补洞恢复段守卫 | 接受 |
 | [031](adr/031-recovered-segment-hardening.md) | 恢复段加固 | 接受 |
 | [036](adr/036-fill-gaps-prefix-collapse-recovery.md) | 补洞前缀坍缩恢复（信号 C 长度分级） | 接受 |

@@ -103,4 +103,83 @@ Walken 单口视频，`segments_en.json` 事故几何）：
   Jaccard 恰 0.30）临界，低于 0.3 的改写回声不拦截；链式中段保留策略会少删尾部 1~2 词
   （如 "beautifully"），属可接受的轻微内容保留，优先保证不丢真实内容。
 
+---
+
+## 补遗二（2026-09-03，回归修复）：信号 5b 加静音窗闸 + 信号 6 回退
+
+> 本节 **supersede 上一节的信号 6 决策**，并修正信号 5b。
+> 事故来源：全量 `uv run pytest` 跑出 **4 red**
+> （`tests/test_pipeline_field_contract.py` 3 个 +
+> `tests/test_acoustic_verify.py::test_boundary_blur_not_false_positive` 1 个）。
+
+上一节的 5b 与信号 6 均**误杀真实语音**，两类根因不同，处置也不同。
+
+### 一、信号 5b：高 nsp 必须配合静音窗（修正，非回退）
+
+**误杀**：`tests/test_pipeline_field_contract.py::merged_chain` 的
+`'muffled words under laughter'`（nsp=0.72 / alp=-0.65）——**笑声掩盖下的真实语音**
+被判删。该 fixture 注释白纸黑字写明契约：「merge 幻觉过滤器**不丢**（alp 未低于 -1.0）」。
+
+**根因**：5b 假设「高 nsp ⇒ 非语音」，但**笑声 / 欢呼 bed 上的真实语音 nsp 同样偏高**
+（背景能量使模型自判非语音）。实测两组数值几乎重叠：
+
+| 样本 | no_speech_prob | avg_logprob | 真值 |
+|---|---|---|---|
+| 挪威语幻影 `Takk for at du så på.`（~39s，应删） | 0.779 | -0.621 | 幻觉 |
+| `muffled words under laughter`（应留） | 0.720 | -0.650 | **真实语音** |
+
+仅靠 `(alp, nsp)` 二维**无法区分**；二者唯一的物理差异是**窗内有无声学能量**：
+幻影整段落在 `silencedetect` 静音窗内，笑声下的真音不在。
+
+**修正**：5b 追加静音窗闸 —— `no_speech_prob >= no_speech_thr(0.6)` **且**
+`avg_logprob < -0.4` **且**该段整段落在已探测的静音窗内，才判删。
+未提供 `silence_intervals` 时 5b **惰性（inert）**。
+
+这与 ADR-034「默认裸跑 + 转写后 G1/G2/G3 自动救回」一致：笑声掩盖的真音应由
+**恢复链路救回**，而不是在 merge 里先删了再说。
+
+### 二、信号 6：整体回退（supersede 上一节）
+
+**误杀**：`tests/test_acoustic_verify.py::test_boundary_blur_not_false_positive`
+—— `I like it`(136.92–137.24) ‖ `like it with pizza`(137.06–137.82) 这类
+**Whisper 常见的真实重叠连续语音**被判删。
+
+**实测几何对比**（`_tokens` + Jaccard 实测，非估算）：
+
+| 样本 | Jaccard | 后段新增占比 | 后段被前段覆盖率 | 后段⊆前段 | 重叠 |
+|---|---|---|---|---|---|
+| 回声（应删）`…in all alone.` → `You know, i'm all alone.` | 0.30 | 0.40 | 0.60 | False | 0.20s |
+| 真音（应留）`I like it` → `like it with pizza` | **0.40** | 0.50 | 0.50 | False | 0.18s |
+
+三条结论：
+
+1. **真音的 Jaccard（0.40）比回声（0.30）更高** —— 「Jaccard 越高越像回声」的
+   判据方向**本身是反的**；收紧阈值只会先放过回声、再误杀真音。
+2. `后段 ⊆ 前段` 两组**皆为 False**（回声新增了 `you` / `know`）→ 严格子集判据会漏掉回声。
+3. 唯一方向正确的维度是「后段被前段覆盖率」（0.60 vs 0.50），但 **gap 仅 0.10**，
+   本质是阈值调参，换不来可靠边界。
+
+**决策**：**移除信号 6** 及 `_jaccard` / `_is_overlap_duplicate` 与
+`overlap_eps` / `overlap_jaccard_thr` 两个参数、3 个阈值用例。
+
+理由：正负样本几何不可区分时，任何阈值都只是用漏判换误判，而此处**误判代价极不对称**——
+漏一个回声只是多一句可疑字幕（verify 声学 lane 会报出，人工可见、可修）；
+误杀一句真音则是**字幕静默漏句**（用户完全无感，且直接违反 ADR-034 对笑声下真音的保护）。
+确定性回声仍由**第四信号**（窗口被邻居嵌套 + 零时长词）覆盖：不依赖阈值、不误杀。
+
+### 后果
+
+- `merge.py`：
+  - `_low_confidence` 新增 `silence_intervals` 入参，5b 分支加静音窗闸；
+  - 删除 `_jaccard` / `_is_overlap_duplicate` 与 `overlap_eps` / `overlap_jaccard_thr`；
+  - `drop_hallucination_segments` 向 `_low_confidence` 透传 `silence_intervals`。
+- `tests/test_merge.py`：
+  - `test_hallucination_high_nsp_non_speech_dropped` 改为传入静音窗几何（37.0–39.6s）；
+  - **新增** `test_hallucination_high_nsp_laughter_speech_kept` —— 本次误杀样本
+    `'muffled words under laughter'`（nsp=0.72 / alp=-0.65）的回归守卫（S3）；
+  - 删除信号 6 的 3 个用例，并就地注明回退理由与实测数据。
+- 回归：全量 `uv run pytest` → **628 passed / 12 skipped**（修复前 4 red）。
+- 教训：**改幻觉阈值必须跑全量测试，不能只跑新增用例文件。** 本次即因只跑了
+  `test_merge.py` 而漏掉跨文件契约（`test_pipeline_field_contract.py`）。
+
 

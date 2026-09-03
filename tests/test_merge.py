@@ -297,15 +297,38 @@ def test_hallucination_moderate_alp_filler_dropped():
 
 def test_hallucination_high_nsp_non_speech_dropped():
     """Accident geometry (~39s): phantom Norwegian 'Takk for at du så på.'
-    ('thanks for watching') over a quiet window — nsp=0.779, alp=-0.621. High
-    no_speech_prob alone (previously gated behind low alp) now drops it via signal
-    5(b)."""
+    ('thanks for watching') over a QUIET WINDOW — nsp=0.779, alp=-0.621, and the
+    whole segment sits inside a detected silence interval (37.0–39.6s).
+
+    Signal 5(b) drops it because high no_speech_prob is corroborated by the
+    absence of acoustic energy — not by nsp alone (see the guard test below)."""
     real = _conf_seg("some real speech before.", 35.0, 36.5, -0.30, 0.10)
     halluc = _conf_seg("Takk for at du så på.", 37.08, 39.52, -0.621, 0.779)
     real2 = _conf_seg("and then more speech.", 39.70, 41.68, -0.30, 0.10)
-    out = drop_hallucination_segments([real, halluc, real2], progress=lambda *_: None)
+    silences = [(37.0, 39.6)]  # 幻影整段落在静音窗内 → 无能量支撑
+    out = drop_hallucination_segments([real, halluc, real2],
+                                      silence_intervals=silences,
+                                      progress=lambda *_: None)
     assert [s["text"] for s in out] == [
         "some real speech before.", "and then more speech."]
+
+
+def test_hallucination_high_nsp_laughter_speech_kept():
+    """Regression guard — THE accident (ADR-020 addendum 2).
+
+    Genuine speech under laughter carries nsp=0.72 / alp=-0.65: numerically
+    indistinguishable from the phantom above (nsp=0.779 / alp=-0.621). It must
+    survive when its window is NOT inside a silence interval, because ADR-034
+    protects exactly this laughter-masked speech (a bare run + G1/G2/G3 recovery
+    is how it is meant to be rescued, not a pre-emptive drop in merge).
+
+    Accident source: `tests/test_pipeline_field_contract.py::merged_chain`
+    ('muffled words under laughter') — signal 5(b) without the silence gate used
+    to drop it, silently losing real speech from the subtitles (4 tests red)."""
+    laughter = _conf_seg("muffled words under laughter", 2.4, 3.6, -0.65, 0.72)
+    # 无静音窗信息 → 5(b) 惰性 → 必须保留
+    out = drop_hallucination_segments([laughter], progress=lambda *_: None)
+    assert len(out) == 1
 
 
 def test_hallucination_real_low_conf_speech_kept():
@@ -336,42 +359,13 @@ def test_hallucination_f3_recovery_kept():
     assert len(out) == 1
 
 
-def test_hallucination_overlap_duplicate_dropped():
-    """Accident geometry (~2:33, near the 2:48 landmark): 'it's my birthday and i'm
-    in all alone.' overlaps its echo 'You know, i'm all alone.' by 0.2s with
-    Jaccard 0.30 -> the echoing later segment is dropped (signal 6)."""
-    real = _conf_seg("it's my birthday and i'm in all alone.", 153.01, 154.59, -0.30, 0.10)
-    echo = _conf_seg("You know, i'm all alone.", 154.39, 156.01, -0.387, 0.06)
-    out = drop_hallucination_segments([real, echo], progress=lambda *_: None)
-    assert [s["text"] for s in out] == [
-        "it's my birthday and i'm in all alone."]
-
-
-def test_hallucination_overlap_continuation_kept():
-    """Safety gate: an overlapping *continuation* that merely shares a word
-    ('We're out of soy milk.' / 'milk. This is tragic news...', Jaccard 0.08) must
-    survive — dropping it would lose real content. Only near-duplicates (Jaccard
-    >= 0.3) are echoes."""
-    a = _conf_seg("We're out of soy milk.", 100.0, 101.3, -0.30, 0.10)
-    b = _conf_seg("milk. This is tragic news for the lactose intolerant.",
-                 101.1, 103.0, -0.50, 0.10)
-    out = drop_hallucination_segments([a, b], progress=lambda *_: None)
-    assert len(out) == 2
-
-
-def test_hallucination_overlap_chain_middle_kept():
-    """Safety gate: a 3-way chained overlap (each segment overlaps its neighbor)
-    carries unique content in the middle — only the trailing echo is dropped, the
-    middle is kept so no content is lost."""
-    head = _conf_seg("and the jelly would go into the donut and it was very",
-                     200.0, 202.0, -0.27, 0.10)
-    mid = _conf_seg("would go into the doughnut and it was very exciting and while some skits age",
-                    201.0, 204.0, -0.27, 0.10)
-    tail = _conf_seg("exciting and while some skits age beautifully",
-                     203.0, 206.0, -0.27, 0.10)
-    out = drop_hallucination_segments([head, mid, tail], progress=lambda *_: None)
-    # head kept, mid kept (middle of chain), tail dropped as echo of mid
-    assert [s["text"] for s in out] == [head["text"], mid["text"]]
+# 注：第六信号（overlapping near-duplicate = 重叠 + Jaccard）已于 2026-09-03 回退
+# （ADR-020 补遗二）。实测其正样本（回声）与负样本（边界模糊真音）几何不可区分：
+#     回声 Jaccard 0.30 / 真音 Jaccard 0.40  ← 判据方向相反
+#     后段 ⊆ 前段：两者皆 False            ← 严格子集会漏掉回声
+#     唯一同向维度「后段被前段覆盖率」：0.60 vs 0.50（gap 仅 0.10）
+# 任何阈值都只是用漏判换误判，而此处的误判 = 静默删除真实语音（字幕漏句），
+# 故整体移除；确定性回声仍由第四信号（窗口被邻居嵌套 + 零时长词）覆盖。
 
 
 # --- V4: short-cue rejoin ---
