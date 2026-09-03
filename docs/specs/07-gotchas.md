@@ -1,5 +1,9 @@
 # Spec 07 — Gotchas & hard-won lessons
 
+> **红线主源见 [`AGENTS.md`](../../AGENTS.md) §1（避坑防呆红线速查表）** —— 本表是开发者
+> 视角的补充与测试覆盖要求；两处冲突时以 AGENTS.md 为准，新增红线请只更新 AGENTS.md。
+> 文档库总索引见 [`docs/index.md`](../index.md)。
+
 Invariants that are easy to break and must stay covered by tests / review.
 
 ## 1. Timestamps are acoustic facts

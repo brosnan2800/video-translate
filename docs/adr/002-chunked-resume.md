@@ -23,4 +23,4 @@ timestamps.
   signals "killed but partially done, safe to re-run".
 - **Negative**: A chunk boundary can split a spoken sentence. Acceptable for v1;
   v2's segment-merge pass will address cross-chunk sentence stitching.
-- **Trade-off**: Extra on-disk `chunk_N.json` files; cleaned by `make clean`.
+- **Trade-off**: Extra on-disk `chunk_N.json` files; cleaned by removing the `chunk_*.json` files.

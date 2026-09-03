@@ -8,7 +8,7 @@
 - 修复：`generate` 改用**首词 `start` / 末词 `end`** 替代段级 `start/end`（需词级时间戳，V3 由 Spec 12 保证）。
 
 ## 现象 B：cue 之间无空隙
-- 根因（经实证，见 `docs/V3-STATUS.md` 与 issue #001）：不是"音频密"，而是 **whisper 把真实停顿吞了**——
+- 根因（经实证，见 `docs/archive/V3-STATUS.md` 与 issue #001）：不是"音频密"，而是 **whisper 把真实停顿吞了**——
   - 相邻段 `end_i == start_{i+1}`，墙到墙零间隙；
   - 真实静音被埋在长段**内部**（以 `明星模仿秀.mp4` 实测：1.2s 静音位于 seg 22.21–28.66 内部，0.7s 静音位于 seg 8.62–13.55 内部）。
 - 修复：词级时间戳 + stable-ts `split_by_gap` 在**静音处切开**长段，让字幕体现真实停顿（Spec 12 + 13 的词级数据支撑）。

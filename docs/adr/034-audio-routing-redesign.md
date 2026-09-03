@@ -197,7 +197,7 @@ S2 改 `recommend_vad`（ok 画像不再返回 `--vad`），以下文档要同�
 | `MAJOR_VERSION_PLAN.md` §0.2 铁律5 | 「正常电平 → `--vad` 锚静音」改成「正常电平 → bare+闭环」 |
 | `ADR-011` | VAD 自动路由表更新（ok → bare） |
 | `ADR-012` | 声学铁律不变（review 用原视频 silencedetect 独立参照，与 verify lane 一致） |
-| `docs/TRANSLATION-WORKFLOW.md` (ADR-032) §2.2 | `recommend_vad` 纯函数描述同步 |
+| `docs/adr/032-translation-workflow.md` (ADR-032) §2.2 | `recommend_vad` 纯函数描述同步 |
 
 ### 4.3 时序
 
@@ -258,7 +258,7 @@ S2 一期先做（默认 bare + duration 接线），不阻塞 T8。T8 在路线
 4. golden 本地重跑确认（单轨 bare）。
 
 **涉及文件**：`audio_profile.py`、`MAJOR_VERSION_PLAN.md`、`docs/adr/011/012`、
-`docs/TRANSLATION-WORKFLOW.md`、`tests/test_profile_recommendation.py`。
+`docs/adr/032-translation-workflow.md`、`tests/test_profile_recommendation.py`。
 
 **验收**：
 - `recommend_vad(ok_profile)` 返回 bare（单测绿）。

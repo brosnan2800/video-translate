@@ -8,10 +8,17 @@
 
 > 你是被召唤来操作本项目的 Agent。**不要直接猜命令，先按顺序读完以下协议再动手。**
 
-1. **[`AGENTS.md`](AGENTS.md)** — 必读。规定执行协议、避坑防呆红线（声学时间戳不可改、开对齐必须重译、剪映缓存自动递增等）与确定性四阶段状态机（Preflight → Transcribe → Translate → Generate/Verify）。
+1. **[`AGENTS.md`](AGENTS.md)** — 必读。规定执行协议、避坑防呆红线（声学时间戳不可改、开对齐必须重译、剪映缓存自动递增等）与状态机。
 2. **[`TOOLCHAIN.md`](TOOLCHAIN.md)** — 环境搭建与 `.env` / 代理 / 镜像配置。
-3. **[`docs/TOOLING.md`](docs/TOOLING.md)** — 工具与依赖管理专册（E1 uv.lock 可复现 / E2 ffmpeg 自动下载 / E3 模型缓存校验自愈 / E4 CUDA venv 优先），新增任何外部工具或 Python 依赖都照其第 6 节清单执行。
-4. **[`docs/specs/00-overview.md`](docs/specs/00-overview.md)** — 行为总览；**[`docs/adr/`](docs/adr)** — 架构决策理由速查。
+3. **[`docs/TOOLING.md`](docs/TOOLING.md)** — 工具与依赖管理（操作手册）：新增任何外部工具或 Python 依赖都照其第 2 节标准套路执行。
+4. **[`docs/index.md`](docs/index.md)** — 文档库总索引（按角色导航 + ADR/Spec 全量清单 + 单一维护源约定）。
+5. **[`docs/specs/00-overview.md`](docs/specs/00-overview.md)** — 行为总览；**[`docs/adr/`](docs/adr)** — 架构决策理由速查。
+
+> **入口唯一 = `pipeline`**：所有流程推进都用 `uv run video-translate pipeline "<视频>"`
+> （幂等推进器，每次调用自动定位进度并推进到下一个停点，[ADR-033](docs/adr/033-control-plane-pipeline-entry.md)
+> / [Spec 24](docs/specs/24-pipeline-behavior.md)）。**不要自行编排 `run` → `generate` → `verify`**
+> ——「该跑哪一步」由状态机决定，Agent 只在两个停点接手（**决策点问风格** / **翻译 + 语义回读**）；
+> `run` / `generate` / `verify` 退为底层原语，仅供脚本与回归使用。
 
 **环境一律走 `uv run video-translate setup && uv run video-translate doctor`（命令统一 `uv run` 前缀，恒定位项目 `.venv`，见 [Spec 23](docs/specs/23-environment-location.md)），不要手动散落工具链、不要裸 `pip install torch`、不要改声学时间轴。** 任何依赖变更必须 `uv lock` 与 `pyproject.toml` 同 commit 提交。
 
@@ -38,32 +45,31 @@
 
 ```mermaid
 flowchart TD
-    Video[输入视频或音频] --> Doctor[0. doctor 环境自检与音频画像推荐 VAD]
-    Doctor --> Run[1. uv run video-translate run 视频]
+    Video[输入视频或音频] --> Setup[setup + doctor 环境自检]
+    Setup --> PL[pipeline 单一入口 · 幂等推进器 · ADR-033]
 
-    subgraph Acoustic [声学阶段本地 CLI]
-        Run --> VocalSep["可选 人声分离 demucs --separate-vocals 抑制 BGM 哄笑噪声"]
-        VocalSep --> Transcribe[faster-whisper 转写分块可续跑]
-        Transcribe --> WhisperX["WhisperX 词级强制对齐 · T4 默认 auto · GPU 可用时启用"]
-        WhisperX --> Merge[断句合并 幻觉过滤 漂移吸附 智能切点回退 V8]
+    PL --> DP{"停点 1 · 决策点<br/>选择翻译风格<br/>exit 6"}
+    DP -->|"重跑 pipeline --style"| Transcribe
+
+    subgraph Local1 [声学阶段 · 本地 CLI]
+        Transcribe[faster-whisper 转写 · 分块可续跑] --> WhisperX[WhisperX 词级对齐 · 默认 auto]
+        WhisperX --> Merge[断句合并 · 幻觉过滤 · 智能切点回退]
         Merge --> FillGaps[fill_gaps 漏音补洞自检]
         FillGaps --> TaskOut[输出 translate_task.json]
     end
 
-    TaskOut --> Exit6[CLI 退出码 6 挂起等待 Agent]
+    TaskOut --> TP{"停点 2 · 翻译<br/>Agent 产出 zh_segments.json<br/>exit 6"}
 
-    subgraph AgentBrain [内容翻译阶段 Agent 或人]
-        Exit6 --> AgentRead[Agent 阅读全局剧本与上下文与角色设定]
-        AgentRead --> AgentTranslate[Agent 翻译生成 zh_segments.json]
+    subgraph AgentBrain [内容阶段 · Agent 或人]
+        TP --> AgentWork[翻译 + 语义回读]
     end
 
-    subgraph Presentation [表现与交付阶段本地 CLI]
-        AgentTranslate --> Generate[2. uv run video-translate generate]
-        Generate --> AlignCheck[自动校验 zh/en 索引对齐]
-        Generate --> Render[输出带 offset/tail 保护的双语 SRT 与 TXT]
-        Render --> VersionDir[落地防剪映缓存失效子目录 base_vN]
-        VersionDir --> Verify[3. uv run video-translate verify 门禁校验]
+    subgraph Local2 [表现与交付 · 本地 CLI]
+        AgentWork --> Generate[generate 双语 SRT 与 TXT · 防剪映缓存 base_vN]
+        Generate --> Verify[verify 三维门禁 · 声学 / 内容 / 表现]
     end
+
+    Verify --> Done[交付 bilingual.srt]
 ```
 
 ---
@@ -112,22 +118,37 @@ uv run video-translate doctor
 ### 4. 运行完整管线
 
 #### 模式 A：Agent 引擎模式（推荐，默认）
+
+> 用 **`pipeline` 单一入口**：每次调用自动推进到下一个停点，**重复调用永远安全**（断点续跑）。
+> 全程只需「跑 pipeline → 按停点提示接手 → 再跑 pipeline」。
+
 ```bash
-# 1. 运行转写并生成翻译任务（默认 film 影视口语风格；可加 --style 切换）
+# ① 首次执行 → 停在「决策点」（exit 6），提示选择翻译风格
+uv run video-translate pipeline "videos/example.mp4"
+#     film（默认，影视口语）/ literal（忠实直译）/ bilingual_study（双语精读）
+#     双轨对比：--style film,literal 一次生成两套任务文件
+
+# ② 带上选择重跑 → 自动转写，完成后停在「翻译停点」（exit 6）
+uv run video-translate pipeline "videos/example.mp4" --style film
+#     强 BGM / 哄笑视频可加 --separate-vocals 先剥离人声；--align 默认 auto 无需手填
+#     输出 videos/example.translate_task.json
+
+# ③ Agent（或人工）阅读 task 文件，生成 videos/example.zh_segments.json
+
+# ④ 再跑 pipeline → 自动 generate + verify，输出双语字幕
+uv run video-translate pipeline "videos/example.mp4"
+```
+
+<details>
+<summary>底层原语（脚本 / 回归用，日常无需手写）</summary>
+
+```bash
 uv run video-translate run "videos/example.mp4" --style film
-# 学术/技术/法律内容如需保真，用 --style literal；双语精读用 --style bilingual_study
-# 双轨对比：--style film,literal 一次生成两套任务文件
-# 强 BGM/哄笑视频可加 --separate-vocals 先剥离人声；--align 默认 auto 无需手填
-# 程序转写完成后会返回 Exit Code 6 挂起，并输出 videos/example.translate_task.json
-
-# 2. AI Agent（或人工）阅读 task 文件后，生成 videos/example.zh_segments.json
-
-# 3. 生成双语字幕与文本文件
 uv run video-translate generate --segments "videos/example.segments_en.json" --zh "videos/example.zh_segments.json" --outdir "videos" --base "example"
-
-# 4. 运行质量自检门禁
 uv run video-translate verify --segments "videos/example.segments_en.json" --zh "videos/example.zh_segments.json" --video "videos/example.mp4"
 ```
+
+</details>
 
 #### 模式 B：Google 翻译无头模式（全自动）
 ```bash
@@ -142,6 +163,7 @@ uv run video-translate run "videos/example.mp4" --engine google
 
 | 命令 (Subcommand) | 作用 | 核心参数示例 |
 |---|---|---|
+| **`pipeline`** | **单一入口幂等推进器（推荐）**：自动定位进度，执行下一步并推进到下一个停点，重复调用永远安全 | `uv run video-translate pipeline "videos/sample.mp4" [--style film\|literal\|bilingual_study] [--prompt always\|never\|require-profile] [--vad] [--separate-vocals]` |
 | `doctor` | 检查命令入口、环境依赖、GPU/whisperx/demucs 状态，分析视频音频画像推荐 VAD | `uv run video-translate doctor --video "videos/sample.mp4"` |
 | `run` | 一站式执行流水线（转写 $\rightarrow$ 任务生成 $\rightarrow$ 生成字幕） | `uv run video-translate run "videos/sample.mp4" [--vad] [--adaptive-vad] [--style film\|literal\|bilingual_study] [--separate-vocals] [--align auto\|none\|whisperx]`（`--align` 默认 `auto`：GPU 走 whisperx） |
 | `transcribe` | 仅执行音频抽取、Whisper 转写、WhisperX 对齐、合并断句与漏音补洞 | `uv run video-translate transcribe "videos/sample.mp4" [--separate-vocals] [--align auto\|none\|whisperx]` |
@@ -193,13 +215,21 @@ CLI 参数 > 系统环境变量 / .env.local > .env.<platform> > .env > .video-t
 
 ## 📖 文档导航中心 (Documentation Index)
 
-- 🤖 **[AGENTS.md](AGENTS.md)**：AI Agent 执行协议、避坑防呆红线速查与确定性状态机。
-- 🛠️ **[TOOLCHAIN.md](TOOLCHAIN.md)**：工具链引导、CUDA 配置、模型离线下载与环境隔离。
-- 📦 **[docs/TOOLING.md](docs/TOOLING.md)**：工具与依赖管理专册（E1 uv.lock 可复现 / E2 ffmpeg 自动下载 / E3 模型缓存校验自愈 / E4 CUDA venv），新增任何外部工具或 Python 依赖都照其第 6 节清单执行。
-- 🗺️ **[MAJOR_VERSION_PLAN.md](MAJOR_VERSION_PLAN.md)**：V5 任务路线图（E 系列环境确定性工程 + T 系列），含 §3.2 依赖与外部工具管理规则（R1-R7）。
-- 📜 **[docs/HISTORY.md](docs/HISTORY.md)**：完整的版本演进史、实战案例与踩坑复盘（V3–V14）。
-- 🔍 **[docs/RESEARCH-voice-pro.md](docs/RESEARCH-voice-pro.md)**：Voice-Pro 对标研究（E 系列与依赖规则的论证来源）。
-- 📐 **[docs/specs/](docs/specs/) & [docs/adr/](docs/adr/)**：系统设计规格 (SDD) 与架构决策记录 (ADR)。
+> **完整索引见 [`docs/index.md`](docs/index.md)** —— 按角色导航 + ADR/Spec 全量清单 + 单一维护源约定。
+
+| 文档 | 定位 |
+|---|---|
+| 🤖 **[AGENTS.md](AGENTS.md)** | AI Agent 执行协议、避坑防呆红线速查与状态机（翻译 Agent 必读） |
+| 📚 **[docs/index.md](docs/index.md)** | 文档库总索引：目录结构、ADR/Spec 全量清单、维护约定 |
+| 🛠️ **[TOOLCHAIN.md](TOOLCHAIN.md)** | 环境搭建操作手册：CUDA 配置、模型下载、依赖隔离 |
+| 📦 **[docs/TOOLING.md](docs/TOOLING.md)** | 工具与依赖管理（操作手册）：E1–E4 操作速查、新增工具标准套路 |
+| 🗺️ **[MAJOR_VERSION_PLAN.md](MAJOR_VERSION_PLAN.md)** | V5 任务路线图（E 系列 + T 系列），含 §3.2 依赖与外部工具规则 R1–R7 |
+| 📜 **[docs/HISTORY.md](docs/HISTORY.md)** | 版本演进史、实战案例与踩坑复盘（V3–V14） |
+| 🔍 **[docs/RESEARCH-voice-pro.md](docs/RESEARCH-voice-pro.md)** | Voice-Pro 对标研究（E 系列与依赖规则的论证来源；四项借鉴已全部落地） |
+| 💀 **[docs/POSTMORTEM-JamieFoxx.md](docs/POSTMORTEM-JamieFoxx.md)** | Jamie Foxx 混剪事故复盘（V8–V13 护栏体系的由来） |
+| 📐 **[docs/specs/](docs/specs/)** | 行为规格契约 SDD（00–24） |
+| 🏛️ **[docs/adr/](docs/adr/)** | 架构决策记录 ADR（001–036，不可变历史） |
+| 🗄️ **[docs/archive/](docs/archive/)** | 已归档（历史 / 废弃，不参与日常查阅，**勿照做**） |
 
 ---
 

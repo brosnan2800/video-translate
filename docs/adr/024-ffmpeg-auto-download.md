@@ -14,7 +14,7 @@
 - 找到的可能是版本各异的手动安装包，行为漂移；
 - 对小白 / 新 Agent 完全不可预知。
 
-且 `make setup`（依赖+模型）**不覆盖 ffmpeg**，首次 `doctor` 常因 ffmpeg `[MISS]`
+且 `uv run video-translate setup`（依赖+模型）**不覆盖 ffmpeg**，首次 `doctor` 常因 ffmpeg `[MISS]`
 卡在环境就绪前。
 
 ## 决策

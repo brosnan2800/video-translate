@@ -53,7 +53,7 @@ wiring contradicted it): forcing VAD here re-introduces the exact drop this modu
 exists to fix — speech sitting under laughter / cheer / music is ejected by VAD.
 On `emily-blunt.mp4` the five cheer-masked windows (4:06, 4:24, 4:59, 6:15,
 15:29) were recovered only because the recovery ran bare. See also
-[ADR-015](adr:/015-adaptive-per-chunk-vad.md) for preventing the miss upstream.
+[ADR-015](../adr/015-adaptive-per-chunk-vad.md) for preventing the miss upstream.
 
 ### Prefix-collapse probe (`_probe`, ADR-036)
 Whisper latches onto whatever sits at the *start* of the decode window: if the

@@ -1,8 +1,10 @@
 # Spec 04 — Generate Subtitles
 
 Module: `generate.py` (+ `srt_utils.py`, `io_utils.py`). Produces the four
-Jianying(剪映)-importable deliverables. **This is the golden-regression stage:
-output must be byte-for-byte identical to `docs/golden/apollo_story.*`.**
+Jianying(剪映)-importable deliverables. **This is the golden-regression stage:**
+输出须与 `apollo_story.*` 基线**字节级一致**；该基线**已停止仓库跟踪** ——
+`docs/golden/` 缺失时 `tests/test_generate_golden.py` 自动 skip，不构成失败
+（见 MAJOR_VERSION_PLAN §0.2 铁律 6）。
 
 ## Inputs
 - `{base}.segments_en.json` — list of `{start, end, text}` (Spec 01).

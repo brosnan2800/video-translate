@@ -4,15 +4,15 @@
 > P0（环境体检 + 音频画像）与 P1（转写）之间的**引导选择式决策点**，以及「绝不跳步、
 > 绝不裸跑无画像」的代码硬保证。
 >
-> 配套代码：`../src/video_translate/audio_profile.py`、`state.py`、`toolchain.py`、`cli.py`；
-> 单一入口推进器见 [`../docs/adr/033-control-plane-pipeline-entry.md`](../docs/adr/033-control-plane-pipeline-entry.md)
-> 与 [`../docs/specs/24-pipeline-behavior.md`](../docs/specs/24-pipeline-behavior.md)；Agent 协议见
-> [`../AGENTS.md`](../AGENTS.md) §4.5；状态机定义见
-> [`../src/video_translate/pipeline_def.py`](../src/video_translate/pipeline_def.py)
+> 配套代码：`../../src/video_translate/audio_profile.py`、`state.py`、`toolchain.py`、`cli.py`；
+> 单一入口推进器见 [`033-control-plane-pipeline-entry.md`](033-control-plane-pipeline-entry.md)
+> 与 [`../specs/24-pipeline-behavior.md`](../specs/24-pipeline-behavior.md)；Agent 协议见
+> [`../../AGENTS.md`](../../AGENTS.md) §4.5；状态机定义见
+> [`../../src/video_translate/pipeline_def.py`](../../src/video_translate/pipeline_def.py)
 > （纯数据声明式流程表）与 ADR-030。
 >
 > **数据契约（ADR-035）**：阶段间产物的命名 / 字段 / 生产者 / 消费者 / 可否重算 /
-> 必须穿透字段，以 [`../src/video_translate/artifacts.py`](../src/video_translate/artifacts.py)
+> 必须穿透字段，以 [`../../src/video_translate/artifacts.py`](../../src/video_translate/artifacts.py)
 > 声明式契约表为**唯一事实来源**；本文出现的文件名与契约表不一致时，以契约为准。
 > 要点：`segments_raw.json` 全字段不可变（置信度跟段绑死）；`segments_en.json` 是
 > 带 `_raw_indices` 回查指针的合并视图（不聚合不覆盖）；声学事实

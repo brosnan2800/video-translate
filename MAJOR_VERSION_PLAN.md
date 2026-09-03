@@ -86,7 +86,7 @@ flowchart TD
 
 ## 2A. E 系列 — 环境确定性工程（下一阶段最高优先级）
 
-> **背景**（详见 [docs/RESEARCH-voice-pro.md](docs/RESEARCH-voice-pro.md)）：对标 Voice-Pro v4.0 的安装工程最佳实践，解决本项目的环境痛点——依赖版本飘移、ffmpeg「全盘搜」自由发挥、CUDA DLL 借外部项目路径、模型缓存残缺误判。目标是**新机器 clone 后 `make setup` 一次成功率逼近 100%**，Agent 无任何自由发挥空间。
+> **背景**（详见 [docs/RESEARCH-voice-pro.md](docs/RESEARCH-voice-pro.md)）：对标 Voice-Pro v4.0 的安装工程最佳实践，解决本项目的环境痛点——依赖版本飘移、ffmpeg「全盘搜」自由发挥、CUDA DLL 借外部项目路径、模型缓存残缺误判。目标是**新机器 clone 后 `uv run video-translate setup` 一次成功率逼近 100%**，Agent 无任何自由发挥空间。
 >
 > **共同约束**：每个任务落地时必须遵守 §3.2 依赖规则与 AGENTS.md §1 红线；先写测试（TDD）；文档随代码同步更新。**每项 E/T 均须落 ADR（架构决策）+ Spec（对外行为），不得只改代码**——E1-E4 落地记录：ADR-023/024/025/026 + Spec 20。
 
@@ -98,12 +98,12 @@ flowchart TD
 3. `TOOLCHAIN.md` §2.5 与 `README.md` Quickstart 安装口径统一为：**uv sync 为标准路径，pip 为兜底**；`pyproject` 任何依赖变更后必须重跑 `uv lock` 并同 commit 提交。
 **涉及文件**：`uv.lock`（新增）、`Makefile`、`TOOLCHAIN.md`、`README.md`
 **验收标准**：
-- 新 clone 目录下 `make setup` 一次成功（uv 路径），`uv lock --check` 通过；
+- 新 clone 目录下 `uv run video-translate setup` 一次成功（uv 路径），`uv lock --check` 通过；
 - Windows/Linux 装出 `+cu124` torch，macOS 装出 CPU torch（复用既有 marker 验证）；
 - 全量 `pytest` 绿。
 
 ### E2 — ffmpeg 自动下载便携版（消灭「全盘搜」）【P0】
-> **问题**：`TOOLCHAIN.md` §2.1 第 3 步「全盘搜 C:/D:/E:/F: 找 ffmpeg.exe 写回 .env」是全流程中不确定性最高、最容易导致缓存散落的一步；且 `make setup` 不覆盖 ffmpeg。
+> **问题**：`TOOLCHAIN.md` §2.1 第 3 步「全盘搜 C:/D:/E:/F: 找 ffmpeg.exe 写回 .env」是全流程中不确定性最高、最容易导致缓存散落的一步；且 `uv run video-translate setup` 不覆盖 ffmpeg（需 `setup --ffmpeg`）。
 **动作清单**：
 1. `toolchain.py` 新增 `ensure_ffmpeg(dest="tools/ffmpeg") -> str | None`：按 `sys.platform` **先选平台再选源**下载便携版并解压——Windows：镜像 → [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) release-full (zip)；Linux：静态构建 (tar.xz)；macOS：evermeet/镜像 (zip)。下载走既有 `proxy.detect_proxy` 机制；**禁止跨平台复用同一包**。
 2. `cli.py` `setup` 子命令新增 `--ffmpeg` 旗标：检测 ffmpeg 缺失时下载、解压至 `tools/ffmpeg/`，并自动把 `VT_FFMPEG_DIR` 写入 `.env.local`（gitignore 内，机器私有）。
@@ -232,7 +232,7 @@ flowchart TD
 **涉及文件**：`src/video_translate/artifacts.py`（新）、`state.py`、`pipeline_def.py`、
 `pipeline.py`、`merge.py`、`fill_gaps.py`、`review.py`、`verify.py`、`translate.py`、
 `cli.py`、`audio_profile.py`、`vocal_sep.py`、`.codebuddy/rules/`、
-`AGENTS.md`、`docs/TRANSLATION-WORKFLOW.md`、`tests/test_pipeline_field_contract.py`（新）。
+`AGENTS.md`、`docs/adr/032-translation-workflow.md`、`tests/test_pipeline_field_contract.py`（新）。
 
 **落地文档**：ADR-035（数据契约总线）。
 
@@ -275,7 +275,7 @@ flowchart TD
 **涉及文件**：`src/video_translate/cli.py`（新增 `pipeline` 子命令 + `--prompt` 旗标）、
   `src/video_translate/config.py`（新增 `prompt` 配置项，默认 `always`）、
   `src/video_translate/pipeline.py`（引擎扩展「推进到下一挂起点」驱动）、
-  `AGENTS.md`（§3 瘦身 + 退出码表 exit 6 语义扩展）、`docs/TRANSLATION-WORKFLOW.md`
+  `AGENTS.md`（§3 瘦身 + 退出码表 exit 6 语义扩展）、`docs/adr/032-translation-workflow.md`
   （数据流改为 pipeline 入口，§2.1 / §5 决策点语义同步）、`tests/test_pipeline_advance.py`（新增）。
   T10 落地后：产物定位/命名一律查 `artifacts.py` 契约表（`build_ctx` 改查表）。
 
@@ -313,7 +313,7 @@ flowchart TD
    review 塞 fill_gaps 不破坏 T8 两停点。
 
 **涉及文件**：`src/video_translate/audio_profile.py`、`transcribe.py`、`fill_gaps.py`、
-`vocal_sep.py`、`docs/adr/011/012/034`、`docs/TRANSLATION-WORKFLOW.md`、`tests/`。
+`vocal_sep.py`、`docs/adr/011/012/034`、`docs/adr/032-translation-workflow.md`、`tests/`。
 T10 落地后：声学数据（silence_intervals/duration）读 state 契约不重算；信号 A 经
 `_raw_indices` 回查 raw 段（[ADR-035](docs/adr/035-pipeline-data-contract.md)）。
 
@@ -354,7 +354,7 @@ T10 落地后：声学数据（silence_intervals/duration）读 state 契约不�
 | R2 | **CUDA wheel 只走镜像索引，绝不裸装**：`uv sync` 认 `[tool.uv.sources]`；pip 必须显式 `--index-url`，且版本与 `pyproject` 一致（当前 **cu128** / torch 2.8 线，由 `[gpu]` extra 的 whisperx 3.8.x 决定） | 裸 `pip install torch` 装成 `+cpu`；或按旧文档装 cu124 而与 lock 冲突 | `uv sync` / `pip install --index-url …/pytorch-wheels/cu128/` |
 | R3 | **`uv.lock` 是依赖唯一事实来源**：任何 `pyproject` 依赖变更，必须在同一 commit 内重跑 `uv lock` 提交（E1 落地后生效） | 改了 pyproject 不更新 lockfile，换机版本飘移 | pyproject + uv.lock 成对变更 |
 | R4 | **外部二进制（ffmpeg 等）不手动安装、不进 git**：统一由 `setup --ffmpeg` 自动下载到 `tools/`（gitignore），路径写 `.env.local` 登记 | Agent 全盘搜 ffmpeg.exe 写回协议；把 ffmpeg.exe 提交进仓库 | `video-translate setup --ffmpeg` 一步到位 |
-| R5 | **模型权重不进 git，项目本地优先（零 C 盘）**：默认落项目根 `models/<name>/`（含 `model.bin`），随项目拷贝、不读写系统用户目录；仅当项目根 `models/` 缺失时才回退 `HF_HOME`（默认 `~/.cache/huggingface` 仍可用作覆盖）；缓存必须过完整性校验（E3，下限 2GiB 自愈） | 每项目塞一份 3GB 权重进 git；把模型缓存散落 C 盘用户目录；残缺 model.bin 静默使用 | `make setup` 拉模型到 `<repo>/models/` + 完整性自愈校验 |
+| R5 | **模型权重不进 git，项目本地优先（零 C 盘）**：默认落项目根 `models/<name>/`（含 `model.bin`），随项目拷贝、不读写系统用户目录；仅当项目根 `models/` 缺失时才回退 `HF_HOME`（默认 `~/.cache/huggingface` 仍可用作覆盖）；缓存必须过完整性校验（E3，下限 2GiB 自愈） | 每项目塞一份 3GB 权重进 git；把模型缓存散落 C 盘用户目录；残缺 model.bin 静默使用 | `uv run video-translate setup` 拉模型到 `<repo>/models/` + 完整性自愈校验 |
 | R6 | **新依赖准入检查清单**（合并前逐项确认）：① 跨平台？（Mac/CPU 降级路径）② 影响转写产物→是否需进 chunk 缓存指纹？③ GPU 显存预算（8GB 红线，单一大模型串行）④ 是否有纯标准库/既有依赖的等价实现？⑤ lockfile 同步 | 引入 pyannote 但不检查 Mac 降级，Mac 用户 pip 装不上 | 每项检查写入对应任务 Spec |
 | R7 | **镜像/代理固化在配置，不靠临场决策**：PyPI/PyTorch 镜像进 `[tool.uv.index]` / `PIP_EXTRA_INDEX_URL`；HF 镜像进 `HF_ENDPOINT`；安装时任何 Agent/人工不得现场拼源 | 每次安装现场挑镜像，换机不可复现 | TOOLCHAIN.md §1.2 环境变量段 |
 
@@ -368,7 +368,7 @@ T10 落地后：声学数据（silence_intervals/duration）读 state 契约不�
 2. **里程碑 2 (已完成)**：T2 智能人声/伴奏分离预处理（ADR-017 / Spec 19 落地，Demucs 纯人声剥离 + 显存显式清理 + 缓存指纹）。
 3. **里程碑 3 (下一阶段核心，2026-08-25 重定) — 环境确定性工程（E1-E4）**：
    - E1 uv.lock 可复现安装 → E2 ffmpeg 自动下载 → E3 模型缓存自愈 → E4 CUDA venv 优先，**按序执行**（E1 是其余任务的地基）。
-   - 完成判据：新 clone 机器 `make setup` + `setup --ffmpeg` 两条命令后 `doctor` 全绿，无任何手动 PATH/全盘搜/改 .env 操作。
+   - 完成判据：新 clone 机器 `uv run video-translate setup` + `setup --ffmpeg` 两条命令后 `doctor` 全绿，无任何手动 PATH/全盘搜/改 .env 操作。
 4. **里程碑 4 (业务功能恢复)**：
    - **第一步**：实施 **T3 双轨翻译风格体系**（纯逻辑与 Prompt 体系，扩展影视口语二创与严谨直译两套译文）。
    - **第二步**：实施 **T4 WhisperX 强制对齐** 与 **T5 说话人分离**（GPU 盒专享加速）。
@@ -414,7 +414,7 @@ T10 落地后：声学数据（silence_intervals/duration）读 state 契约不�
 
 - **T1**：Mac 本地回归通过（`device=auto` 等价原 `cpu/int8`，产物与历史一致）；Windows `nvidia-smi` 下 `device=cuda` 生效、速度提升；cpu/int8 产物与历史一致。【已通过】
 - **T2**：`--separate-vocals` 成功分离出 `vocals.wav` 喂给 Whisper，强 BGM 场景无多余幻觉，时间戳保持 100% 原始对齐。【已通过，13 条单测全绿】
-- **E1**：新 clone 环境 `make setup`（uv 路径）一次成功；`uv lock --check` 通过；平台 marker 验证（Win/Linux → cu124，macOS → cpu）。
+- **E1**：新 clone 环境 `uv run video-translate setup`（uv 路径）一次成功；`uv lock --check` 通过；平台 marker 验证（Win/Linux → cu124，macOS → cpu）。
 - **E2**：无 ffmpeg PATH 的环境 `video-translate setup --ffmpeg` 后 `doctor` 全绿；下载/解压/登记全流程单测（mock 网络）覆盖。
 - **E3**：残缺缓存（<2GB 假 model.bin）被检出并自愈重下；`run` 阶段模型加载失败输出含修复命令的指引。
 - **E4**：不配 `VT_CUDA_DIR` 时 GPU 机器自动用 venv torch/lib 命中 CUDA；显式 `VT_CUDA_DIR` 仍优先；无 GPU 静默降级 CPU；`doctor` 标注 CUDA 来源。

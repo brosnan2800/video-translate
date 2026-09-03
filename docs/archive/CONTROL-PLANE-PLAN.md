@@ -2,7 +2,7 @@
 
 > 前置阅读：原 `CURRENT_PIPELINE.md`（master 基线 @ 5845102：9 个静默点 / 3 个介入点 / 3 处失控交接处，已删除，历史对照见 git 记录）。
 > 定位：消灭 Agent-as-Orchestrator（编排收归代码），保留 Agent-as-Translator（翻译走文件契约，ADR-005 / Spec 09）。
-> 状态：**已批准 · 全量落地**（2026-09-01，落地记录见 [ADR-030](adr/030-control-plane.md)）—— 不分期：原 S1/S2/S3 合并为依赖序 Steps 0–10 一次实施完毕（验收清单见 §7）。
+> 状态：**已批准 · 全量落地**（2026-09-01，落地记录见 [ADR-030](../adr/030-control-plane.md)）—— 不分期：原 S1/S2/S3 合并为依赖序 Steps 0–10 一次实施完毕（验收清单见 §7）。
 
 ---
 

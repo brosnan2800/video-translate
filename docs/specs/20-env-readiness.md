@@ -25,7 +25,7 @@ Spec 23（命令入口确定化，统一 `uv run`）。
 
 ## 接口契约
 
-### `setup` 子命令（`uv run video-translate setup`，等价 `make setup`）
+### `setup` 子命令（`uv run video-translate setup`）
 
 - 主路径 `uv sync --extra dev`（pip 兜底，ADR-023）。
 - 预拉模型到 `<repo>/models/`；下载前删除「存在但 < 2 GiB」的残缺 `model.bin`

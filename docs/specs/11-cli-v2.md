@@ -1,5 +1,10 @@
 # Spec 11 — CLI v2 (zero-config + engine selection)
 
+> **用户向参数速查见 [`README.md`](../../README.md)（CLI 速查表主源）**；本文件是
+> **CLI 行为契约**（zero-config 推导规则、engine 选择等），两处冲突时以本契约为准。
+> 命令入口统一 `uv run` 见 [Spec 23](23-environment-location.md)；`pipeline` 幂等推进器
+> 见 [Spec 24](24-pipeline-behavior.md) / [ADR-033](../adr/033-control-plane-pipeline-entry.md)。
+
 Module: `cli.py`. Supersedes the V1 CLI surface (formerly `05-cli.md`, now removed).
 Implements the CLI/UX overhaul (decision A1–A4).
 

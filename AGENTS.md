@@ -271,7 +271,7 @@ BGM 场景 `--separate-vocals`、干净录音 `--vad`。
 - 决策点超时：`VT_DECISION_TIMEOUT_SECONDS`（默认 300） → `.env` 或 `.video-translate.toml` 的 `decision_timeout_seconds`
 - 决策点模式：`VT_PROMPT`（默认 `always`）→ 同上 `prompt`（[pipeline] 节）
 - 默认风格 / VAD 阈值等：对应 `VT_STYLE` / `VT_VAD_THRESHOLD`（默认 0.35）等，见
-  [config.py](../src/video_translate/config.py) 与 `.env.example`
+  [config.py](src/video_translate/config.py) 与 `.env.example`
 
 ---
 
@@ -279,5 +279,5 @@ BGM 场景 `--separate-vocals`、干净录音 `--vad`。
 
 - **断点续跑原则**：严禁在排查问题时删除 `chunk_*.json` 或 `segments_raw.json`。若只需重跑翻译与生成，使用 `run --skip transcribe`。
 - **环境隔离详情**：参见 [`TOOLCHAIN.md`](TOOLCHAIN.md)。
-- **控制平面详情**：状态机 / 闸门 / 退出码参见 [ADR-030](docs/adr/030-control-plane.md) 与 [`docs/CONTROL-PLANE-PLAN.md`](docs/CONTROL-PLANE-PLAN.md)；`Makefile` 入口已移除（与红线 R7 一致：一切命令 `uv run` 前缀，编排不设第二软约束）。
+- **控制平面详情**：状态机 / 闸门 / 退出码参见 [ADR-030](docs/adr/030-control-plane.md) 与 [`docs/archive/CONTROL-PLANE-PLAN.md`](docs/archive/CONTROL-PLANE-PLAN.md)；`Makefile` 入口已移除（与红线 R7 一致：一切命令 `uv run` 前缀，编排不设第二软约束）。
 - **历史演进与技术案例**：参见 [`docs/HISTORY.md`](docs/HISTORY.md) 与 [`docs/POSTMORTEM-JamieFoxx.md`](docs/POSTMORTEM-JamieFoxx.md)。

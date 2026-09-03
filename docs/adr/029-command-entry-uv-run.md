@@ -14,7 +14,7 @@
    不在 PATH → 裸 `python` 命中 `F:\Python311\python.exe`、裸 `video-translate`
    命中 `F:\Python311\Scripts\video-translate.exe`（缺 whisperx）、裸 `uv` 也
    命中 `F:\Python311\Scripts\uv.exe`。
-2. **`make` 不存在**：Windows 本机 `make` 不可用，`make setup` / `make doctor`
+2. **`make` 不存在**：Windows 本机 `make` 不可用，原 `make setup` / `make doctor` 入口
    入口失效。
 3. **文档/执行层用裸命令**：Makefile `PY := python`、README/AGENTS 大量裸
    `video-translate`，依赖 PATH 解析，必然漂移。

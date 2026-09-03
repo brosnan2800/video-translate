@@ -36,7 +36,7 @@ Voice-Pro 已验证：**PyTorch cu1xx wheel 自带完整 CUDA 运行时**（cubl
 
 ## 理由
 
-- **根治新机不可复现**：不再依赖「恰好装过 pyvideotrans」；CUDA 随 `make setup`
+- **根治新机不可复现**：不再依赖「恰好装过 pyvideotrans」；CUDA 随 `uv run video-translate setup`
   （E1 的 cu124 wheel）一步到位。
 - **与 ADR-014 协同**：ADR-014 解决「选 cuda 还是 cpu」，本 ADR 解决「cuda 时 DLL
   从哪来」，二者构成完整的 CUDA 设备抽象。
@@ -44,7 +44,7 @@ Voice-Pro 已验证：**PyTorch cu1xx wheel 自带完整 CUDA 运行时**（cubl
 
 ## 后果
 
-- 正面：Windows GPU 盒 `make setup` 后开箱即用 CUDA；`doctor` 来源可审计；
+- 正面：Windows GPU 盒 `uv run video-translate setup` 后开箱即用 CUDA；`doctor` 来源可审计；
   Mac 无感（自动 CPU 降级，字节级不变）。
 - 负面 / 注意：依赖 uv 装出 **cu124** wheel（ADR-023 的索引保证），若误装 cpu wheel
   则自动探测不到 CUDA；OOM / cuDNN 冲突风险仍在计划 §4，需 GPU 盒实测。

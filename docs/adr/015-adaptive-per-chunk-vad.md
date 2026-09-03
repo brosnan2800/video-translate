@@ -1,7 +1,8 @@
 # ADR-015 — Per-chunk adaptive VAD routing
 
 Date: 2026-08-19
-Status: Accepted
+Status: Accepted（**已被 ADR-034 部分降级**：画像门控废弃，`--adaptive-vad`
+仅作显式 flag；本 ADR 的「按 chunk 音频画像动态路由」粒度决策仍然成立）
 Supersedes: ADR-011 (global VAD opt-in) for *routing granularity* only; VAD
 remains opt-in (default bare) per ADR-011.
 

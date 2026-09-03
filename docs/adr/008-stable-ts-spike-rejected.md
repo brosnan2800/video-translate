@@ -25,7 +25,7 @@ V2 转写阶段直接用 `faster_whisper.WhisperModel`，`model.transcribe` 未�
 - 为降低改动面，采用 `regroup=False`：**保留 V2 自写 `merge.py` 当唯一合并真相源**，stable-ts 仅供词级时间戳，不接管段落重组。
 
 ## 回退
-若 Spike 证实 stable-ts 在 py3.13 装不上或代价不可接受，则回退方案 (A)：faster-whisper 开 `word_timestamps` + `merge.py` 内自写 `split_by_length` / `split_by_gap`（路线 A，零新增依赖）。已记入计划风险与 `docs/V3-STATUS.md`。
+若 Spike 证实 stable-ts 在 py3.13 装不上或代价不可接受，则回退方案 (A)：faster-whisper 开 `word_timestamps` + `merge.py` 内自写 `split_by_length` / `split_by_gap`（路线 A，零新增依赖）。已记入计划风险与 `docs/archive/V3-STATUS.md`。
 
 ## 决策更新（Spike 结果，2026-07-26）
 Spike **触发回退路线 A**：

@@ -18,7 +18,7 @@
 1. 用户 PATH 中 `F:\Python311\Scripts`、`F:\Python311` 排在前面，项目
    `.venv\Scripts` 不在 PATH → 裸 `python` / `video-translate` / `uv` 全部命中
    旧环境。
-2. `make` 在 Windows 本机不存在 → `make setup` / `make doctor` 入口失效。
+2. `make` 在 Windows 本机不存在 → 依赖 `make setup` / `make doctor` 的入口失效（现统一为 `uv run ...`）。
 3. Makefile / README / AGENTS 曾用裸命令，依赖 PATH 解析 → 同漂移。
 4. 已在旧环境验证 `uv run video-translate doctor` 能正确定位 `.venv`
    （whisperx `OK`、CUDA 指向 `.venv\...\torch\lib`）——证明 `uv run`

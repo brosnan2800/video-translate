@@ -2,7 +2,7 @@
 
 - **Status**: Accepted（已全量落地，cp Steps 1–10）
 - **Date**: 2026-09-01
-- **关联**: `docs/CONTROL-PLANE-PLAN.md`（设计定稿）、ADR-005（Agent-as-Engine 文件契约）、ADR-012（声学真值）、ADR-020/021（幻觉拦截）、ADR-028（WhisperX 对齐）、ADR-029（命令入口）、Spec 18（verify）、Spec 23（环境定位）
+- **关联**: `docs/archive/CONTROL-PLANE-PLAN.md`（设计定稿）、ADR-005（Agent-as-Engine 文件契约）、ADR-012（声学真值）、ADR-020/021（幻觉拦截）、ADR-028（WhisperX 对齐）、ADR-029（命令入口）、Spec 18（verify）、Spec 23（环境定位）
 - **落地**: `capabilities.py`、`state.py`、`pipeline_def.py`、`pipeline.py`、`cli.py`（意图闸 / generate 前置闸 / verify strict / `status` / NEXT 块 / 退出码 8）、`toolchain.py` 工具解析持久化；AGENTS.md 双职责分离；Makefile 移除
 
 ## 背景
@@ -58,6 +58,6 @@ P4 verify 默认放行**。流程推进靠 AGENTS.md 文字编排（Agent-as-Orc
   （覆盖率/段数/漂移/陈旧）无法再出货；`status --json` 让 agent 不再靠读散文编排。
 - 负面 / 注意：verify strict 化会拒绝历史上能退 0 的坏输出（**设计意图**）；
   逃生门必须显式；既有 CI/脚本若依赖旧默认需加 `--no-strict`。
-- 规范入口：`AGENTS.md` §3.5 / `docs/CONTROL-PLANE-PLAN.md`；单测
+- 规范入口：`AGENTS.md` §3.5 / `docs/archive/CONTROL-PLANE-PLAN.md`；单测
   `tests/test_capabilities.py`、`test_state.py`、`test_control_plane_intent.py`、
   `test_generate_gate.py`、`test_verify_gate.py`、`test_pipeline.py`、`test_state_chain.py`。

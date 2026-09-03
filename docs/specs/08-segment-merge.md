@@ -40,10 +40,13 @@ length indirectly (a sentence spoken in ≤8s is bounded). Splitting deferred to
   merge is transparent to them.
 
 ## Golden
-- `docs/golden/apollo_story.segments_raw.json` — V1 unmerged (209 segs).
-- `docs/golden/apollo_story.merged_segments.json` — frozen `merge_segments(raw)`
+> **基线已停止仓库跟踪**：下列文件不在仓库 `docs/golden/` 内，缺失时
+> `test_merge_golden.py` 自动 skip，不构成失败（MAJOR_VERSION_PLAN §0.2 铁律 6）。
+
+- `apollo_story.segments_raw.json` — V1 unmerged (209 segs).
+- `apollo_story.merged_segments.json` — frozen `merge_segments(raw)`
   (199 segs). `test_merge_golden.py` asserts byte-exact determinism.
-- `docs/golden/apollo_story.segments_en.json` stays V1-unmerged until Stage 4
+- `apollo_story.segments_en.json` stays V1-unmerged until Stage 4
   (where it becomes the merged canonical + retranslated zh).
 
 ## Defaults

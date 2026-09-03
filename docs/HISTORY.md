@@ -18,8 +18,8 @@
 - **Glossary (V3, Spec 14):** pass `--glossary PATH` (txt/json) to keep
   character/proper-noun names consistent across episodes. It is injected into
   the task's persona context (soft guidance, not forced replacement).
-- See [`docs/design/translation-design.md`](docs/design/translation-design.md)
-  for the principles, and [`docs/V3-STATUS.md`](docs/V3-STATUS.md) for what
+- See [`archive/design/translation-design.md`](archive/design/translation-design.md)
+  for the principles, and [`archive/V3-STATUS.md`](archive/V3-STATUS.md) for what
   shipped / what's deferred.
 
 ## V4 additions (quality, layout, drift-snap, scene context)
@@ -59,7 +59,7 @@ cache fingerprint auto-invalidates via payload change). Both signals are covered
 by unit tests replaying the real sitcom samples.
 - **Cache fingerprint (V4):** chunk cache names now include a sha1 of **all
   recipe params** (`{base}.{fp}.chunk_N.json`). Changing any transcribe param
-  auto-invalidates old caches — no need to manually `make clean`.
+  auto-invalidates old caches — no need to manually clean caches.
 - **Output layout (V5):** final files go to `<outdir>/<base>/` with `_vN`
   collision bumps. 剪映 always imports fresh. Use `--flat` for legacy layout,
   `--prune-old` to keep only 2 newest.
@@ -161,7 +161,7 @@ VAD-off bare pass first** before delivering.
 
 > The V8–V13 pit narrative (big-segment drop, in-segment collapse, prefix
 > collapse, echo leak, zh/en drift, residual holes, plus the unresolved Oval
-> Office overlap-echo item) is in [`docs/POSTMORTEM-JamieFoxx.md`](docs/POSTMORTEM-JamieFoxx.md)
+> Office overlap-echo item) is in [`POSTMORTEM-JamieFoxx.md`](POSTMORTEM-JamieFoxx.md)
 > — this section only covers V7 and earlier.
 
 ---

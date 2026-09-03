@@ -199,7 +199,7 @@ digest 变化 → 旧 review 缓存与下游指纹自动失效（一次性）。
 `pipeline.py`、`merge.py`、`fill_gaps.py`、`review.py`、`verify.py`、
 `translate.py`（如消费段字段则小改）、`cli.py`、`audio_profile.py`、
 `vocal_sep.py`、`.codebuddy/rules/`、`AGENTS.md`、
-`MAJOR_VERSION_PLAN.md`、`docs/TRANSLATION-WORKFLOW.md`、
+`MAJOR_VERSION_PLAN.md`、`docs/adr/032-translation-workflow.md`、
 `tests/test_pipeline_field_contract.py`（新）。
 
 ### 5.2 性能

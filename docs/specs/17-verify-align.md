@@ -47,7 +47,7 @@ never blocks the render, letting the caller decide.
 ## Wiring
 `cli.cmd_generate` loads `args.segments` (`segments_en.json`) and `args.zh`
 (`zh_segments.json`) as JSON and calls `report()`. Skipped entirely when
-`--no-align-check` is passed. `make test` covers the pure functions
+`--no-align-check` is passed. `uv run pytest` covers the pure functions
 (`check_alignment`, `check_digits`) with synthetic shifted fixtures.
 
 ## Defaults

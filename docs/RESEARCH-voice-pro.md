@@ -17,7 +17,7 @@
 | 人声分离 | Demucs | Demucs（ADR-017，**同款**） |
 | 质量护栏 | 无体系化门禁（能出结果即可） | 三 Lane 门禁：声学/内容/表现（Spec 18），幻觉拦截五信号（ADR-020），自适应 VAD（ADR-015），fill_gaps 补洞（ADR-016） |
 | 断点续跑 | 无显式设计 | chunk_N.json 分块缓存 + 指纹续跑 |
-| 安装 | uv + uv.lock 可复现；`start.bat` 自动下 Python 3.12 + 便携 ffmpeg；无需 CUDA Toolkit；删目录即卸载 | `make setup`（E1 uv sync + 模型预拉）；ffmpeg 走 `setup --ffmpeg` 自动下载（E2）；CUDA 走 venv torch/lib 自动探测（E4）——四项 P0/P1 借鉴已全部落地 |
+| 安装 | uv + uv.lock 可复现；`start.bat` 自动下 Python 3.12 + 便携 ffmpeg；无需 CUDA Toolkit；删目录即卸载 | `uv run video-translate setup`（E1 uv sync + 模型预拉）；ffmpeg 走 `setup --ffmpeg` 自动下载（E2）；CUDA 走 venv torch/lib 自动探测（E4）——四项 P0/P1 借鉴已全部落地 |
 | 模型管理 | 统一 `model/` 目录，卸载保留；下载自愈（中断/损坏自动修复）；首次约 10GB | 项目根 `models/` 本地优先（零 C 盘）+ 完整性校验与残缺自愈（E3）；卸载语义对齐 |
 | 离线能力 | 有限（翻译/Edge-TTS 在线） | 转写+翻译全离线（Agent 本地推理） |
 | 维护状态 | **已暂停**（团队转向 WeConnect） | 活跃开发中 |
@@ -64,7 +64,7 @@ Voice-Pro v4.0 的安装体验是目前开源 AI 工具的最佳实践：
 4. **预编译 wheel 自带 CUDA 运行时**：Torch 2.8+cu128 wheel 内嵌 CUDA，明确宣布"不需要装 CUDA Toolkit 和 Visual Studio Build Tools"
 5. **故障排查哲学**：删 `installer_files` 重跑 `start.bat` = 几分钟内干净重装；`uninstall.bat` 保留 `model/` 和 `workspace/` 用户数据
 
-**落地状态（E1–E4，见 [docs/TOOLING.md](TOOLING.md)）**：P0/P1 四项已全部完成——提交 `uv.lock` + `make setup` 改 `uv sync`（E1）；`setup --ffmpeg` 自动下载便携版、消灭"全盘搜"（E2）；模型完整性校验 + 残缺自愈（E3）；CUDA 改 venv 内 torch/lib 自动探测，不再借 pyvideotrans（E4）。`update`/`uninstall` 语义（保留 `models/`+`videos/`）待 P2 跟进。
+**落地状态（E1–E4，见 [docs/TOOLING.md](TOOLING.md)）**：P0/P1 四项已全部完成——提交 `uv.lock` + `setup` 主路径改 `uv sync`（E1）；`setup --ffmpeg` 自动下载便携版、消灭"全盘搜"（E2）；模型完整性校验 + 残缺自愈（E3）；CUDA 改 venv 内 torch/lib 自动探测，不再借 pyvideotrans（E4）。`update`/`uninstall` 语义（保留 `models/`+`videos/`）待 P2 跟进。
 
 ### 3.4 模型管理：各有优劣（差异已收窄）
 
@@ -80,7 +80,7 @@ Voice-Pro 12.6k Stars 却因团队转向而停更——一站式堆功能（STT+
 ## 4. 值得借鉴的点（按优先级排序）
 
 ### ✅ P0（已完成，E1）：提交 `uv.lock`，文档主推 `uv sync`
-- 落地：`uv.lock` 已提交；`Makefile setup` 主路径 `uv sync --extra dev`（pip 兜底）；`pyproject`→`uv.lock` 成对变更（R3）；TOOLCHAIN.md / docs/TOOLING.md 口径统一为"uv 优先"
+- 落地：`uv.lock` 已提交；`setup` 主路径 `uv sync --extra dev`（pip 兜底）；`pyproject`→`uv.lock` 成对变更（R3）；TOOLCHAIN.md / docs/TOOLING.md 口径统一为"uv 优先"
 - 收益：环境 100% 可复现，彻底消灭"依赖装错环境/装成 CPU 版"两类红线事故
 
 ### ✅ P0（已完成，E2）：ffmpeg 缺失时自动下载便携版（消灭"全盘搜"）
@@ -95,10 +95,10 @@ Voice-Pro 12.6k Stars 却因团队转向而停更——一站式堆功能（STT+
 
 ### ✅ P1（已完成，E4）：CUDA DLL 解析顺序：venv 内 torch/lib 优先
 - 落地：`toolchain.py` 的 CUDA 解析顺序改为 **venv `torch/lib`（自动探测）→ `VT_CUDA_DIR` 显式覆盖（最高）→ 无则 CPU 降级**；`doctor` 标注来源 `venv-torch`/`env`/`none`；`.env.win.example` 示例路径已移除 pyvideotrans 硬编码
-- 收益：新机器不再依赖"恰好装过 pyvideotrans"，CUDA 随 `make setup` 一步到位
+- 收益：新机器不再依赖"恰好装过 pyvideotrans"，CUDA 随 `uv run video-translate setup` 一步到位
 
 ### P2：`update` / `uninstall` 脚本语义
-- 动作：Makefile 增 `update`（`uv sync` 按 lockfile 快速同步）与 `uninstall`（删 `.venv` 但保留 `models/` 与 `videos/` 产物，与 voice-pro 保留 `model/`+`workspace/` 同语义）
+- 动作：`setup` 子命令增 `update` 语义（`uv sync` 按 lockfile 快速同步）与 `uninstall`（删 `.venv` 但保留 `models/` 与 `videos/` 产物，与 voice-pro 保留 `model/`+`workspace/` 同语义）
 - 收益：故障排查心智模型统一为"环境可随时重建、数据永不误删"
 
 ### P3：yt-dlp 视频拉取入口（远期可选）
@@ -115,7 +115,7 @@ Voice-Pro 12.6k Stars 却因团队转向而停更——一站式堆功能（STT+
 
 | 现有问题 | 原方案 | 更优解（Voice-Pro 验证）→ 落地状态 |
 |---|---|---|
-| 环境初始化"到处缓存"、Agent 自由发挥 | `make setup` + AGENTS.md Phase 0 硬约束 | **uv.lock 可复现**（E1）+ ffmpeg 自动下载（E2）+ 模型本地落点（E3）→ **已闭环**：入口唯一、结果确定、产物集中（.venv + models/ + tools/） |
+| 环境初始化"到处缓存"、Agent 自由发挥 | `uv run video-translate setup` + AGENTS.md 红线约束 | **uv.lock 可复现**（E1）+ ffmpeg 自动下载（E2）+ 模型本地落点（E3）→ **已闭环**：入口唯一、结果确定、产物集中（.venv + models/ + tools/） |
 | ffmpeg "全盘搜"不确定性 | 三步探测文档化 | **自动下载便携版**（E2）→ **已完成**，全盘搜退出文档 |
 | CUDA DLL 借 pyvideotrans 路径，新机不可复现 | `.env` 手填 `VT_CUDA_DIR` | **venv torch/lib 自动优先**（E4）→ **已完成**，wheel 自带 CUDA 运行时 |
 | 模型下载中断后残缺缓存误判 | 无处理 | **完整性校验 + 自愈重下**（E3）→ **已完成** |
@@ -127,7 +127,7 @@ Voice-Pro 12.6k Stars 却因团队转向而停更——一站式堆功能（STT+
 ## 6. 未来升级路线启发（排序）
 
 1. ✅ **环境确定性收口**（E1–E4 已全部落地）：uv.lock 可复现 + ffmpeg 自动下载 + 模型自愈 + CUDA venv 优先 → 已逼近 voice-pro 级安装体验
-2. **更新/卸载语义**（P2 待办）：Makefile 增 `update`（`uv sync` 按 lockfile 快速同步）与 `uninstall`（删 `.venv` 但保留 `models/`+`videos/`，对齐 voice-pro 保留用户数据）
+2. **更新/卸载语义**（P2 待办）：`setup` 子命令增 `update` 语义（`uv sync` 按 lockfile 快速同步）与 `uninstall`（删 `.venv` 但保留 `models/`+`videos/`，对齐 voice-pro 保留用户数据）
 3. **主轴内增强**（保持克制）：转写质量（幻觉信号扩展、VAD 路由细化）、翻译质量（回读闭环加深）——这是护城河，不是功能堆砌
 4. **远期可选**：yt-dlp 入口（P3）、GUI 薄壳（独立项目）
 5. **红线重申**：任何升级不得绕过三 Lane 门禁；依赖必须进 `pyproject` 顶层 + `uv.lock` 成对提交（AGENTS.md §1 + R3）

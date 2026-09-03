@@ -69,7 +69,7 @@ Module: `verify.py` + `cmd_verify`. Decision ADR-012. 补充 [Spec 17](17-verify
   语义回读**默认开**）。
 - 顺序：声学（需 video）→ 内容（需 segments+zh）→ 表现（需生成参数，可选）。
 - 缺 `--video` 时声学 lane 自动跳过并提示。
-- `make test` 覆盖纯函数：`check_cue_in_silence`、`check_cue_cross_silence`、
+- `uv run pytest` 覆盖纯函数：`check_cue_in_silence`、`check_cue_cross_silence`、
   `check_first_cue_early`、`find_uncovered_speech`（漏检探测）、
   `find_untranslated_latin_words`（中英混杂）、`build_semantic_reread_task`
   （中文邻居上下文），用合成静音区间 + cue 序列 fixture。

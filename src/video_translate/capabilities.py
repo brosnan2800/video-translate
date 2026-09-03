@@ -5,7 +5,7 @@ plane (P0 preflight / ``enforce()``). Each capability is a probe function
 (reusing existing detection — never re-implemented ad-hoc) plus deterministic
 repair guidance shown on hard-stop.
 
-Design (see CONTROL-PLANE-PLAN §2):
+Design (see ADR-030 §2 — 原 CONTROL-PLANE-PLAN 已归档至 docs/archive/):
   - ``doctor`` keeps its own rendering for output compatibility; the control
     plane consumes ``CAPS`` / ``probe()`` directly.
   - ``GateFail`` is raised by domain code when an EXPLICIT request cannot be
