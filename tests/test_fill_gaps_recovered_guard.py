@@ -170,6 +170,93 @@ def test_signal_d_single_zero_dur_word_alone_is_not_enough():
 
 
 # ---------------------------------------------------------------------------
+# ADR-036 F3：信号 C 按段长分级 —— 长段真实语音不得再被高 nsp 误杀
+#
+# 事故来源：videos/Nobody Can Handle Christopher Walken's STRANGE Hum.mp4
+# 13:41–13:52（洞 821.44–832.74 无字幕）。fill_gaps 长洞首子窗 pad=4.0 解码
+# [811.44, 837.44] 时，whisper 在 no_speech_threshold=0.0 强制解码下吐出了三段
+# 正确对白，却同时自报 no_speech_prob=0.892；旧信号 C 一刀切（nsp>=0.6 即判
+# 幻觉）把三段全部丢弃，首子窗 coverage=0，洞头永久留空。
+#
+# 下列几何数据为实测采集：零时长词=0（D 未触发）、avg_logprob=-0.2345 > -1.0
+# （C2 未触发）、语速正常且与邻居无重叠（A/B 未触发）—— 唯一杀手就是信号 C。
+# ---------------------------------------------------------------------------
+
+_ACC_NSP = 0.89208984375
+_ACC_ALP = -0.2345145121216774
+
+
+def test_adr036_head_segment_21w_high_nsp_not_dropped():
+    """事故段 1：21 词、nsp=0.892、孤立无重叠 —— 真实对白，必须保留（旧实现误杀）。"""
+    cand = {"start": 821.44, "end": 826.76,
+            "text": "There's one guy who could do and I think we all would "
+                    "watch that guy is Chris Walken. Oh god. Yes",
+            "words": _w((" There's", 821.44, 821.96), (" one", 821.96, 822.06),
+                        (" guy", 822.06, 822.36), (" who", 822.36, 822.56),
+                        (" could", 822.56, 822.68), (" do", 822.68, 822.84),
+                        (" and", 822.84, 823.12), (" I", 823.12, 823.36),
+                        (" think", 823.36, 823.5), (" we", 823.5, 823.58),
+                        (" all", 823.58, 823.76), (" would", 823.76, 823.88),
+                        (" watch", 823.88, 824.1), (" that", 824.1, 824.46),
+                        (" guy", 824.46, 824.72), (" is", 824.72, 825.26),
+                        (" Chris", 825.26, 825.46), (" Walken.", 825.46, 825.98),
+                        (" Oh", 826.0, 826.16), (" god.", 826.16, 826.42),
+                        (" Yes", 826.48, 826.76)),
+            "no_speech_prob": _ACC_NSP, "avg_logprob": _ACC_ALP}
+    assert F._is_recovered_hallucination(cand, []) is False
+
+
+def test_adr036_head_segment_7w_high_nsp_not_dropped():
+    """事故段 2：7 词（刚过 6 词短段阈值）—— 必须保留。"""
+    cand = {"start": 827.3, "end": 829.28,
+            "text": "Chris will be up there going I'm",
+            "words": _w((" Chris", 827.3, 827.82), (" will", 827.82, 828.04),
+                        (" be", 828.04, 828.12), (" up", 828.12, 828.24),
+                        (" there", 828.24, 828.38), (" going", 828.38, 828.52),
+                        (" I'm", 828.52, 829.28)),
+            "no_speech_prob": _ACC_NSP, "avg_logprob": _ACC_ALP}
+    assert F._is_recovered_hallucination(cand, []) is False
+
+
+def test_adr036_head_segment_16w_high_nsp_not_dropped():
+    """事故段 3：16 词 —— 必须保留。"""
+    cand = {"start": 830.22, "end": 837.06,
+            "text": "Inside you so deep inside you now and you now inside "
+                    "you deep inside you now",
+            "words": _w((" Inside", 830.22, 830.74), (" you", 830.74, 831.12),
+                        (" so", 831.12, 832.18), (" deep", 832.18, 832.48),
+                        (" inside", 832.48, 832.94), (" you", 832.94, 833.4),
+                        (" now", 833.4, 833.9), (" and", 833.9, 834.52),
+                        (" you", 834.52, 834.74), (" now", 834.74, 835.08),
+                        (" inside", 835.08, 835.5), (" you", 835.5, 835.9),
+                        (" deep", 835.9, 836.14), (" inside", 836.14, 836.5),
+                        (" you", 836.5, 836.8), (" now", 836.8, 837.06)),
+            "no_speech_prob": _ACC_NSP, "avg_logprob": _ACC_ALP}
+    assert F._is_recovered_hallucination(cand, []) is False
+
+
+def test_adr036_boundary_5w_high_nsp_still_dropped():
+    """分级不得放宽短段：5 词 < 6 且 nsp 高 —— 仍判幻觉（守住阈值下界）。"""
+    cand = {"start": 50.0, "end": 51.8, "text": "Thanks for watching this video.",
+            "words": _w((" Thanks", 50.0, 50.4), (" for", 50.4, 50.7),
+                        (" watching", 50.7, 51.0), (" this", 51.0, 51.3),
+                        (" video.", 51.3, 51.8)),
+            "no_speech_prob": 0.88, "avg_logprob": -0.5}
+    assert F._is_recovered_hallucination(cand, []) is True
+
+
+def test_adr036_boundary_6w_high_nsp_not_dropped():
+    """阈值上界：6 词（>= 6）+ nsp 高 —— 长段豁免生效，保留。"""
+    cand = {"start": 60.0, "end": 62.0,
+            "text": "Thanks for watching this whole video clip.",
+            "words": _w((" Thanks", 60.0, 60.3), (" for", 60.3, 60.6),
+                        (" watching", 60.6, 60.9), (" this", 60.9, 61.2),
+                        (" whole", 61.2, 61.5), (" clip.", 61.5, 62.0)),
+            "no_speech_prob": 0.88, "avg_logprob": -0.5}
+    assert F._is_recovered_hallucination(cand, []) is False
+
+
+# ---------------------------------------------------------------------------
 # 端到端：确认 _decode_once 真正调用守卫 + 携带置信度字段
 # ---------------------------------------------------------------------------
 

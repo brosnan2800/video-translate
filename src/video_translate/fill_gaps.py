@@ -65,11 +65,44 @@ from .transcribe import (
 
 # Pads (seconds) tried when decoding a suspect window, in order. A small pad
 # avoids dragging the neighbouring line's tail into the decoder's prompt (which
-# triggers whisper's prefix collapse); the larger fallbacks exist for windows
-# whose true speech starts slightly before the recorded boundary.
-_PROBE_PADS: tuple[float, ...] = (0.2, 0.0, 0.5)
+# triggers whisper's prefix collapse); the larger fallbacks exist for the case
+# where the hole boundary (gs) itself lands *inside* the previous sentence — the
+# recovered region then starts several seconds before gs, and only a large pad
+# can pull the decode window back to a clean sentence boundary. See ADR-036.
+_PROBE_PADS: tuple[float, ...] = (0.2, 0.0, 0.5, 2.0, 4.0, 6.0)
 # Only long windows are worth multi-probing; short holes get a single decode.
 _MULTI_PROBE_MIN_WINDOW = 4.0
+
+
+def _probe_pads_for_window(window: float) -> tuple[float, ...]:
+    """Pads to try for a recovery window.
+
+    Short holes (e.g. a 2 s gap) are almost always genuine silence-adjacent
+    edits; a large pad would only drag in the neighbour line, so we keep just
+    the small default. Wide holes are where a hard cut can land mid-sentence,
+    so we also try the large look-back pads (ADR-036).
+    """
+    if window < _MULTI_PROBE_MIN_WINDOW:
+        return _PROBE_PADS[:1]
+    return _PROBE_PADS
+
+
+def _coverage_in_hole(cand: list[dict[str, Any]], gs: float, ge: float) -> float:
+    """Sum of candidate-segment duration that falls strictly inside [gs, ge].
+
+    Must be used instead of the whole decode-window span when scoring a probe:
+    a large look-back pad pulls the previous line's tail into the decode window,
+    and counting that tail as "coverage" would inflate the score and trip the
+    early-stop before the real (hole-internal) speech is recovered. Only the
+    portion inside the hole counts toward "did we fill the gap?". See ADR-036.
+    """
+    total = 0.0
+    for seg in cand:
+        ss = max(float(seg["start"]), gs)
+        ee = min(float(seg["end"]), ge)
+        if ee > ss:
+            total += ee - ss
+    return total
 # Stop probing once a decode covers this fraction of the window.
 _PROBE_GOOD_COVERAGE = 0.6
 
@@ -126,6 +159,22 @@ def _recovered_wps(cand: dict[str, Any]) -> float:
     return len(words) / dur
 
 
+# ADR-036 D6 — signal C length grading. Segments with FEWER than this many words
+# keep the unconditional ``no_speech_prob`` rule; longer segments are exempt
+# (see ``_is_recovered_hallucination`` signal C for the rationale and the
+# empirical basis: every documented phantom is 1-4 words, while the ADR-036
+# accident's genuine speech was 7/16/21 words at no_speech_prob=0.892).
+_NSP_SHORT_WORDS = 6
+
+# ADR-036b — big look-back pad re-emits the PREVIOUS line as a tail echo.
+# A recovery overlapping any already-confirmed segment by MORE than this many
+# seconds is re-decoding audio the neighbour already covers — by definition an
+# echo, not hole-filling. Genuine recoveries start at the hole boundary and
+# overlap neighbours by <=0.5s (Walken 821-837s recovery: 0.00s), so this sits
+# in a clean gap between the genuine max (0.50s) and the echo min (1.40s).
+_ECHO_OVERLAP = 1.0
+
+
 def _is_recovered_hallucination(
     cand: dict[str, Any],
     segments: list[dict[str, Any]],
@@ -171,6 +220,15 @@ def _is_recovered_hallucination(
          hallucination. avg_logprob must NOT gate this (phantoms can score
          -0.65 yet be 76% non-speech). C2: avg_logprob < thr alone as a
          fallback for older caches that lack no_speech_prob.
+         **Length-graded (ADR-036 D6)**: C only fires for SHORT segments
+         (< ``_NSP_SHORT_WORDS`` = 6 words). Under forced decode the model
+         emits text even while believing the window is non-speech, and on
+         degraded / characterful source that self-report is systematically
+         wrong — ADR-036's accident decoded 21/7/16 correct words at
+         no_speech_prob=0.892 and lost all of them. Every documented phantom
+         is 1-4 words, so short segments keep the unconditional rule while
+         long ones (coherent text is itself evidence against hallucination)
+         fall through to A / B / D / ``_is_echo``.
       D. >= min_zero_dur_words words with zero duration (start >= end) — the
          DTW-collapse fingerprint (ADR-020 signal 4) applied to RECOVERED
          segments. A phantom decoded from non-speech energy (opening drone
@@ -190,6 +248,24 @@ def _is_recovered_hallucination(
     nw = len(cand.get("words") or [])
     if (check_overlap and nw < max_words_for_overlap
             and _overlap_with_any(cand, segments) > overlap_eps):
+        return True
+    # E (ADR-036b): big look-back pad re-emits the PREVIOUS line as a tail echo.
+    # ADR-036 D1 extended _PROBE_PADS to 0.2/0.0/0.5/2.0/4.0/6.0 so the decode
+    # window can be pushed back to the previous sentence's start to beat prefix
+    # collapse. But when whisper does NOT collapse, that large pad drags the
+    # entire previous line into the window and re-emits it as a "recovery" that
+    # OVERLAPS the already-confirmed neighbour by >1s (Walken 10:02-10:09:
+    # 1.40-2.00s) and re-states its tail (+ a continuation). Genuine hole-filling
+    # recoveries start at the hole boundary and overlap neighbours by <=0.5s
+    # (Walken 821-837s recovery: 0.00s), so a >1s overlap means the decode
+    # re-covered confirmed audio — an echo, not new speech. This closes the gap
+    # D6 opened: signal C now exempts long segments, and signal A only fired for
+    # short (<=4-word) overlaps, so these long tail-echoes slipped through and
+    # landed as duplicate subtitles ("prev cue's latter half == next sentence").
+    # Only on the hole path (check_overlap=True); collapse-replacement / G1 / G2
+    # pass check_overlap=False (their windows intentionally overlap the parent)
+    # and are unaffected.
+    if check_overlap and _overlap_with_any(cand, segments) > _ECHO_OVERLAP:
         return True
     if (cand.get("words") and nw >= min_words
             and _recovered_wps(cand) > max_wps):
@@ -212,8 +288,17 @@ def _is_recovered_hallucination(
     #   Get it.              0.373 -> kept  (low no_speech, plausible)
     # Real recovered speech keeps low no_speech_prob (jimmy 'Got it walking.'
     # 0.1). Threshold mirrors the old no_speech_thr (0.6).
+    #
+    # ADR-036 D6: the rule above only holds for SHORT segments. Under forced
+    # decode (no_speech_threshold=0) whisper emits text even while judging the
+    # audio non-speech, and on degraded / characterful source that judgement is
+    # systematically wrong: the Walken accident decoded 21/7/16 correct words
+    # at no_speech_prob=0.892 (avg_logprob -0.23, zero zero-duration words) and
+    # C alone discarded all of them, leaving 13:41-13:52 with no subtitle at
+    # all. Every documented phantom is 1-4 words, so long segments are exempt
+    # from C and remain covered by A / B / D / _is_echo.
     nsp = cand.get("no_speech_prob")
-    if nsp is not None and nsp >= no_speech_thr:
+    if nsp is not None and nsp >= no_speech_thr and nw < _NSP_SHORT_WORDS:
         return True
     # C2: very low avg_logprob alone (older caches may lack no_speech_prob).
     alp = cand.get("avg_logprob")
@@ -862,7 +947,8 @@ def fill_gaps(
     def _probe(gs: float, ge: float,
                dedupe_pool: list[dict[str, Any]],
                *,
-               check_overlap: bool = True) -> list[dict[str, Any]]:
+               check_overlap: bool = True,
+               hole: tuple[float, float] | None = None) -> list[dict[str, Any]]:
         """Decode a window robustly, working around whisper's prefix collapse.
 
         Whisper is acutely sensitive to what sits at the *start* of the decode
@@ -874,21 +960,27 @@ def fill_gaps(
         pad=0.2 yielded 7 segments of genuine dialogue.
 
         So we do not bet on one pad. We probe with several, score each result by
-        how much of the window it actually covers, and keep the best. The scan
-        stops early once a probe covers most of the window, so the common case
+        how much of the *hole* it actually covers, and keep the best. The scan
+        stops early once a probe covers most of the hole, so the common case
         still costs a single decode.
+
+        ``hole`` (default ``(gs, ge)``) is the true missing interval against
+        which coverage is measured. It differs from the decode window only when
+        ``_probe`` is used to decode the first sub-window of a long hole, whose
+        window is pushed back past ``gs`` to clear a mid-sentence cut (ADR-036).
         """
+        hole_gs, hole_ge = (gs, ge) if hole is None else hole
         window = max(ge - gs, 0.01)
-        pads = _PROBE_PADS if window >= _MULTI_PROBE_MIN_WINDOW else _PROBE_PADS[:1]
+        pads = _probe_pads_for_window(window)
         best: list[dict[str, Any]] = []
         best_cov = -1.0
         for pad in pads:
             cand = _decode_once(gs, ge, pad, dedupe_pool,
                                 check_overlap=check_overlap)
-            cov = sum(float(c["end"]) - float(c["start"]) for c in cand)
+            cov = _coverage_in_hole(cand, hole_gs, hole_ge)
             if cov > best_cov:
                 best, best_cov = cand, cov
-            if best_cov >= _PROBE_GOOD_COVERAGE * window:
+            if best_cov >= _PROBE_GOOD_COVERAGE * (hole_ge - hole_gs):
                 break
         return best
 
@@ -905,12 +997,22 @@ def fill_gaps(
         there). Seam de-duplication happens once, globally, after all inserts are
         collected (see below).
 
+        The first sub-window is pushed back by ``_PROBE_PADS[-1]`` and decoded
+        through ``_probe`` (multi-pad, hole-bounded coverage) so that a hard cut
+        landing mid-sentence at the very start of the hole is not decoded from a
+        half-sentence start (ADR-036). Remaining slices keep the single small pad.
+
         Returns merged, time-sorted, raw recovered segments for the hole.
         """
         subwins = _slice_long_hole(gs, ge)
         merged: list[dict[str, Any]] = []
-        for (s0, s1) in subwins:
-            merged.extend(_decode_once(s0, s1, _PROBE_PADS[0], dedupe_pool))
+        for i, (s0, s1) in enumerate(subwins):
+            if i == 0:
+                # push the first slice back to clear a possible mid-sentence cut
+                s0 = max(0.0, gs - _PROBE_PADS[-1])
+                merged.extend(_probe(s0, s1, dedupe_pool, hole=(gs, ge)))
+            else:
+                merged.extend(_decode_once(s0, s1, _PROBE_PADS[0], dedupe_pool))
         return merged
 
     inserts: list[dict[str, Any]] = []
