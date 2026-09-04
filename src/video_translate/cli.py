@@ -193,6 +193,140 @@ def _derive_base(path: str) -> str:
     return Path(path).stem
 
 
+# --- Spec 25: CLI path / filename hygiene ---------------------------------------
+# Encoding-damage fingerprints (platform-independent). None of these code points
+# belongs in a human-readable filename on ANY OS, so flagging them is safe on
+# macOS/Linux too — a mojibake name is just as broken there.
+#
+# Accident source (2026-09-04): videos/角斗士采访.mp4 passed through Windows
+# PowerShell 5.1 (ACP=936) arrived as '瑙掓枟澹\ue0a6噰璁?mp4' — U+E0A6 sits in
+# the BMP Private Use Area and the '.' became '?' (so Path.stem swallowed the
+# extension). The damaged string flowed all the way into io_utils.save_json() ->
+# os.replace(), raising OSError [WinError 123] with a stack trace that had
+# nothing to do with the cause.
+_BROKEN_ENCODING_RANGES: tuple[tuple[int, int], ...] = (
+    (0x0000, 0x001F),      # C0 control chars
+    (0x007F, 0x009F),      # DEL + C1 control chars
+    (0xD800, 0xDFFF),      # surrogates (unpaired / UTF-16 misdecode)
+    (0xE000, 0xF8FF),      # BMP Private Use Area (GBK-misread-UTF-8 signature)
+    (0xFFFD, 0xFFFD),      # REPLACEMENT CHARACTER
+    (0xF0000, 0x10FFFD),   # Supplementary Private Use Area
+)
+
+# Platform-specific illegal filename characters. The Windows set must NEVER be
+# applied on POSIX: ':' and '?' are perfectly legal on macOS/APFS.
+_ILLEGAL_FILENAME_CHARS = {
+    "nt": '<>:"|?*',
+    "posix": "/\x00",
+}
+
+# A Windows drive spec ('C:') is a path ROOT, not a filename — its ':' must not
+# be reported as an illegal filename character (--outdir C:\ is legitimate).
+_DRIVE_SPEC_RE = re.compile(r"^[A-Za-z]:$")
+
+# Path-valued arguments inspected at the entry boundary. Output-side args are
+# included for encoding damage only — no existence assertion is made here.
+_HYGIENE_PATH_ARGS = ("input", "segments", "zh", "video", "pending",
+                      "outdir", "out")
+
+
+def find_broken_encoding_chars(name: str) -> list[str]:
+    """Return characters in `name` that look like an encoding accident.
+
+    Spec 25 §3 layer 1. Platform-independent: these code points are damage
+    signals no matter which OS we run on.
+    """
+    return [ch for ch in name
+            if any(lo <= ord(ch) <= hi for lo, hi in _BROKEN_ENCODING_RANGES)]
+
+
+def find_illegal_filename_chars(name: str, *,
+                                platform: str | None = None) -> list[str]:
+    """Return characters illegal for a filename on `platform` (default: this OS).
+
+    Spec 25 §3 layer 2. The character set is platform-specific on purpose —
+    ':' and '?' are legal on macOS, so the Windows set must not be applied
+    there (hard "do not break Mac" constraint).
+    """
+    plat = platform or ("nt" if os.name == "nt" else "posix")
+    illegal = _ILLEGAL_FILENAME_CHARS.get(plat, _ILLEGAL_FILENAME_CHARS["posix"])
+    return [ch for ch in name if ch in illegal]
+
+
+def _describe_bad_chars(chars: list[str]) -> str:
+    """Render offending characters with their Unicode rationale (dedup, ordered)."""
+    out: list[str] = []
+    for ch in chars:
+        cp = ord(ch)
+        if cp == 0xFFFD:
+            out.append("U+FFFD (替换字符)")
+        elif cp < 0x20 or 0x7F <= cp <= 0x9F:
+            out.append(f"U+{cp:04X} (控制字符)")
+        elif 0xD800 <= cp <= 0xDFFF:
+            out.append(f"U+{cp:04X} (未配对代理)")
+        elif 0xE000 <= cp <= 0xF8FF or 0xF0000 <= cp <= 0x10FFFD:
+            out.append(f"U+{cp:04X} (私用区)")
+        else:
+            out.append(repr(ch))
+    seen: set[str] = set()
+    return ", ".join(s for s in out if not (s in seen or seen.add(s)))
+
+
+def _hygiene_message(label: str, value: str, bad: list[str], *,
+                     broken_encoding: bool) -> str:
+    detail = _describe_bad_chars(bad)
+    if broken_encoding:
+        head = f"参数 {label} 的文件名编码已损坏，无法继续：{value}"
+        why = (f"  坏字符: {detail}\n"
+               "  含义: 命令行参数在到达 Python 之前就已被重新编码。")
+    else:
+        head = f"参数 {label} 的文件名含本平台非法字符，无法继续：{value}"
+        why = f"  坏字符: {detail}"
+    fix = ("  Fix: 最常见原因是 Windows PowerShell 5.1 把 UTF-8 中文参数按 "
+           "GBK(ACP 936) 解码。\n"
+           "       ① 改用 ASCII 文件名；② 换 PowerShell 7（无 BOM 脚本按 UTF-8 读）；\n"
+           "       ③ 或用 --base <ascii-name> 显式指定产物名。")
+    return "\n".join([head, why, fix])
+
+
+def _path_hygiene_error(args: argparse.Namespace) -> str | None:
+    """Spec 25 §1: reject path arguments that are already broken at the boundary.
+
+    Returns an actionable message, or None when every inspected path is clean.
+    Called from ``main()`` before dispatching to any ``cmd_*``, so one check
+    covers every subcommand (ADR-035 D4: assert at the stage boundary, fail
+    loud instead of degrading silently).
+    """
+    targets: list[tuple[str, str]] = []
+    for attr in _HYGIENE_PATH_ARGS:
+        val = getattr(args, attr, None)
+        if isinstance(val, str) and val:
+            targets.append((f"--{attr}", val))
+
+    # base: explicit when given, otherwise derived from input (Spec 11 semantics
+    # of _default_base() are unchanged — we validate its RESULT).
+    base = getattr(args, "base", None)
+    input_path = getattr(args, "input", None)
+    if not base and isinstance(input_path, str) and input_path:
+        base = _default_base(input_path)
+    if isinstance(base, str) and base:
+        targets.append(("--base", base))
+
+    for label, value in targets:
+        # Only the basename is a filename; ':' in 'C:\' or '/' in a directory
+        # path are separators, not illegal characters.
+        name = os.path.basename(value.rstrip("/\\") or value)
+        if not name or _DRIVE_SPEC_RE.match(name):
+            continue  # path root (drive spec / '/') — nothing to validate
+        bad = find_broken_encoding_chars(name)
+        if bad:
+            return _hygiene_message(label, value, bad, broken_encoding=True)
+        illegal = find_illegal_filename_chars(name)
+        if illegal:
+            return _hygiene_message(label, value, illegal, broken_encoding=False)
+    return None
+
+
 def _resolve_proxy(args: argparse.Namespace) -> str | None:
     """Resolve proxy from --no-proxy / --proxy / env / TCP probe."""
     cli_proxy = getattr(args, "proxy", None)
@@ -2436,6 +2570,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     init_toolchain()
     parser = build_parser()
     args = parser.parse_args(argv)
+    # Spec 25 §1: boundary check. A path argument already mangled by the host
+    # shell must fail HERE with an actionable message — not deep inside
+    # io_utils.save_json() as an unrelated OSError (WinError 123).
+    hygiene = _path_hygiene_error(args)
+    if hygiene:
+        print(f"[args] {hygiene}", file=sys.stderr)
+        return EXIT_ARGS
     try:
         return args.func(args)
     except GateFail as e:
