@@ -289,7 +289,7 @@ if check_overlap and _overlap_with_any(cand, segments) > _ECHO_OVERLAP:
   - 真实恢复全部保留：802–811s `milk. This is tragic news…`、821–850s 长洞 8 段救援、
     894–906s `hi to him and the first thing…`（原 [305] 回声已消失）。
   - 总段数 484 → **481**（重 merge 边界收紧，3 段差异）；`translate_task.json` 已按 481 段重出。
-- 步骤 3（翻译 + generate/verify）：**翻译 agent 职责（C3/C4，编码助手不执行）**。
+- 步骤 3（翻译 + generate/verify）：**翻译 agent 职责**（机器不做翻译）。
   pipeline 已正确停在 `AWAITING_AGENT`（exit 6），待 agent 重译 481 段后再 `generate`/`verify`，
   新 SRT 即无重复。旧 `zh_segments.json`（484）已与现 segments 错位，generate 闸门会拦截（segments_sha 陈旧）。
 
