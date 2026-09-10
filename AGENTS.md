@@ -58,10 +58,10 @@ full architectural rationale.
 | **人声分离时长** | 用 ffmpeg/demucs 手动裁切/重采样后再喂给 Whisper，或质疑「分离后时长 ≠ 原视频」为 BUG | 字幕时间戳全局漂移，1s 错位 = 全片报废 | 分离输出**必须** `|dur(out) - dur(orig)| < 50ms`；否则 CLI 自动降级回原音频，不要手改。 |
 | **8GB GPU OOM** | 用脚本并行跑 demucs + Whisper，或在同一进程让两模型常驻显存 | RTX 3060/4060 级别必炸 CUDA OOM | CLI 已保证「demucs→释放显存→Whisper」顺序；若需脚本调用，也必须遵守「单一大模型串行」。 |
 | **人声分离缓存** | 开了 `--separate-vocals` 又手动 `rm chunk_*.json` 试图「强制重跑 Whisper 但保留 vocals.wav」 | chunk 指纹已嵌入 vsep 参数，删缓存只删一半会让 resegment/fill_gaps 找不到同路径 vocals.wav | 正常跑不用管缓存；真要清空就把输出目录的 `<base>.vocals_*.wav` 和 `chunk_*.json` 一起删，或换个 base。 |
-| **工具链查找** | 仅因 `where ffmpeg` 为空便向用户报错停摆 | 忽略了 `.env` 注入机制，造成虚假缺失报错 | 运行 `uv run video-translate doctor`，或按 [TOOLCHAIN.md](TOOLCHAIN.md) 配置 `.env` 中的 `VT_FFMPEG_DIR`。 |
+| **工具链查找** | 仅因 `where ffmpeg` 为空便向用户报错停摆；或自行全盘搜 / 手动下载 ffmpeg、手工配 `.env` 的 `VT_FFMPEG_DIR` | `where` 为空 ≠ 未安装（可能已由 `init_toolchain` 注入 PATH）；手动安装会散落缓存、污染系统盘，与 `--separate-vocals` 等场景的便携版路径打架 | 以 `uv run video-translate doctor` 显示 ffmpeg/ffprobe `[OK]` 为准；缺失即跑 `uv run video-translate setup --ffmpeg`（按平台下载便携版到 `tools/` 并**自动写入** `.env.local`，幂等）。**禁止**全盘搜 / 手动下载 / 手工改 `.env`。详见 [TOOLCHAIN.md](TOOLCHAIN.md) §2.1。 |
 | **环境定位（命令入口）** | 裸跑 `python` / `video-translate` / `make`，指望 PATH 指向项目环境 | 命中 PATH 里残留的旧全局环境（如 `F:\Python311`，缺 whisperx），`doctor` 误报未安装、反复排障 | **所有命令一律 `uv run ...`**（在项目根执行），`uv` 自动定位项目 `.venv`；开新窗口先 `cd <repo>` 再加 `uv run` 前缀。详见 [Spec 23](docs/specs/23-environment-location.md) / [ADR-029](docs/adr/029-command-entry-uv-run.md)。 |
 | **Exit Code 6** | 遇到程序退出码 6 时当成错误反复重试 `run` | 死循环卡在转写步骤，无法进入翻译 | 退出码 6 是 `[AWAITING_AGENT]` 挂起信号，表明转写已完成，等待 Agent 执行翻译。 |
-| **依赖装错环境** | 把 `demucs`/`torch` 这类重依赖放进 optional extra（`[audio]`）或只写在 `requirements.txt` 却不进 `pyproject` 顶层 `dependencies` | 默认 `pip install -e .` 不装它，依赖飘到系统 Python、venv 里 `import` 不到、`--separate-vocals` 静默降级 | **任何运行时依赖都写进 `pyproject` 顶层 `dependencies`**（不藏 extra）；装环境只用 `pip install -e .` / `uv sync` 一条命令，不依赖额外动作。详见 [TOOLCHAIN.md](TOOLCHAIN.md) §依赖与 wheel 镜像。 |
+| **依赖装错环境** | 把 `demucs`/`torch` 这类重依赖放进 optional extra（`[audio]`）或只写在 `requirements.txt` 却不进 `pyproject` 顶层 `dependencies` | 默认 `pip install -e .` 不装它，依赖飘到系统 Python、venv 里 `import` 不到、`--separate-vocals` 静默降级 | **任何运行时依赖都写进 `pyproject` 顶层 `dependencies`**（不藏 extra）；装环境只跑 `uv run video-translate setup` 一条命令（内部 `uv sync` 主路径、`pip install -e .` 兜底），不依赖额外动作。详见 [TOOLCHAIN.md](TOOLCHAIN.md) §依赖与 wheel 镜像。 |
 | **CUDA wheel 装成 CPU 版** | 用 `pip install`（不带 `--index-url`）装 `torch`/`torchaudio`，或以为 `[tool.uv.sources]` 对 pip 生效 | 无代理时 pip 回退 PyPI 默认 `+cpu` wheel，`torch.cuda.is_available()`=False，GPU 加速失效 | **CUDA 版必须走镜像索引**：`uv sync`（认 `[tool.uv.sources]`，自动按平台选 CUDA/CPU wheel，无需任何手工参数）或 `pip install torch --index-url https://download.pytorch.org/whl/cu128/`（CN 无代理可换清华 `https://mirrors.tuna.tsinghua.edu.cn/pytorch-wheels/cu128/`）。绝不裸 `pip install torch`，且索引版本必须与 `pyproject` 一致（当前 **cu128** / torch 2.8 线，由 `[gpu]` extra 的 whisperx 3.8.x 决定）。详见 [TOOLCHAIN.md](TOOLCHAIN.md) §依赖与 wheel 镜像。 |
 | **镜像源靠 Agent 临选** | Agent/人工每次安装时现场拼 `--extra-index-url` 或挑代理 | 换人或换机就装不动、或装错源，不可复现 | **镜像源固化进 `pyproject` 的 `[tool.uv.index]`**（cu128 官方 PyTorch 索引，`explicit = true` 让它只服务 torch/torchaudio，不遮蔽 PyPI 上的通用包）+ `PIP_EXTRA_INDEX_URL` 进 [TOOLCHAIN.md](TOOLCHAIN.md)；安装一律程序决定，不靠临场决策。 |
 | **尾部回音幻觉** | 在笑声/欢呼/掌声等"有能量无语义"窗口后，看到新段复述上一句尾部（如真句 `give me a yogurt either way.` 后冒出 `I'm not hungry either way.`）时，手工删段或重算时间戳 | 手工删段破坏 index 对齐、重算时间戳破坏声学层；且下次重跑又复现 | 这是 Whisper 自回归固有缺陷（ADR-020）。**不要手工改**，靠 `drop_hallucination_segments` 自动拦截：段内词与前驱**逐字共享时间戳且含零时长词**（第四信号）即判回音；转写层已携带 `avg_logprob` 供第五信号。两信号已在单测覆盖，全片重跑自动生效。 |
@@ -176,6 +176,10 @@ Agent **不需要记忆命令拼装**。两条 Agent 必须知道的契约：
 | 6 | `EXIT_AWAITING_AGENT` | **停点**：决策点（等 style）或翻译（等 zh） | 按 §3.1 停点表接手；**正常停点，勿盲目重试** |
 | 7 | `EXIT_DOCTOR_FAIL` | doctor 自检不过（**默认 ffmpeg/ffprobe 缺失即触发**；`--strict` 下其余依赖项也拦） | 按 doctor 输出修环境（ffmpeg 缺失 → `setup --ffmpeg`） |
 | 8 | `EXIT_GATE_FAIL` | **闸门拦截**（意图闸 / generate 前置 / verify strict） | 读修复指引；确需降级才显式传逃生门 |
+
+> **修环境时仍受 §1 红线约束**：上表的 `setup` / `setup --ffmpeg` 等修复命令**只此一条正路**——
+> **禁止**裸 `pip install`、手动下载二进制、全盘搜 ffmpeg、临场拼镜像源。
+> 完整口径见 [TOOLCHAIN.md](TOOLCHAIN.md) §2.5 与 [docs/TOOLING.md](docs/TOOLING.md)。
 
 **`status --json` 示例**（字段稳定，机器可解析）：
 
