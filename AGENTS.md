@@ -14,6 +14,24 @@ is **Agent-as-Translator** (翻译 + 语义回读)，流程推进与闸门由代
 是 `pipeline`（`run` / `generate` / `verify` 为原语）。本文件是**翻译流程的唯一事实来源**；
 编码规范（SDD/TDD + 数据契约总线五条铁律）见 `.codebuddy/rules/` 规则集。
 
+## 0. 视频定位（Agent 入口寻源）
+
+用户只说「翻译 XXX」「翻译这个视频」而未给路径时，**不要凭空猜测或臆造路径**，
+按以下顺序定位输入视频：
+
+1. **默认优先查 `videos/`**：输入视频默认落在仓库根的 `videos/` 目录
+   （产物的默认落点也是 `videos/<base>/`，见 `io_utils` 与 cli `--outdir` 默认）。
+   先在该目录按用户给的名字（`loki` / `loki.mp4` 等）做大小写不敏感匹配。
+2. **找不到再问用户**：若 `videos/` 内无匹配文件，**停下向用户索要视频所在位置**
+   （绝对路径，或相对仓库根的路径），不得自行假设其它目录、不得跑全盘搜索。
+3. **拿到路径先卫生校验**：路径含中文 / 空格 / 特殊字符时，遵循 cli `main()` 的
+   路径卫生校验（见 Spec 25 / `tests/test_cli_path_hygiene.py`）；Windows 下若命中
+   编码损坏（`_default_base` 取到乱码、扩展名被吞），改用 UTF-8 入口脚本调
+   `video_translate.cli.main([...])`，不要直接 `uv run ... "<中文路径>"`。
+
+> 输入视频与产物同处 `videos/` 之下；`outdir` / `base` 留空即自动取视频自身目录与
+> 文件名 stem，无需手动拼接。
+
 Read order: this file → [`TOOLCHAIN.md`](TOOLCHAIN.md) for environment setup →
 [`docs/TOOLING.md`](docs/TOOLING.md) for tool/dependency management (E1–E4) →
 [`docs/specs/00-overview.md`](docs/specs/00-overview.md) for behavior →
