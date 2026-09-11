@@ -195,7 +195,7 @@ Agent **不需要记忆命令拼装**。两条 Agent 必须知道的契约：
     "cli": "(agent) 翻译 <base>.translate_task.json -> <base>.zh_segments.json (100% 覆盖全部 index)",
     "blocked_by": []
   },
-  "artifacts": { "segments": "videos/demo.segments_en.json", "zh": null, "srt": null },
+  "artifacts": { "segments": "videos/demo/demo.segments_en.json", "zh": null, "srt": null },
   "verify_status": null
 }
 ```
@@ -233,7 +233,7 @@ uv run video-translate backfill --pending "<base>.agent_pending.json" --out "<ba
 # 2. Agent 翻译后保存为 your_zh.json
 # 3. 回填并重新生成
 uv run video-translate backfill --pending "<base>.agent_pending.json" --out "<base>.zh_segments.json" \
-    --agent-zh your_zh.json --segments "<base>.segments_en.json" --outdir "videos/<base>" --base "<base>"
+    --agent-zh your_zh.json --segments "<base>.segments_en.json" --outdir "videos/" --base "<base>"
 ```
 
 ### 4.3 局部多语种重转写 (`resegment`)

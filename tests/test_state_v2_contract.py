@@ -10,7 +10,9 @@ from video_translate.audio_profile import AudioProfile
 
 
 def _write_state(tmp_path, base, blob) -> str:
-    p = tmp_path / f"{base}.vt_state.json"
+    d = tmp_path / base
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / f"{base}.vt_state.json"
     p.write_text(json.dumps(blob), encoding="utf-8")
     return str(tmp_path)
 

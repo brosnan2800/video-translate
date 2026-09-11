@@ -39,17 +39,19 @@ ZH = {"0": "你好呀。", "1": "欧比旺·克诺比。", "2": "你是个勇敢
 
 @pytest.fixture()
 def art(tmp_path: Path) -> Path:
-    """Artifacts dir with en segments + full zh translation."""
-    (tmp_path / "demo.segments_en.json").write_text(
+    """Artifacts dir with en segments + full zh translation (in workdir)."""
+    wd = tmp_path / "demo"
+    wd.mkdir(parents=True, exist_ok=True)
+    (wd / "demo.segments_en.json").write_text(
         json.dumps(EN), encoding="utf-8")
-    (tmp_path / "demo.zh_segments.json").write_text(
+    (wd / "demo.zh_segments.json").write_text(
         json.dumps(ZH), encoding="utf-8")
     # display-window sidecar (as `generate` writes it) so the presentation
     # lane sees the healthy defaults instead of stripped 0/0.
-    (tmp_path / "demo.generate_opts.json").write_text(
+    (wd / "demo.generate_opts.json").write_text(
         json.dumps({"tail": 0.3, "min_dur": 1.0, "offset": 0.0,
                     "gap": 0.08, "style": None}), encoding="utf-8")
-    return tmp_path
+    return wd
 
 
 def _fake_video(tmp_path: Path) -> str:

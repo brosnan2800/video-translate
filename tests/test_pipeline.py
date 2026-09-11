@@ -55,17 +55,23 @@ def art(tmp_path: Path) -> Path:
 
 
 def _seg_file(d: Path, base: str = "demo") -> None:
-    (d / f"{base}.segments_en.json").write_text(json.dumps(SEG),
+    wd = d / base
+    wd.mkdir(parents=True, exist_ok=True)
+    (wd / f"{base}.segments_en.json").write_text(json.dumps(SEG),
                                                 encoding="utf-8")
 
 
 def _zh_file(d: Path, base: str = "demo") -> None:
-    (d / f"{base}.zh_segments.json").write_text(json.dumps(ZH),
+    wd = d / base
+    wd.mkdir(parents=True, exist_ok=True)
+    (wd / f"{base}.zh_segments.json").write_text(json.dumps(ZH),
                                                 encoding="utf-8")
 
 
 def _srt_file(d: Path, base: str = "demo") -> None:
-    (d / f"{base}.bilingual.srt").write_text("1\n00:00:00,000 --> 00:00:01,000\nx\n",
+    wd = d / base
+    wd.mkdir(parents=True, exist_ok=True)
+    (wd / f"{base}.bilingual.srt").write_text("1\n00:00:00,000 --> 00:00:01,000\nx\n",
                                              encoding="utf-8")
 
 
@@ -153,7 +159,9 @@ def test_enforce_reports_missing_capability(art):
 
 def test_gate_flags_incomplete_coverage(art):
     _seg_file(art)
-    (art / "demo.zh_segments.json").write_text(json.dumps({}), encoding="utf-8")
+    wd = art / "demo"
+    wd.mkdir(parents=True, exist_ok=True)
+    (wd / "demo.zh_segments.json").write_text(json.dumps({}), encoding="utf-8")
     problems = pipeline.check_stage("generate", pipeline.build_ctx(art, "demo"),
                                     caps_probe=_ok_caps)
     assert any("coverage" in p for p in problems)
@@ -162,8 +170,10 @@ def test_gate_flags_incomplete_coverage(art):
 def test_gate_flags_count_mismatch(art):
     seg2 = SEG + [{"index": 1, "start": 1.4, "end": 2.4, "text": "More.",
                    "words": [{"start": 1.4, "end": 2.4, "word": "More."}]}]
-    (art / "demo.segments_en.json").write_text(json.dumps(seg2),
-                                               encoding="utf-8")
+    wd = art / "demo"
+    wd.mkdir(parents=True, exist_ok=True)
+    (wd / "demo.segments_en.json").write_text(json.dumps(seg2),
+                                              encoding="utf-8")
     _zh_file(art)  # only 1 zh for 2 en
     problems = pipeline.check_stage("generate", pipeline.build_ctx(art, "demo"),
                                     caps_probe=_ok_caps)

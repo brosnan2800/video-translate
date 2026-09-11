@@ -31,7 +31,7 @@ def _write_json(path, data):
 
 def test_state_path_naming(tmp_path):
     p = state_path(tmp_path, "apollo_story")
-    assert p == tmp_path / "apollo_story.vt_state.json"
+    assert p == tmp_path / "apollo_story" / "apollo_story.vt_state.json"
 
 
 def test_save_load_roundtrip(tmp_path):
@@ -56,12 +56,15 @@ def test_load_missing_returns_empty(tmp_path):
 
 
 def test_load_wrong_schema_returns_empty(tmp_path):
-    p = _write_json(state_path(tmp_path, "clip"), {"schema_version": 999, "stage": "x"})
+    p = state_path(tmp_path, "clip")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    _write_json(p, {"schema_version": 999, "stage": "x"})
     assert load(tmp_path, "clip") == {}
 
 
 def test_load_corrupt_json_returns_empty(tmp_path):
     p = state_path(tmp_path, "clip")
+    p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text("{ not json !", encoding="utf-8")
     assert load(tmp_path, "clip") == {}
 
@@ -92,18 +95,22 @@ def test_stage_status_default_pending():
 
 
 def test_infer_stage_from_artifacts(tmp_path):
+    wd = tmp_path / "clip"
+    wd.mkdir(parents=True, exist_ok=True)
     assert infer_stage(tmp_path, "clip") == "preflight"
-    _write_json(tmp_path / "clip.segments_en.json", [])
+    _write_json(wd / "clip.segments_en.json", [])
     assert infer_stage(tmp_path, "clip") == "translate"
-    _write_json(tmp_path / "clip.zh_segments.json", {"0": "你好"})
+    _write_json(wd / "clip.zh_segments.json", {"0": "你好"})
     assert infer_stage(tmp_path, "clip") == "generate"
-    (tmp_path / "clip.bilingual.srt").write_text("1\n00:00:00,000 --> 00:00:01,000\nhi\n",
-                                                 encoding="utf-8")
+    (wd / "clip.bilingual.srt").write_text("1\n00:00:00,000 --> 00:00:01,000\nhi\n",
+                                           encoding="utf-8")
     assert infer_stage(tmp_path, "clip") == "verify"
 
 
 def test_rebuild_state_from_artifacts(tmp_path):
-    seg = tmp_path / "clip.segments_en.json"
+    wd = tmp_path / "clip"
+    wd.mkdir(parents=True, exist_ok=True)
+    seg = wd / "clip.segments_en.json"
     seg.write_text('[{"start": 0.0, "end": 1.0}]', encoding="utf-8")
     sha = segment_sha(seg)
     st = rebuild_state(tmp_path, "clip")
@@ -112,7 +119,9 @@ def test_rebuild_state_from_artifacts(tmp_path):
 
 
 def test_ensure_state_self_heals_missing(tmp_path):
-    seg = tmp_path / "clip.segments_en.json"
+    wd = tmp_path / "clip"
+    wd.mkdir(parents=True, exist_ok=True)
+    seg = wd / "clip.segments_en.json"
     seg.write_text("[]", encoding="utf-8")
     st = ensure_state(tmp_path, "clip")
     assert state_path(tmp_path, "clip").is_file()
@@ -122,7 +131,9 @@ def test_ensure_state_self_heals_missing(tmp_path):
 
 
 def test_state_needs_rebuild_when_segments_changed(tmp_path):
-    seg = tmp_path / "clip.segments_en.json"
+    wd = tmp_path / "clip"
+    wd.mkdir(parents=True, exist_ok=True)
+    seg = wd / "clip.segments_en.json"
     seg.write_text("[old]", encoding="utf-8")
     st = new_state("clip")
     record_stage(st, "transcribe", segments_sha=segment_sha(seg))
@@ -135,5 +146,5 @@ def test_state_needs_rebuild_when_segments_changed(tmp_path):
 def test_per_base_isolation(tmp_path):
     save(tmp_path, "a", new_state("a"))
     save(tmp_path, "b", new_state("b"))
-    assert (tmp_path / "a.vt_state.json").is_file()
-    assert (tmp_path / "b.vt_state.json").is_file()
+    assert (tmp_path / "a" / "a.vt_state.json").is_file()
+    assert (tmp_path / "b" / "b.vt_state.json").is_file()

@@ -291,7 +291,7 @@ def render_next(pos: dict[str, Any], *, as_json: bool = False) -> str:
 def discover_bases(outdir: str | Path) -> list[str]:
     """Bases with transcription artifacts, newest segments file first."""
     root = Path(outdir)
-    hits = sorted(root.glob("*.segments_en.json"),
+    hits = sorted(root.glob("*/*.segments_en.json"),
                   key=lambda p: p.stat().st_mtime, reverse=True)
     seen: list[str] = []
     for p in hits:

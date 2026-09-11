@@ -268,10 +268,20 @@ def artifact_file(artifact_id: str, base: str, **fmt: Any) -> str:
     return spec["file"].format(base=base, **fmt)
 
 
+def workdir(outdir: str | os.PathLike[str], base: str) -> str:
+    """ADR-037: 产物根目录 = ``<outdir>/<base>/``.
+
+    所有阶段产物（中间产物 / 缓存 / state / 最终字幕）的唯一落点基准。
+    ``outdir`` 语义不变（默认 = 视频所在目录），base 子目录隔离单个视频的全部产出。
+    禁止任何模块自造 ``os.path.join(outdir, base, ...)``（D1 路径单一来源）。
+    """
+    return os.path.join(str(outdir), base)
+
+
 def artifact_path(artifact_id: str, outdir: str | os.PathLike[str],
                   base: str, **fmt: Any) -> str:
-    """产物绝对路径 = outdir / 模板。带 glob/版本语义的产物（srt）由其定位器解析。"""
-    return os.path.join(str(outdir), artifact_file(artifact_id, base, **fmt))
+    """产物绝对路径 = workdir / 模板。带 glob/版本语义的产物（srt）由其定位器解析。"""
+    return os.path.join(workdir(outdir, base), artifact_file(artifact_id, base, **fmt))
 
 
 # --------------------------------------------------------------------------- #

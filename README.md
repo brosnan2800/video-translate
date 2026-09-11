@@ -131,9 +131,9 @@ uv run video-translate pipeline "videos/example.mp4"
 # ② 带上选择重跑 → 自动转写，完成后停在「翻译停点」（exit 6）
 uv run video-translate pipeline "videos/example.mp4" --style film
 #     强 BGM / 哄笑视频可加 --separate-vocals 先剥离人声；--align 默认 auto 无需手填
-#     输出 videos/example.translate_task.json
+#     输出 videos/example/example.translate_task.json
 
-# ③ Agent（或人工）阅读 task 文件，生成 videos/example.zh_segments.json
+# ③ Agent（或人工）阅读 task 文件，生成 videos/example/example.zh_segments.json
 
 # ④ 再跑 pipeline → 自动 generate + verify，输出双语字幕
 uv run video-translate pipeline "videos/example.mp4"
@@ -144,8 +144,8 @@ uv run video-translate pipeline "videos/example.mp4"
 
 ```bash
 uv run video-translate run "videos/example.mp4" --style film
-uv run video-translate generate --segments "videos/example.segments_en.json" --zh "videos/example.zh_segments.json" --outdir "videos" --base "example"
-uv run video-translate verify --segments "videos/example.segments_en.json" --zh "videos/example.zh_segments.json" --video "videos/example.mp4"
+uv run video-translate generate --segments "videos/example/example.segments_en.json" --zh "videos/example/example.zh_segments.json" --outdir "videos" --base "example"
+uv run video-translate verify --segments "videos/example/example.segments_en.json" --zh "videos/example/example.zh_segments.json" --video "videos/example.mp4"
 ```
 
 </details>
@@ -205,11 +205,14 @@ CLI 参数 > 系统环境变量 / .env.local > .env.<platform> > .env > .video-t
 
 ## 📂 项目产物说明
 
-执行完成后，在视频对应子目录下会生成以下 4 个标准交付文件：
-- `<base>.bilingual.srt`：**中英双语字幕**（剪映直接导入主文件，顶部英文/底部中文）
-- `<base>.zh.srt`：纯中文字幕
-- `<base>.en.srt`：纯英文字幕
-- `<base>.txt`：中英文双语对照纯文本剧本
+执行完成后，单个视频的全部产物（中间产物、缓存、状态链、最终字幕）统一收进以视频基名命名的子目录 `videos/<base>/`：
+
+- `videos/<base>/<base>.bilingual.srt`：**中英双语字幕**（剪映直接导入主文件，顶部英文/底部中文）
+- `videos/<base>/<base>.zh.srt`：纯中文字幕
+- `videos/<base>/<base>.en.srt`：纯英文字幕
+- `videos/<base>/<base>.txt`：中英文双语对照纯文本剧本
+
+> 外层 `videos/` 下只保留源视频本体；所有 `<base>.` 前缀产物不再平铺在外层。
 
 ---
 

@@ -29,17 +29,23 @@ ZH = {"0": "你好呀。"}
 
 
 def _seg_file(d: Path, base: str = "demo") -> None:
-    (d / f"{base}.segments_en.json").write_text(json.dumps(SEG),
+    wd = d / base
+    wd.mkdir(parents=True, exist_ok=True)
+    (wd / f"{base}.segments_en.json").write_text(json.dumps(SEG),
                                                 encoding="utf-8")
 
 
 def _zh_file(d: Path, base: str = "demo") -> None:
-    (d / f"{base}.zh_segments.json").write_text(json.dumps(ZH),
+    wd = d / base
+    wd.mkdir(parents=True, exist_ok=True)
+    (wd / f"{base}.zh_segments.json").write_text(json.dumps(ZH),
                                                 encoding="utf-8")
 
 
 def _srt_file(d: Path, base: str = "demo") -> None:
-    (d / f"{base}.bilingual.srt").write_text(
+    wd = d / base
+    wd.mkdir(parents=True, exist_ok=True)
+    (wd / f"{base}.bilingual.srt").write_text(
         "1\n00:00:00,000 --> 00:00:01,000\nx\n", encoding="utf-8")
 
 
@@ -249,7 +255,9 @@ def test_dispatch_verify(tmp_path, monkeypatch, capsys):
 
 def test_dispatch_translate_stop_point(tmp_path, monkeypatch, capsys):
     _seg_file(tmp_path)
-    (tmp_path / "demo.translate_task.json").write_text("{}", encoding="utf-8")
+    wd = tmp_path / "demo"
+    wd.mkdir(parents=True, exist_ok=True)
+    (wd / "demo.translate_task.json").write_text("{}", encoding="utf-8")
     rc = cli.main(["pipeline", "v.mp4", "--outdir", str(tmp_path),
                    "--base", "demo"])
     assert rc == 6

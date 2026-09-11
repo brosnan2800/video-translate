@@ -3,7 +3,8 @@
 Date: 2026-09-02
 Status: Accepted
 Companion: ADR-030（控制平面）, ADR-032（决策点协议）, ADR-033（pipeline 收口/T8）,
-ADR-034（音频路由/T9）, MAJOR_VERSION_PLAN T8/T9/T10.
+ADR-034（音频路由/T9）, ADR-037（产物目录布局：所有产物统一收进 `videos/<base>/`）,
+MAJOR_VERSION_PLAN T8/T9/T10.
 
 > 本文是流水线**数据流转的唯一事实来源**：所有阶段间传输的数据（命名 / 文件 / 字段 /
 > 生产者 / 消费者 / 可否重算 / 必须穿透的字段）全部登记在一张声明式 `artifacts`

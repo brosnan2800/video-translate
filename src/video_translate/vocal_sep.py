@@ -22,6 +22,7 @@ import sys
 from pathlib import Path
 from typing import Any, Callable
 
+from .artifacts import workdir
 from .ffmpeg_utils import extract_chunk, probe_duration
 
 # ---------------------------------------------------------------------------
@@ -122,7 +123,7 @@ def separate_fingerprint(
 
 def vocals_wav_path(outdir: str, base: str, fp: str) -> str:
     """Naming convention: {outdir}/{base}.{fp}.vocals.wav"""
-    return str(Path(outdir) / f"{base}.{fp}.vocals.wav")
+    return str(Path(workdir(outdir, base)) / f"{base}.{fp}.vocals.wav")
 
 
 # ---------------------------------------------------------------------------
@@ -312,7 +313,7 @@ def separate_vocals(
     """
     if base is None:
         base = Path(input_path).stem
-    Path(outdir).mkdir(parents=True, exist_ok=True)
+    Path(workdir(outdir, base)).mkdir(parents=True, exist_ok=True)
 
     if backend != "demucs":
         # Only one backend implemented for now; caller should WARN and fallback
@@ -465,13 +466,13 @@ def separate_window(
         return None, None
     if base is None:
         base = Path(input_path).stem
-    Path(outdir).mkdir(parents=True, exist_ok=True)
+    Path(workdir(outdir, base)).mkdir(parents=True, exist_ok=True)
 
     fp = window_fingerprint(input_path, start, end, backend, model_name)
     dur = max(float(end) - float(start), 0.01)
     tag = f"w{round(float(start), 2)}-{round(float(end), 2)}"
-    vocals_path = str(Path(outdir) / f"{base}.{fp}.{tag}.vocals.wav")
-    other_path = str(Path(outdir) / f"{base}.{fp}.{tag}.other.wav")
+    vocals_path = str(Path(workdir(outdir, base)) / f"{base}.{fp}.{tag}.vocals.wav")
+    other_path = str(Path(workdir(outdir, base)) / f"{base}.{fp}.{tag}.other.wav")
 
     if all(Path(p).is_file() and Path(p).stat().st_size > 0
            for p in (vocals_path, other_path)):

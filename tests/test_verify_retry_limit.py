@@ -39,12 +39,14 @@ ZH = {"0": "你好呀。", "1": "欧比旺·克诺比。", "2": "你是个勇敢
 
 @pytest.fixture()
 def art(tmp_path: Path) -> Path:
-    (tmp_path / "demo.segments_en.json").write_text(
+    wd = tmp_path / "demo"
+    wd.mkdir(parents=True, exist_ok=True)
+    (wd / "demo.segments_en.json").write_text(
         json.dumps(EN), encoding="utf-8")
-    (tmp_path / "demo.zh_segments.json").write_text(
+    (wd / "demo.zh_segments.json").write_text(
         json.dumps(ZH), encoding="utf-8")
-    tmp_path.joinpath("demo.mp4").write_bytes(b"")
-    return tmp_path
+    wd.joinpath("demo.mp4").write_bytes(b"")
+    return wd
 
 
 @pytest.fixture()

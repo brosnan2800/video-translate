@@ -125,7 +125,7 @@ class TestVocalsWavPathConvention:
     def test_naming_convention(self):
         p = self._path("/tmp/v", "emily-blunt", "abcdef01")
         assert Path(p).name == "emily-blunt.abcdef01.vocals.wav"
-        assert Path(p).parent == Path("/tmp/v")
+        assert Path(p).parent == Path("/tmp/v/emily-blunt")
 
 
 class TestGracefulFallbackWhenDemucsMissing:

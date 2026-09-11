@@ -31,6 +31,7 @@ from .io_utils import load_json_default, save_json
 # ADR-035 命名单一来源：阶段顺序唯一定义在 pipeline_def.STAGES，这里只引用，
 # 不再维护第二份元组（此前两套 stage id 各自为政，属契约收编对象）。
 from .pipeline_def import STAGE_ORDER
+from .artifacts import workdir
 
 # ADR-035 M2: schema v2 —— 顶层新增声学事实数据段 audio_profile（duration /
 # silence_intervals 等，preflight 单一生产、全链只算一次）与 audio_source
@@ -40,7 +41,7 @@ SCHEMA_VERSION = 2
 
 def state_path(outdir: str | Path, base: str) -> Path:
     """``<outdir>/<base>.vt_state.json`` — co-located with the segments file."""
-    return Path(outdir) / f"{base}.vt_state.json"
+    return Path(workdir(outdir, base)) / f"{base}.vt_state.json"
 
 
 def segment_sha(path: str | Path) -> str:
@@ -101,6 +102,7 @@ def save(outdir: str | Path, base: str, state: dict[str, Any]) -> str:
     state = dict(state)
     state.setdefault("schema_version", SCHEMA_VERSION)
     path = str(state_path(outdir, base))
+    Path(workdir(outdir, base)).mkdir(parents=True, exist_ok=True)
     save_json(path, state, indent=2)
     return path
 
@@ -168,7 +170,7 @@ def infer_stage(outdir: str | Path, base: str) -> str:
     Works for old directories that never had a state file: the deepest finished
     stage decides where we are.
     """
-    dirp = Path(outdir)
+    dirp = Path(workdir(outdir, base))
     if (dirp / f"{base}.bilingual.srt").is_file():
         return "verify"  # generate done; verify is next
     if (dirp / f"{base}.zh_segments.json").is_file():
@@ -191,7 +193,7 @@ def rebuild_state(
     """
     state = new_state(base, video=video)
     state["stage"] = infer_stage(outdir, base)
-    dirp = Path(outdir)
+    dirp = Path(workdir(outdir, base))
     seg = dirp / f"{base}.segments_en.json"
     if seg.is_file():
         record_stage(state, "transcribe", segments_sha=segment_sha(seg))
@@ -209,7 +211,7 @@ def state_needs_rebuild(outdir: str | Path, base: str) -> bool:
     st = load(outdir, base)
     if not st:
         return True
-    seg = Path(outdir) / f"{base}.segments_en.json"
+    seg = Path(workdir(outdir, base)) / f"{base}.segments_en.json"
     if seg.is_file():
         ts = st.get("stages", {}).get("transcribe", {})
         if ts.get("segments_sha") != segment_sha(seg):

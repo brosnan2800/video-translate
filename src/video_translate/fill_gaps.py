@@ -46,6 +46,7 @@ import statistics
 import tempfile
 from typing import Any
 
+from .artifacts import workdir
 from .ffmpeg_utils import extract_chunk, probe_duration
 from .audio_profile import (
     CLEAN_SILENCE_FRACTION,
@@ -426,7 +427,7 @@ REVIEW_CACHE_SCHEMA = 1
 
 def review_cache_path(outdir: str, base: str) -> str:
     """Path of the independent review cache for one video."""
-    return os.path.join(outdir, f"{base}.review.json")
+    return os.path.join(workdir(outdir, base), f"{base}.review.json")
 
 
 def review_digest(segments: list[dict[str, Any]]) -> str:

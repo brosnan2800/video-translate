@@ -32,6 +32,7 @@ from .io_utils import load_json, load_json_default, save_json
 from .audio_profile import analyze_audio, route_vad_chunk
 from . import align as _align
 from .capabilities import GateFail
+from .artifacts import workdir
 
 # Default device/compute_type — kept as module-level defaults for backward
 # compatibility, but no longer forced: transcribe_video/transcribe_window accept
@@ -241,7 +242,7 @@ def merge_chunks(chunk_lists: list[list[dict[str, Any]]]) -> list[dict[str, Any]
 
 
 def _chunk_json_path(outdir: str, base: str, ci: int, fingerprint: str) -> str:
-    return os.path.join(outdir, f"{base}.{fingerprint}.chunk_{ci}.json")
+    return os.path.join(workdir(outdir, base), f"{base}.{fingerprint}.chunk_{ci}.json")
 
 
 def transcribe_video(
@@ -298,8 +299,8 @@ def transcribe_video(
     """
     from faster_whisper import WhisperModel  # lazy: heavy import
 
-    os.makedirs(outdir, exist_ok=True)
     base = base or Path(input_path).stem
+    os.makedirs(workdir(outdir, base), exist_ok=True)
     threads = threads or os.cpu_count()
     total = probe_duration(input_path)
     plan = plan_chunks(total, chunk)
@@ -355,7 +356,7 @@ def transcribe_video(
             model = WhisperModel(_resolve_model_path(model_name), device=dev,
                                  compute_type=ct, cpu_threads=threads)
 
-        wav = os.path.join(outdir, f"{base}.{fp}.chunk_{ci}.wav")
+        wav = os.path.join(workdir(outdir, base), f"{base}.{fp}.chunk_{ci}.wav")
         extract_chunk(_extract_src, wav, cstart, cdur)
         chunk_vad = use_vad
         if adaptive_vad:  # ADR-015: route VAD per chunk from its local profile
@@ -380,7 +381,7 @@ def transcribe_video(
             # Persist for resume: when all chunks are cached and the loop is
             # skipped, detection never runs — this sidecar keeps the align
             # fingerprint stable across re-runs (ADR-028 / Spec 22).
-            save_json(os.path.join(outdir, f"{base}.{fp}.detected_lang.json"),
+            save_json(os.path.join(workdir(outdir, base), f"{base}.{fp}.detected_lang.json"),
                       {"language": detected_language}, indent=0)
         chunk_segs = [
             _seg_to_dict(s, cstart)
@@ -402,7 +403,7 @@ def transcribe_video(
     # wav2vec2 model selection stay consistent with the original run.
     if detected_language is None:
         lang_sidecar = load_json_default(
-            os.path.join(outdir, f"{base}.{fp}.detected_lang.json"), None
+            os.path.join(workdir(outdir, base), f"{base}.{fp}.detected_lang.json"), None
         )
         if lang_sidecar and lang_sidecar.get("language"):
             detected_language = lang_sidecar["language"]
@@ -444,7 +445,7 @@ def transcribe_video(
                            for w in s.get("words", [])]}
                 for s in chunk_segs
             ]
-            wav = os.path.join(outdir, f"{base}.{fp}.chunk_{ci}.wav")
+            wav = os.path.join(workdir(outdir, base), f"{base}.{fp}.chunk_{ci}.wav")
             extract_chunk(_extract_src, wav, cstart, cdur)
             try:
                 aligned_local = _align.align_segments(
@@ -471,7 +472,7 @@ def transcribe_video(
         _align.release_align_memory()
 
     all_segs = merge_chunks(chunk_lists)
-    out = os.path.join(outdir, f"{base}.segments_en.json")
+    out = os.path.join(workdir(outdir, base), f"{base}.segments_en.json")
     save_json(out, all_segs, indent=0)
     progress(f"[merge] total {len(all_segs)} segments -> {out}")
     return out

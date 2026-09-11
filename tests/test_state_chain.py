@@ -28,7 +28,9 @@ SEG = [{"start": 0.0, "end": 1.0, "text": "Hello there."}]
 
 
 def _write_segments(tmp_path, base="demo"):
-    p = tmp_path / f"{base}.segments_en.json"
+    d = tmp_path / base
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / f"{base}.segments_en.json"
     p.write_text(json.dumps(SEG), encoding="utf-8")
     return str(p)
 
@@ -75,12 +77,16 @@ def test_print_pipeline_next_stop_point(tmp_path, capsys):
 
 def test_generate_tail_prints_next(tmp_path, capsys, monkeypatch):
     seg = _write_segments(tmp_path)
-    zh = tmp_path / "demo.zh_segments.json"
+    zh = tmp_path / "demo" / "demo.zh_segments.json"
+    zh.parent.mkdir(parents=True, exist_ok=True)
     zh.write_text(json.dumps({"0": "你好呀。"}), encoding="utf-8")
+    def _fake_generate(*a, **k):
+        d = tmp_path / "demo"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "demo.bilingual.srt").write_text(
+            "1\n00:00:00,000 --> 00:00:01,000\nx\n", encoding="utf-8")
     monkeypatch.setattr(
-        "video_translate.generate.generate_subtitles",
-        lambda *a, **k: (tmp_path / "demo.bilingual.srt").write_text(
-            "1\n00:00:00,000 --> 00:00:01,000\nx\n", encoding="utf-8"))
+        "video_translate.generate.generate_subtitles", _fake_generate)
     rc = main(["generate", "--segments", seg, "--zh", str(zh),
                "--outdir", str(tmp_path), "--base", "demo"])
     assert rc == EXIT_OK
@@ -159,7 +165,9 @@ def test_resegment_refreshes_segments_sha_anchor(tmp_path, monkeypatch):
         == vt_state.segment_sha(seg) != old_sha
     assert vt_state.current_stage(st) == "translate"
     # 由此 generate 的 sha 闸放行（zh 重译后）
-    (tmp_path / "demo.zh_segments.json").write_text(
+    zh = tmp_path / "demo" / "demo.zh_segments.json"
+    zh.parent.mkdir(parents=True, exist_ok=True)
+    zh.write_text(
         json.dumps({0: "原句。", 1: "插句。"}), encoding="utf-8")
     from video_translate import pipeline
     pipeline.enforce("generate", pipeline.build_ctx(tmp_path, "demo"),

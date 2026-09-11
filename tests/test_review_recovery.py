@@ -243,7 +243,7 @@ def test_cache_hit_skips_redecode(tmp_path, monkeypatch):
                        outdir=str(tmp_path), base="cache",
                        progress=_noop)
     assert rec["decodes"] == 1
-    assert (tmp_path / "cache.review.json").is_file()
+    assert (tmp_path / "cache" / "cache.review.json").is_file()
 
     out2 = F.fill_gaps("vid.mp4", copy.deepcopy(_g2_timeline()),
                        silence_intervals=[], g1=False,
@@ -312,4 +312,4 @@ def test_cache_file_is_written_even_when_nothing_is_suspect(
                       outdir=str(tmp_path), base="clean",
                       progress=_noop)
     assert out == segs
-    assert (tmp_path / "clean.review.json").is_file()
+    assert (tmp_path / "clean" / "clean.review.json").is_file()

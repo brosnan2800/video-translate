@@ -23,21 +23,25 @@ previously validated ad-hoc pipeline.
 > See ADR-012.
 
 ## Three-stage pipeline
+
+> 全部产物统一收进 `videos/{base}/`（ADR-037）：中间产物、缓存、状态链、最终字幕四件套均在
+> 该子目录下，外层 `videos/` 只保留源视频本体。
+
 ```
 video (mp4/…)
    │  stage 1: transcribe  (faster-whisper large-v3, CPU/int8, chunked+resumable)
    ▼
-{base}.segments_en.json         list[{start, end, text}]
+videos/{base}/{base}.segments_en.json         list[{start, end, text}]
    │  stage 2: translate   (Google Translate via HTTP proxy, incremental)
    ▼
-{base}.zh_segments.json         {str_index: zh_text}
+videos/{base}/{base}.zh_segments.json         {str_index: zh_text}
    │  stage 3: generate    (pure function, byte-stable)
    ▼
-{base}.bilingual.srt   {base}.zh.srt   {base}.en.srt   {base}.txt
+videos/{base}/{base}.bilingual.srt   {base}.zh.srt   {base}.en.srt   {base}.txt
 ```
 
-Intermediate per-chunk artifacts: `chunk_0.json`, `chunk_1.json`, … (stage 1
-resume state). Failure artifact: `{base}.agent_pending.json` (segments Google
+Intermediate per-chunk artifacts: `videos/{base}/chunk_0.json`, `chunk_1.json`, … (stage 1
+resume state). Failure artifact: `videos/{base}/{base}.agent_pending.json` (segments Google
 could not translate, for agent backfill).
 
 ## Stage responsibilities

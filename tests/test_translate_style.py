@@ -85,7 +85,7 @@ def test_prepare_task_multistyle_emits_suffixed_files(tmp_path):
                                      base="clip", styles=styles)
     assert written is not None
     for style in styles:
-        p = os.path.join(tmp_path, f"clip.{style}.translate_task.json")
+        p = os.path.join(tmp_path, "clip", f"clip.{style}.translate_task.json")
         assert os.path.exists(p), f"missing task for style {style}"
         data = json.load(open(p, encoding="utf-8"))
         assert data["style"] == style

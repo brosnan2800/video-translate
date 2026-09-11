@@ -93,7 +93,7 @@ def test_build_vad_params_does_not_mutate_module_default():
 def _seed_chunk(outdir: str, base: str, ci: int, payload) -> None:
     """Seed a chunk cache at the fingerprinted path the runner will look up."""
     fp = T.transcribe_fingerprint("large-v3", 240.0, None)
-    save_json(os.path.join(outdir, f"{base}.{fp}.chunk_{ci}.json"),
+    save_json(os.path.join(outdir, base, f"{base}.{fp}.chunk_{ci}.json"),
               payload, indent=0)
 
 
@@ -510,7 +510,7 @@ def test_align_pass_writes_and_reuses_cache(tmp_path, monkeypatch, capsys):
     import video_translate.align as AL
 
     align_fp = AL.align_fingerprint(fp, "en", backend="whisperx")
-    align_cache = os.path.join(outdir, f"apollo.{align_fp}.chunk_0.whisperx.json")
+    align_cache = os.path.join(outdir, "apollo", f"apollo.{align_fp}.chunk_0.whisperx.json")
     assert os.path.exists(align_cache)
 
     # second run: full resume (transcribe 0x) + align cache hit (align 0x)

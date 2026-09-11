@@ -57,9 +57,9 @@ def test_unknown_artifact_rejected():
 
 def test_artifact_path_joins_outdir_and_base():
     assert artifact_path("segments", "videos", "IF") == os.path.join(
-        "videos", "IF.segments_en.json")
+        "videos", "IF", "IF.segments_en.json")
     assert artifact_path("segments_raw", "videos", "IF") == os.path.join(
-        "videos", "IF.segments_raw.json")
+        "videos", "IF", "IF.segments_raw.json")
 
 
 def test_artifact_path_fmt_placeholders():

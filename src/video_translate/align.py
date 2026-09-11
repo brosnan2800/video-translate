@@ -33,6 +33,8 @@ import os
 import sys
 from typing import Any, Callable
 
+from .artifacts import workdir
+
 import torch  # torch is already a core dependency (T2/demucs)
 
 # Alignment backends. "none" is the default (no-op). "whisperx" uses WhisperX's
@@ -87,7 +89,7 @@ def release_align_memory() -> None:
 def _align_cache_path(outdir: str, base: str, ci: int, fp: str) -> str:
     """Per-chunk alignment cache path. Backend is baked into the name so different
     backends never collide (ADR-028 decision 2)."""
-    return os.path.join(outdir, f"{base}.{fp}.chunk_{ci}.whisperx.json")
+    return os.path.join(workdir(outdir, base), f"{base}.{fp}.chunk_{ci}.whisperx.json")
 
 
 def align_cache_path(outdir: str, base: str, ci: int, fp: str) -> str:

@@ -32,7 +32,7 @@ from .config import (
 )
 from .io_utils import load_json, save_json
 from .proxy import detect_proxy, setup_http_proxy
-from .artifacts import artifact_path
+from .artifacts import artifact_path, workdir
 from .audio_profile import analyze_audio, probe_volume_window
 from .ffmpeg_utils import probe_duration
 from .toolchain import init_toolchain, resolve_command_entry
@@ -1031,7 +1031,7 @@ def _record_transcribe_stage(segs_path: str, video: str | None = None) -> None:
     """
     try:
         from . import state as vt_state
-        outdir = os.path.dirname(os.path.abspath(segs_path)) or "."
+        outdir = os.path.dirname(os.path.dirname(os.path.abspath(segs_path))) or "."
         base = _derive_base(segs_path)
         st = vt_state.ensure_state(outdir, base, video=video)
         vt_state.set_stage(st, "translate")
@@ -1051,7 +1051,7 @@ def _record_run_decisions(args: argparse.Namespace, segments_path: str) -> None:
     """
     try:
         from . import state as vt_state
-        outdir = os.path.dirname(os.path.abspath(segments_path)) or "."
+        outdir = os.path.dirname(os.path.dirname(os.path.abspath(segments_path))) or "."
         base = _derive_base(segments_path)
         st = vt_state.ensure_state(outdir, base)
 
@@ -1294,10 +1294,10 @@ def cmd_run(args: argparse.Namespace) -> int:
     # like resegment/generate must NOT reset — only a full pipeline run counts).
     from .state import reset_verify_attempts
     reset_verify_attempts(outdir, base)
-    segments = os.path.join(outdir, f"{base}.segments_en.json")
-    zh = os.path.join(outdir, f"{base}.zh_segments.json")
-    pending = os.path.join(outdir, f"{base}.agent_pending.json")
-    task = os.path.join(outdir, f"{base}.translate_task.json")
+    segments = os.path.join(workdir(outdir, base), f"{base}.segments_en.json")
+    zh = os.path.join(workdir(outdir, base), f"{base}.zh_segments.json")
+    pending = os.path.join(workdir(outdir, base), f"{base}.agent_pending.json")
+    task = os.path.join(workdir(outdir, base), f"{base}.translate_task.json")
     cfg = resolve_config(
         {"model": args.model, "chunk": args.chunk, "lang": args.lang,
          "proxy": args.proxy, "src": args.src, "tgt": args.tgt,
@@ -1371,7 +1371,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             for t in written:
                 print(_RUN_AWAITING_AGENT_INSTRUCTIONS.format(
                     task=t, segments=segments,
-                    zh=os.path.join(outdir, f"{base}.{_style_of(t)}.zh_segments.json"),
+                    zh=os.path.join(workdir(outdir, base), f"{base}.{_style_of(t)}.zh_segments.json"),
                     outdir=outdir, base=base))
             _print_pipeline_next(outdir, base, video=input_path)
             return EXIT_AWAITING_AGENT
@@ -1503,7 +1503,7 @@ def cmd_pipeline(args: argparse.Namespace) -> int:
         return cmd_run(_pipeline_run_ns(args, outdir, base, extra=extra))
 
     if action == "stop_translate":
-        task = os.path.join(outdir, f"{base}.translate_task.json")
+        task = os.path.join(workdir(outdir, base), f"{base}.translate_task.json")
         if not os.path.isfile(task):
             # Interrupted before task emission: self-heal by re-emitting the
             # task via `run --skip transcribe` instead of a dangling pointer.
@@ -1573,7 +1573,7 @@ def cmd_resegment(args: argparse.Namespace) -> int:
             demucs_available, separate_fingerprint, vocals_wav_path,
         )
         if demucs_available():
-            outdir = os.path.dirname(segs_path) or "."
+            outdir = os.path.dirname(os.path.dirname(os.path.abspath(segs_path))) or "."
             base = os.path.splitext(os.path.basename(segs_path))[0]
             # segments.json is named "{base}.segments_en.json" — strip that suffix
             if base.endswith(".segments_en"):
@@ -1693,9 +1693,10 @@ def cmd_backfill(args: argparse.Namespace) -> int:
         return EXIT_OK
 
     # prepare mode: pending items already carry their original `index`
-    tmp_segs = os.path.join(outdir, "_backfill_segments.json")
+    os.makedirs(workdir(outdir, base), exist_ok=True)
+    tmp_segs = os.path.join(workdir(outdir, base), "_backfill_segments.json")
     save_json(tmp_segs, pending, indent=0)
-    task_path = os.path.join(outdir, f"{base}.backfill_task.json")
+    task_path = os.path.join(workdir(outdir, base), f"{base}.backfill_task.json")
     from .translate import prepare_translate_task
     prepare_translate_task(tmp_segs, task_path,
                            persona=cfg.persona if cfg.persona != DEFAULT_PERSONA else None,
@@ -1775,10 +1776,8 @@ def _find_generate_opts(segments_path: str) -> dict | None:
     """Locate the display-window sidecar written by `generate` (Spec 18)."""
     seg_dir = os.path.dirname(segments_path)
     base = _derive_base(segments_path)
-    candidates = [
-        os.path.join(seg_dir, base, base + ".generate_opts.json"),
-        os.path.join(seg_dir, base + ".generate_opts.json"),
-    ]
+    # ADR-037: generate_opts 随 segments 落在 workdir，故唯一候选为 seg_dir 下。
+    candidates = [os.path.join(seg_dir, base + ".generate_opts.json")]
     for c in candidates:
         if os.path.exists(c):
             try:
@@ -1824,7 +1823,7 @@ def _verify_state_hook(segments_path: str, status: str) -> None:
     """
     try:
         from . import state as vt_state
-        outdir = os.path.dirname(os.path.abspath(segments_path)) or "."
+        outdir = os.path.dirname(os.path.dirname(os.path.abspath(segments_path))) or "."
         base = _derive_base(segments_path)
         st = vt_state.ensure_state(outdir, base)
         vt_state.set_stage(st, "verify")
@@ -1957,7 +1956,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
     # ---- ADR-031 D8: retry counting + circuit-breaker -------------------------
     from .state import MAX_VERIFY_ATTEMPTS, increment_verify_attempts
-    outdir = os.path.dirname(os.path.abspath(segments_path)) or "."
+    outdir = os.path.dirname(os.path.dirname(os.path.abspath(segments_path))) or "."
     base = _derive_base(segments_path)
     attempts = increment_verify_attempts(outdir, base)
     print(f"[verify] attempt {attempts}/{MAX_VERIFY_ATTEMPTS}", flush=True)

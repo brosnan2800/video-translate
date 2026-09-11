@@ -36,7 +36,7 @@ def test_backfill_creates_task_and_returns_awaiting(tmp_path, capsys):
     assert rc == EXIT_AWAITING_AGENT
     captured = capsys.readouterr().out
     assert "[AWAITING_AGENT]" in captured
-    task = str(tmp_path / "selong.backfill_task.json")
+    task = str(tmp_path / "selong" / "selong.backfill_task.json")
     assert os.path.exists(task)
     data = json.load(open(task, encoding="utf-8"))
     # original indices preserved (NOT positional 0,1)

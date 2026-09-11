@@ -20,6 +20,7 @@ from typing import Any, Callable
 from .config import DEFAULT_PERSONA
 from .io_utils import load_json, load_json_default, save_json
 from .proxy import DEFAULT_PROXY, setup_http_proxy
+from .artifacts import workdir
 
 CHECKPOINT_EVERY = 10
 MAX_RETRIES = 3
@@ -255,8 +256,9 @@ def prepare_translate_task(
         if outdir is None or base is None:
             raise ValueError("outdir and base are required for multi-style task emission")
         written: list[str] = []
+        os.makedirs(workdir(outdir, base), exist_ok=True)
         for st in styles:
-            path = os.path.join(outdir, f"{base}.{st}.translate_task.json")
+            path = os.path.join(workdir(outdir, base), f"{base}.{st}.translate_task.json")
             prepare_translate_task(
                 segments_path, path,
                 batch_size=batch_size, context_window=context_window,

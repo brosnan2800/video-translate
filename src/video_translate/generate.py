@@ -18,6 +18,7 @@ import re
 from typing import Any
 
 from .io_utils import load_json, write_text, save_json
+from .artifacts import workdir
 from .srt_utils import block, srt_time
 
 OUTPUT_SUFFIXES = (".bilingual.srt", ".zh.srt", ".en.srt", ".txt")
@@ -134,7 +135,7 @@ def _resolve_out_base(outdir: str, base: str, flat: bool, style: str | None = No
     out_base = f"{base}.{style}" if style else base
     if flat:
         return outdir, out_base
-    sub = os.path.join(outdir, base)
+    sub = workdir(outdir, base)
     pat = re.compile(re.escape(out_base) + r"(?:_v(\d+))?\.bilingual\.srt$")
     has_plain = False
     max_n = 0
