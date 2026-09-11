@@ -59,6 +59,8 @@ flowchart TD
     T6 --> T7[T7. 批量常驻服务 & Web 校对看板<br/>🖥️ FastAPI + Inspector UI]
     T7 --> T8[T8. Pipeline 单一入口 + Agent 协议瘦身<br/>🔧 控制平面收口 / 入口统一]
     T7 --> T9[T9. 音频路由重构：默认裸跑 + 数据驱动闭环<br/>🎯 ADR-034 / 与 T8 正交可并行]
+    T9 --> T10[T10. 流水线数据契约总线<br/>📋 ADR-035 / 声明式 artifacts 表 + 五条铁律]
+    T10 --> T11[T11. ASR 层抽离：可插拔 ASRProvider<br/>🔌 ADR-038 / 换引擎影响面可枚举]
 ```
 
 ---
@@ -328,6 +330,49 @@ T10 落地后：声学数据（silence_intervals/duration）读 state 契约不�
 - **一期**：默认 bare 生效；5:52 类不再系统性 eject；铁律5文档同步（§0.2 + ADR-011/012/032）。
 - **二期**：5:52 笑声后真音自动救回；G2 守卫防幻觉；独立缓存层生效。
 - **三期**：强 BGM 真音自动救回；G3 不白跑 demucs（场景预筛挡笑声窗）；性能预算生效。
+
+---
+
+### T11 — ASR 层抽离：可插拔 ASRProvider 接口【P0 · 可替换性地基】
+
+> **背景**：语音识别层当前是 6 个模块（`vocal_sep` / `transcribe` / `align` / `merge` /
+> `fill_gaps`）+ 约 150 行散落在 `cli.cmd_transcribe` 的编排，整条链焊死：换 ASR 引擎
+> （Whisper → SenseVoice / 商业 API）要改多处且无从评估影响面；模型特定阈值与几何指纹
+> 散落、无归属；`capabilities.py` 的就绪检查写死 `large-v3` / `whisperx`。
+> 本项是对「换掉 Whisper 会不会一堆逻辑作废」的直接回答：**让作废范围可枚举、可收敛**。
+
+> **完整设计**：[ADR-038](docs/adr/038-asr-layer-extraction.md) + [Spec 25](docs/specs/25-asr-provider.md)。
+
+**核心设计**：
+1. **分层**：① ASR 方案层（人声分离 → 转写 → 对齐 → 幻觉过滤 → 断句合并 → 漏音补洞 →
+   review）/ ② 字幕交付层（42 字符切分 + 表现层）。判据：**Whisper 特有的归 ①，
+   剪映交付要求归 ②**。
+2. **接缝**：① → ② 交接「已合并的句子」；② 必须夹在 P1（转写）与 P2（翻译）之间
+   ——否则先翻译后切分会改变段数、导致 zh 的 index 错行。
+3. **Provider 接口**：`asr.py` 定义 `ASRProvider`（音频 → 原始段）+ `TranscriberConfig`
+   / `TranscribeResult`；第一个实现 `FasterWhisperProvider`（薄包装 `transcribe_video`）。
+   边界 = 「音频 → 原始段」，不含合并 / 补洞（那是「围绕引擎的方案逻辑」，换引擎复用）。
+4. **P0 拆解**：通用基础设施（ffmpeg / 音频画像，与引擎无关，verify 声学 lane 也依赖）/
+   引擎特定就绪（model / whisperx / demucs）/ 翻译前置（决策点选风格）。
+5. **Provider 自报就绪**：`prerequisites()` 交还引擎自己声明要查什么，doctor = 通用体检
+   + Provider 自报体检；换引擎不改 `capabilities.py`。
+6. **契约零变化**：`segments_raw.json` / `segments_en.json` 字段形状不动（ADR-035 仍唯一
+   事实来源）；控制平面 / verify 本轮全不动。
+
+**分步实施**：
+- **第一步（已落地 2026-09-11）**：接口 + `FasterWhisperProvider` 包装。
+  **行为零变化**——旁挂接口，现有调用路径完全不改。
+- **第二步（待做）**：`run_asr()` 门面 + `cmd_transcribe` 编排搬迁 + Provider 自报接线到
+  doctor / 闸门。**已知问题**：切分当前夹在合并与补洞之间（其后还有短句合并 / 孤儿并右 /
+  补洞作用于「切分后的段」），严格按 D2 归位需调整执行顺序，属行为变更、必须单独回归。
+
+**落地文档**：ADR-038（决策）+ Spec 25（接口契约）；单测 `tests/test_asr_provider.py`。
+
+**验收标准**：
+- **第一步**：`asr.py` + 单测新增，现有文件零改动（除索引）；全量 `uv run pytest` 绿；
+  `cmd_transcribe` / pipeline / verify 行为逐字节不变。
+- **第二步**：`run_asr()` 成为 ASR 层唯一门面；doctor 按 Provider 声明体检；第二个 Provider
+  实现验证接口可替换性（这是接口设计的最终验收）。
 
 ---
 

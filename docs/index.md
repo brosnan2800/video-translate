@@ -114,6 +114,12 @@ docs/
 | [033](adr/033-control-plane-pipeline-entry.md) | `pipeline` 单一入口幂等推进器（T8） | Accepted（已落地） |
 | [035](adr/035-pipeline-data-contract.md) | 阶段间数据契约总线 | Accepted |
 
+### 架构分层与目录
+| ADR | 主题 | 状态 |
+|---|---|---|
+| [037](adr/037-artifact-directory-layout.md) | 产物目录布局（`<outdir>/<base>/`） | 接受 |
+| [038](adr/038-asr-layer-extraction.md) | ASR 层抽离：可插拔 ASRProvider（含 P0 拆解 / Provider 自报就绪） | 接受（第一步落地中） |
+
 > ADR 编号 **缺 018 / 019**：未分配（非删除）。
 
 ---
@@ -132,9 +138,10 @@ docs/
 | 能力（T 系列） | [19 人声分离](specs/19-vocal-separation.md) · [21 风格轨](specs/21-translation-styles.md) · [22 WhisperX 对齐](specs/22-whisperx-alignment.md) |
 | 环境（E 系列） | [20 env-readiness](specs/20-env-readiness.md) · [23 命令入口](specs/23-environment-location.md) |
 | 入口（T8） | [24 pipeline 行为](specs/24-pipeline-behavior.md) |
+| 架构分层 | [25 ASRProvider 接口](specs/25-asr-provider.md) |
 
 > Spec 编号 **缺 05**：已删除（说明见 `11-cli-v2.md`）。
-> Spec 00–21 为行为契约、随代码演进，不设 Accepted/Superseded 状态；22–24 带状态字段。
+> Spec 00–21 为行为契约、随代码演进，不设 Accepted/Superseded 状态；22–25 带状态字段。
 
 ---
 
