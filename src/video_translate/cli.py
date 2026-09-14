@@ -1249,6 +1249,13 @@ def cmd_generate(args: argparse.Namespace) -> int:
     tail = getattr(args, "tail", 0.0) or 0.0
     flat = getattr(args, "flat", False)
     prune_old = getattr(args, "prune_old", False)
+    display_merge = getattr(args, "display_merge", False)
+    dm_gap = getattr(args, "display_merge_gap", None)
+    dm_max_dur = getattr(args, "display_merge_max_dur", None)
+    dm_max_chars = getattr(args, "display_merge_max_chars", None)
+    dm_max_zh = getattr(args, "display_merge_max_zh", None)
+    dm_short_dur = getattr(args, "display_merge_short_dur", None)
+    dm_short_words = getattr(args, "display_merge_short_words", None)
 
     # control plane 静默点 4: enforce 前置校验（覆盖 100% + 段数匹配 + 位移 +
     # sha 陈旧）。--no-align-check / --allow-degrade 是显式逃生门。
@@ -1269,7 +1276,12 @@ def cmd_generate(args: argparse.Namespace) -> int:
         from .generate import generate_subtitles
         generate_subtitles(args.segments, args.zh, args.outdir, base=base,
                            gap=gap, min_dur=min_dur, offset=offset, tail=tail,
-                           flat=flat, prune_old=prune_old, style=args.style)
+                           flat=flat, prune_old=prune_old, style=args.style,
+                           display_merge=display_merge,
+                           dm_gap=dm_gap, dm_max_dur=dm_max_dur,
+                           dm_max_chars=dm_max_chars, dm_max_zh=dm_max_zh,
+                           dm_short_dur=dm_short_dur,
+                           dm_short_words=dm_short_words)
         _record_generate_stage(args.segments, str(outdir), base,
                                style=getattr(args, "style", None))
         _print_pipeline_next(str(outdir), base)
@@ -1401,6 +1413,13 @@ def cmd_run(args: argparse.Namespace) -> int:
             tail=getattr(args, "tail", 0.3),
             flat=getattr(args, "flat", False),
             prune_old=getattr(args, "prune_old", False),
+            display_merge=getattr(args, "display_merge", False),
+            display_merge_gap=getattr(args, "display_merge_gap", None),
+            display_merge_max_dur=getattr(args, "display_merge_max_dur", None),
+            display_merge_max_chars=getattr(args, "display_merge_max_chars", None),
+            display_merge_max_zh=getattr(args, "display_merge_max_zh", None),
+            display_merge_short_dur=getattr(args, "display_merge_short_dur", None),
+            display_merge_short_words=getattr(args, "display_merge_short_words", None),
         ))
         if rc != EXIT_OK:
             return rc
@@ -1516,10 +1535,23 @@ def cmd_pipeline(args: argparse.Namespace) -> int:
         return EXIT_AWAITING_AGENT
 
     if action == "generate":
+        extra = []
+        if getattr(args, "display_merge", False):
+            extra.append("--display-merge")
+            for flag, attr in (
+                ("--display-merge-gap", "display_merge_gap"),
+                ("--display-merge-max-dur", "display_merge_max_dur"),
+                ("--display-merge-max-chars", "display_merge_max_chars"),
+                ("--display-merge-max-zh", "display_merge_max_zh"),
+                ("--display-merge-short-dur", "display_merge_short_dur"),
+                ("--display-merge-short-words", "display_merge_short_words"),
+            ):
+                val = getattr(args, attr, None)
+                if val is not None:
+                    extra += [flag, str(val)]
         return cmd_generate(build_parser().parse_args([
             "generate", "--segments", ctx["segments"], "--zh", ctx["zh"],
-            "--outdir", outdir, "--base", base,
-        ]))
+            "--outdir", outdir, "--base", base] + extra))
 
     # action == "verify"
     return cmd_verify(build_parser().parse_args([
@@ -2330,6 +2362,24 @@ def build_parser() -> argparse.ArgumentParser:
                    choices=["film", "literal", "bilingual_study"],
                    help="style suffix for output filenames (e.g. base.film.bilingual.srt); "
                         "omit for the default single-track name")
+    g.add_argument("--display-merge", action="store_true",
+                   help="(Spec 26) merge adjacent SHORT cues with a small display "
+                        "gap into one display cue (zh/en concatenated). Pure "
+                        "presentation layer — segments/words untouched. Default OFF.")
+    g.add_argument("--display-merge-gap", type=float, default=0.8,
+                   help="(Spec 26) max display gap (s) between merged cues (default 0.8)")
+    g.add_argument("--display-merge-max-dur", type=float, default=6.0,
+                   help="(Spec 26) joined cue window upper bound in seconds (default 6.0)")
+    g.add_argument("--display-merge-max-chars", type=int, default=84,
+                   help="(Spec 26) English char budget per merged cue = 2 lines x 42 "
+                        "(default 84)")
+    g.add_argument("--display-merge-max-zh", type=int, default=40,
+                   help="(Spec 26) Chinese char budget per merged cue = 2 lines x 20 "
+                        "(default 40)")
+    g.add_argument("--display-merge-short-dur", type=float, default=2.0,
+                   help="(Spec 26) a cue is mergeable only if its dur <= this s (default 2.0)")
+    g.add_argument("--display-merge-short-words", type=int, default=8,
+                   help="(Spec 26) a cue is mergeable only if its word count <= this (default 8)")
     g.set_defaults(func=cmd_generate)
 
     r = sub.add_parser("run", help="Full pipeline: transcribe -> translate -> generate")
@@ -2400,6 +2450,24 @@ def build_parser() -> argparse.ArgumentParser:
                         "(positive = later); corrects word-timestamp drift (default 0)")
     r.add_argument("--tail", type=float, default=0.3,
                    help="extend each cue's DISPLAY end by N seconds (default 0.3)")
+    r.add_argument("--display-merge", action="store_true",
+                   help="(Spec 26) merge adjacent SHORT cues with a small display "
+                        "gap into one display cue (zh/en concatenated). Pure "
+                        "presentation layer — segments/words untouched. Default OFF.")
+    r.add_argument("--display-merge-gap", type=float, default=0.8,
+                   help="(Spec 26) max display gap (s) between merged cues (default 0.8)")
+    r.add_argument("--display-merge-max-dur", type=float, default=6.0,
+                   help="(Spec 26) joined cue window upper bound in seconds (default 6.0)")
+    r.add_argument("--display-merge-max-chars", type=int, default=84,
+                   help="(Spec 26) English char budget per merged cue = 2 lines x 42 "
+                        "(default 84)")
+    r.add_argument("--display-merge-max-zh", type=int, default=40,
+                   help="(Spec 26) Chinese char budget per merged cue = 2 lines x 20 "
+                        "(default 40)")
+    r.add_argument("--display-merge-short-dur", type=float, default=2.0,
+                   help="(Spec 26) a cue is mergeable only if its dur <= this s (default 2.0)")
+    r.add_argument("--display-merge-short-words", type=int, default=8,
+                   help="(Spec 26) a cue is mergeable only if its word count <= this (default 8)")
     r.add_argument("--glossary", default=None, help="path to glossary file (txt/json)")
     r.add_argument("--source", default=None,
                    help="video provenance/背景 hint fed to the translator, e.g. "
