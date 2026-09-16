@@ -105,10 +105,23 @@ def _find_srt(outdir: str | Path, base: str) -> str | None:
 
 
 def _engine_cap_names(provider: Any | None = None) -> tuple[str, ...]:
-    """当前引擎自报的就绪要求（ADR-038 D7）——实现归 ① 层（``asr``）。"""
-    from .asr import engine_prerequisites
+    """当前引擎自报的**硬前置**（ADR-038 D7）——自报实现归 ① 层（``asr``）。
 
-    return engine_prerequisites(provider)
+    只取 ``core=True`` 的能力：``prerequisites()`` 是「本引擎可能用到哪些能力」的
+    清单，其中 cuda / whisperx / demucs 属**可选**（CPU 可跑、``--align auto`` 会降级
+    none、demucs 仅 ``--separate-vocals`` 需要）。若把它们当作「阻断本阶段」的问题，
+    CPU / macOS 机器的 NEXT 块会长期挂着误导性 MISS —— 可选能力的**体检**归 doctor
+    （走未过滤的 ``asr.engine_prerequisites()``）。
+    """
+    from .asr import engine_prerequisites
+    from .capabilities import capability
+
+    out: list[str] = []
+    for pid in engine_prerequisites(provider):
+        cap = capability(pid)
+        if cap is not None and cap.core:
+            out.append(pid)
+    return tuple(out)
 
 
 def build_ctx(outdir: str | Path, base: str,

@@ -62,6 +62,11 @@
 - `pipeline_def.STAGES["transcribe"]["caps"]` **只声明通用前置**；引擎特定前置由
   `asr.engine_prerequisites(provider=None)` 自报，`pipeline.build_ctx` 注入
   `ctx["_engine_caps"]`，`pipeline.check_stage` 合并检查两者。
+- **注入时只取 `core=True` 的硬前置**（当前 = `model:large-v3`）：`prerequisites()`
+  是「本引擎**可能用到**哪些能力」的清单，其中 `cuda` / `whisperx` / `demucs` 属**可选**
+  ——CPU 可跑、`--align auto` 会自动降级 `none`、demucs 仅 `--separate-vocals` 需要。
+  若把它们当作「阻断本阶段」的问题，CPU / macOS 机器的 NEXT 块会长期挂着误导性 MISS。
+  可选能力的**体检**归 doctor（走未过滤的 `engine_prerequisites()`）。
 - `capabilities.capability(name)` 对未注册的 `model:<name>` 型 id **按前缀解析**
   （探测复用 `model_cache` 的 E3 完整性口径）——新引擎声明 `model:sensevoice`
   无需改动 `capabilities.py`。

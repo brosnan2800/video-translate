@@ -44,7 +44,11 @@ class Capability:
     name: str
     probe: Callable[[], bool]
     guidance: str
-    core: bool = True  # core = the control plane enforces it by default
+    # core = the control plane enforces it by default。**硬前置**（缺失即无法推进本
+    # 阶段，如 ffmpeg / ffprobe / 模型）保持 True；**可选能力**（cuda / whisperx /
+    # demucs —— CPU 可跑、可降级、按 flag 启用）标 False：它们照常出现在 doctor 的
+    # 体检里，但不作为闸门的「阻断项」（否则 CPU / macOS 的 NEXT 块会长期挂误导 MISS）。
+    core: bool = True
     # ADR-038 D7 通用前置：与 ASR 引擎无关的就绪要求（ffmpeg / ffprobe 是所有引擎的
     # 共同前置，同时服务 verify 的独立验证）。阶段表（pipeline_def.STAGES）**只**
     # 声明这类；引擎特定前置由 Provider 的 prerequisites() 自报，组装 ctx 时注入。
@@ -120,18 +124,21 @@ CAPS: tuple[Capability, ...] = (
         "NVIDIA CUDA runtime not detected — heavy stages (whisperx alignment, "
         "demucs) cannot run. Install CUDA / use a GPU host, or fall back to "
         "backends that support CPU.",
+        core=False,  # 可选：CPU 路径可用（仅加速项）
     ),
     Capability(
         "whisperx",
         _probe_whisperx,
         "WhisperX unavailable (needs NVIDIA CUDA + package). On a CUDA host "
         "run `uv sync --extra gpu`. macOS has no whisperx path.",
+        core=False,  # 可选：--align auto 会降级 none
     ),
     Capability(
         "demucs",
         _probe_demucs,
         "demucs not installed (core dependency). Run `uv sync` "
         "(`pip install -e .` fallback) — never `pip install` torch ad-hoc.",
+        core=False,  # 可选：仅 --separate-vocals 需要
     ),
 )
 

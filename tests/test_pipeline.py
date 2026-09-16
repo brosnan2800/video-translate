@@ -224,12 +224,17 @@ def test_transcribe_stage_declares_only_common_caps():
 
 
 def test_build_ctx_injects_provider_prerequisites(art):
-    """ctx 带 `_engine_caps`，内容 = 当前 Provider 自报的就绪要求。"""
+    """ctx 带 `_engine_caps` = Provider 自报里的**硬前置**（core 子集）。
+
+    完整自报集合见 `asr.engine_prerequisites()`（doctor 用未过滤的那份）；
+    这里只注入会被闸门当作「阻断项」的硬前置（模型），可选能力见下一条测试。
+    """
     from video_translate.asr import FasterWhisperProvider
 
+    prereqs = FasterWhisperProvider().prerequisites()
     ctx = pipeline.build_ctx(art, "demo")
-    assert ctx["_engine_caps"] == FasterWhisperProvider().prerequisites()
     assert "model:large-v3" in ctx["_engine_caps"]
+    assert set(ctx["_engine_caps"]) <= set(prereqs)
 
 
 def test_build_ctx_accepts_provider_override(art):
@@ -264,3 +269,22 @@ def test_engine_prereq_failure_degrades_to_empty(art):
     assert ctx["_engine_caps"] == ()
     problems = pipeline.check_stage("transcribe", ctx, caps_probe=lambda n: True)
     assert not any("model:" in p for p in problems)
+
+
+def test_optional_engine_caps_never_block_the_stage(art):
+    """可选能力（cuda / whisperx / demucs）缺失**不**阻断 transcribe。
+
+    它们对主链是可选（CPU 可跑、--align auto 降级、demucs 仅 --separate-vocals
+    需要），若被当成阻断项，CPU / macOS 机器的 NEXT 块会长期挂误导性 MISS。
+    只有硬前置（模型）进 `_engine_caps`；可选能力的体检归 doctor。
+    """
+    _seg_file(art)
+    ctx = pipeline.build_ctx(art, "demo", video="demo.mp4")
+    assert "model:large-v3" in ctx["_engine_caps"]
+    for optional in ("cuda", "whisperx", "demucs"):
+        assert optional not in ctx["_engine_caps"]
+    # 即便全部探测失败，也不该出现「可选能力缺失」的阻断项
+    problems = pipeline.check_stage("transcribe", ctx, caps_probe=lambda n: False)
+    assert any("model:large-v3" in p for p in problems)
+    assert not any(
+        cap in p for p in problems for cap in ("cuda", "whisperx", "demucs"))
