@@ -1,4 +1,4 @@
-# Spec 25 — ASRProvider 接口契约（ASR 层抽离 · 第一步）
+# Spec 27 — ASRProvider 接口契约（ASR 层抽离 · 第一步）
 
 - 状态：批准（实现）
 - 日期：2026-09-11

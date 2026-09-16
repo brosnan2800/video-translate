@@ -37,8 +37,8 @@ from .audio_profile import analyze_audio, probe_volume_window
 from .ffmpeg_utils import probe_duration
 from .toolchain import init_toolchain, resolve_command_entry
 from .verify import (
-    ADJACENT_OVERLAP, LOW_CONFIDENCE, UNCOVERED_AUDIO, classify_uncovered_windows,
-    find_adjacent_overlaps, find_low_confidence_segments, find_uncovered_speech,
+    ADJACENT_OVERLAP, UNCOVERED_AUDIO, classify_uncovered_windows,
+    find_adjacent_overlaps, find_uncovered_speech,
     find_untranslated_latin_words, is_recovered_segment, verify_acoustic,
     verify_presentation,
 )
@@ -2000,15 +2000,9 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
     segments = load_json(segments_path)
 
-    # ADR-035 M3（Z2）: 低置信道按 _raw_indices 回查 raw 段置信度；缺失/损坏
-    # 时降级为旧行为（只查段自身字段），永不阻断。
-    raw_segs = None
-    try:
-        _rp = artifact_path("segments_raw", outdir, base)
-        if os.path.isfile(_rp):
-            raw_segs = load_json(_rp)
-    except Exception:  # noqa: BLE001
-        raw_segs = None
+    # ADR-041: verify 不再读取 ASR 的置信度字段（低置信道已移除）——裁判只看
+    # FFmpeg 独立参照与 cue 的客观几何，不看被测模型的内心活动。
+    # （`segments_raw.json` 的置信度仍由①层 review 信号 A 经 _raw_indices 使用。）
 
     # ---- Lane 1: acoustic -------------------------------------------------
     # 静默点 7: a profile failure is a RED lane — "couldn't check" must never
@@ -2057,14 +2051,11 @@ def cmd_verify(args: argparse.Namespace) -> int:
         opts = _find_generate_opts(segments_path) or {}
     offset = float(opts.get("offset", 0.0) or 0.0)
     acoustic_issues = verify_acoustic(segments, silences, offset=offset) if silences else []
-    # ADR-031 D3/D4/D5: segment-confidence + adjacent-overlap/prefix-collision
+    # ADR-031 D4/D5（D3 已由 ADR-041 移除）: adjacent-overlap / prefix-collision
     # inspection runs unconditionally — it does not depend on the silencedetect
-    # reference (kathy_meta_vlog: "We'll be right back." nsp=0.906 and the
-    # "Is he" prefix riding on "busy." escaped every silence-based check).
-    acoustic_issues = (acoustic_issues
-                       + find_low_confidence_segments(segments,
-                                                      raw_segments=raw_segs)
-                       + find_adjacent_overlaps(segments))
+    # reference (kathy_meta_vlog: the "Is he" prefix riding on "busy." escaped
+    # every silence-based check). 这是 cue 的客观几何，非模型自证。
+    acoustic_issues = acoustic_issues + find_adjacent_overlaps(segments)
 
     # ADR-016 (T2b): uncovered-audio detection — audio present but no cue.
     # 静默点 8: a probe exception is RED with the reason, never a swallowed [].
@@ -2124,9 +2115,6 @@ def cmd_verify(args: argparse.Namespace) -> int:
                      f"{it.get('overlap')}s"
                      + (", word-collision" if it.get("word_collision") else "")
                      + (f" — {it['hint']}" if it.get("hint") else "") + ")")
-        elif it["type"] == LOW_CONFIDENCE:
-            extra = (f" (no_speech_prob={it.get('no_speech_prob')}, "
-                     f"avg_logprob={it.get('avg_logprob')})")
         print(f"    - [{it['type']}] cue #{it.get('index')}{span}{extra}")
     if prof_error:
         print(f"    - [profile-error] {prof_error}")

@@ -29,6 +29,7 @@ import torch  # core dependency (T2/demucs); used for CUDA memory cleanup
 
 from .ffmpeg_utils import extract_chunk, probe_duration
 from .io_utils import load_json, load_json_default, save_json
+from .text_utils import to_single_line
 from .audio_profile import analyze_audio, route_vad_chunk
 from . import align as _align
 from .capabilities import GateFail
@@ -550,7 +551,7 @@ def _seg_to_dict(s, offset: float) -> dict[str, Any]:
     seg: dict[str, Any] = {
         "start": round(s.start + offset, 2),
         "end": round(s.end + offset, 2),
-        "text": s.text.strip(),
+        "text": to_single_line(s.text),   # ADR-040: 字幕文本单行不变量
         "words": [
             {"word": w.word, "start": round(w.start + offset, 2),
              "end": round(w.end + offset, 2)}

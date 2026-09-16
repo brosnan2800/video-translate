@@ -20,6 +20,7 @@ from typing import Any
 from .io_utils import load_json, write_text, save_json
 from .artifacts import workdir
 from .srt_utils import block, srt_time
+from .text_utils import to_single_line
 
 OUTPUT_SUFFIXES = (".bilingual.srt", ".zh.srt", ".en.srt", ".txt")
 
@@ -229,8 +230,10 @@ def build_outputs(
     merged_texts: list[tuple[str, str]] = []
     for grp in groups:
         merged_bounds.append([bounds[grp[0]][0], bounds[grp[-1]][1]])
-        en = " ".join((segments[j].get("text") or "").strip() for j in grp)
-        cn = "".join((zh.get(j) or "").strip() for j in grp)
+        # ADR-040 边界清洗：segments_en.json / zh_segments.json 可被 Agent / 人工
+        # 直接编辑，必须在此再兜一次单行化（多行 cue 只能来自 block 的 lines）。
+        en = " ".join(to_single_line(segments[j].get("text") or "") for j in grp)
+        cn = "".join(to_single_line(zh.get(j) or "") for j in grp)
         merged_texts.append((cn, en))
 
     # pass 3: min-dur display extension (soft target; start never moves)

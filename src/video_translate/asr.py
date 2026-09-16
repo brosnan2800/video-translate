@@ -34,7 +34,7 @@ RawSegment = dict[str, Any]
 
 @dataclass(frozen=True)
 class TranscriberConfig:
-    """引擎无关的通用转写参数（ADR-038 D3 / Spec 25）。
+    """引擎无关的通用转写参数（ADR-038 D3 / Spec 27）。
 
     默认值**必须与 ``transcribe.transcribe_video`` 的形参默认值逐字段等价**
     ——``tests/test_asr_provider.py`` 用 ``inspect.signature`` 锁定，防两处漂移。
@@ -64,7 +64,7 @@ class TranscriberConfig:
 
 @dataclass(frozen=True)
 class TranscribeResult:
-    """引擎转写结果（Spec 25）。"""
+    """引擎转写结果（Spec 27）。"""
 
     segments_path: str            # 落盘的 raw segments 路径
     segments: list[RawSegment]    # 段数据（编排层继续后处理用，避免调用方再读盘）

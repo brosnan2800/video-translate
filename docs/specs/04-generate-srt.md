@@ -25,8 +25,13 @@ stem becomes `<base>.<style>` (e.g. `clip.literal.bilingual.srt`). The default (
 
 ## Algorithm (`build_outputs(segments, zh) -> {suffix: content}`)
 1. Enumerate segments 1-based (`i` from 1).
-2. `en_t = (segment.text or "").strip()`; `cn = (zh.get(i-1) or "").strip()`.
+2. `en_t = to_single_line(segment.text)`; `cn = to_single_line(zh.get(i-1))`.
    - **Index mapping is positional**: `zh[i-1]` corresponds to segment `i`.
+   - **Single-line invariant (ADR-040)**: 文本在**边界**被压成单行
+     （`\r\n` → 单空格）。这是必须的，因为 `segments_en.json` /
+     `zh_segments.json` 是 **Agent / 人工可直接编辑**的产物，会绕过所有转写侧
+     清洗。cue 的多行**只能**来自 `block()` 的 `lines`（中英分行 / display-merge
+     折行），**不能**来自文本内容。
 3. Bilingual cue: `block(i, start, end, [cn, en_t])` — empty lines dropped, so a
    segment with no Chinese still appears with just the English line.
 4. `.zh.srt` cue is emitted **only if** `cn` is non-empty; `.en.srt` cue only if

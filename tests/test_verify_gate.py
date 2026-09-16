@@ -198,16 +198,6 @@ def test_state_hook_survives_corrupt_state(art, no_probe, monkeypatch):
 
 # --------------------------- ADR-031: 声学 lane 硬化 ------------------------
 
-def test_low_confidence_segments_turn_acoustic_lane_red(art, no_probe, monkeypatch):
-    """Whisper 自判非语音的段（nsp>=0.6）必须让声学 lane 红（D3）。"""
-    segs = json.loads((art / "demo.segments_en.json").read_text(encoding="utf-8"))
-    segs[1]["no_speech_prob"] = 0.906
-    (art / "demo.segments_en.json").write_text(
-        json.dumps(segs), encoding="utf-8")
-    monkeypatch.setattr(cli, "probe_duration", lambda v: 5.0)
-    assert _run(art, []) == cli.EXIT_GATE_FAIL
-
-
 def test_adjacent_overlap_turns_acoustic_lane_red(art, no_probe, monkeypatch):
     """相邻段声学窗口重叠 >0.05s -> 声学 lane 红（D4）。"""
     segs = json.loads((art / "demo.segments_en.json").read_text(encoding="utf-8"))

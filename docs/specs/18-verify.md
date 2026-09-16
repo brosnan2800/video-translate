@@ -34,6 +34,11 @@ Module: `verify.py` + `cmd_verify`. Decision ADR-012. 补充 [Spec 17](17-verify
   再捞一遍」的**检测**侧：它只 flag，不重解码（重解码归 `fill_gaps` / `resegment`）。
   以前一个 region 真被漏掉时根本没有 cue 可查，三 lane 会误报 clean；此 lane 补上该漏洞。
 - 输出每条可疑 cue / 漏检区间的时间戳与类型，供人工/agent 校正。
+- **边界（ADR-041）**：Lane 1 **只使用 FFmpeg 独立参照**（`silencedetect`）与 cue 的
+  客观几何（时间戳重叠）。**ASR 模型的自评字段（`no_speech_prob` / `avg_logprob` /
+  `compression_ratio`）不参与** —— 用被测对象的内部字段验证它自己属「自证」，非独立验证。
+  原先的"低置信道"（`find_low_confidence_segments`，ADR-031 D3）**已移除**，其能力
+  归位到① ASR 层内部（幻觉过滤 + `review` 的 A∩B 重处理判定）。
 
 ### Lane 2 — 内容（content）
 - 跑 `validate_zh`：覆盖度（每个 segment index 都有 zh，无漏译行）。

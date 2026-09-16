@@ -120,6 +120,17 @@ docs/
 | [037](adr/037-artifact-directory-layout.md) | 产物目录布局（`<outdir>/<base>/`） | 接受 |
 | [038](adr/038-asr-layer-extraction.md) | ASR 层抽离：可插拔 ASRProvider（含 P0 拆解 / Provider 自报就绪） | 接受（第一步落地中） |
 
+### 表现层与文本契约
+| ADR | 主题 | 状态 |
+|---|---|---|
+| [039](adr/039-display-layer-cue-merge.md) | 显示层短块合并（折行，默认 OFF） | 接受 |
+| [040](adr/040-single-line-subtitle-text.md) | 字幕文本单行不变量（清除内嵌换行） | 接受（实现中） |
+
+### 验证层
+| ADR | 主题 | 状态 |
+|---|---|---|
+| [041](adr/041-verify-decoupled-from-asr-self-report.md) | verify 与 ASR 自证解耦（移除低置信道） | 接受（实现中） |
+
 > ADR 编号 **缺 018 / 019**：未分配（非删除）。
 
 ---
@@ -138,10 +149,12 @@ docs/
 | 能力（T 系列） | [19 人声分离](specs/19-vocal-separation.md) · [21 风格轨](specs/21-translation-styles.md) · [22 WhisperX 对齐](specs/22-whisperx-alignment.md) |
 | 环境（E 系列） | [20 env-readiness](specs/20-env-readiness.md) · [23 命令入口](specs/23-environment-location.md) |
 | 入口（T8） | [24 pipeline 行为](specs/24-pipeline-behavior.md) |
-| 架构分层 | [25 ASRProvider 接口](specs/25-asr-provider.md) |
+| 命令卫生 | [25 CLI 路径卫生](specs/25-cli-path-hygiene.md)（参数边界校验） |
+| 表现层 | [26 显示层短块合并](specs/26-display-merge.md) |
+| 架构分层 | [27 ASRProvider 接口](specs/27-asr-provider.md) |
 
 > Spec 编号 **缺 05**：已删除（说明见 `11-cli-v2.md`）。
-> Spec 00–21 为行为契约、随代码演进，不设 Accepted/Superseded 状态；22–25 带状态字段。
+> Spec 00–21 为行为契约、随代码演进，不设 Accepted/Superseded 状态；22–27 带状态字段。
 
 ---
 

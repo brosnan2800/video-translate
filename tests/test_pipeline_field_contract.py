@@ -1,11 +1,12 @@
 """ADR-035 M3 — 跨阶段字段契约测试（验收闸）。
 
 事故回归：merge 白名单重建曾把主通路段的 no_speech_prob / avg_logprob /
-compression_ratio 剥掉 → review 的 G1 与 verify 低置信道在合并后时间轴"失明"。
+compression_ratio 剥掉 → review 的 G1 在合并后时间轴"失明"（原 verify 低置信道
+同受影响，该道已由 ADR-041 移除）。
 Z2 之后本测试断言全链字段存活且可回查：
 
   transcribe(raw, 全字段) → apply_merge(视图 + _raw_indices)
-    → raw 置信度永不丢 → review/verify 按索引回查 → 信号 A 复明。
+    → raw 置信度永不丢 → review 按索引回查 → 信号 A 复明。
 """
 from __future__ import annotations
 
@@ -16,7 +17,6 @@ import pytest
 from video_translate.artifacts import raw_sources, validate_artifact
 from video_translate.merge import apply_merge, attach_raw_indices
 from video_translate.review import MISSING, review_segments
-from video_translate.verify import LOW_CONFIDENCE, find_low_confidence_segments
 
 
 def _seg(start: float, dur: float, text: str, *,
@@ -124,22 +124,28 @@ def test_review_signal_a_survives_merge_via_raw_lookup(merged_chain):
     assert all(r["verdict"] != MISSING for r in recs_legacy)
 
 
-def test_verify_low_confidence_lane_sees_through_merge(merged_chain):
+def test_review_signal_a_sees_through_merge(merged_chain):
+    """ADR-041：`_raw_indices` 回查契约由①层 `review` 信号 A 承接。
+
+    事故几何：`merged_chain` 的 raw#2（nsp=0.72）在合并视图上不带置信度字段，
+    review 必须能经 `_raw_indices` 回查 raw 源段把信号 A 复明（G1 重处理的前提）。
+    """
     merged, raw_saved = merged_chain
-    issues = find_low_confidence_segments(merged, raw_segments=raw_saved)
-    assert issues, "低置信道必须能穿透合并视图看到 raw 源段的可疑值"
-    assert issues[0]["type"] == LOW_CONFIDENCE
-    assert issues[0]["no_speech_prob"] == pytest.approx(0.72)
-    # 事故回归对照：无 raw = 该道全盲（merge 丢字段的历史行为）
-    assert find_low_confidence_segments(merged) == []
+    recs = review_segments(merged, [], raw_segments=raw_saved)
+    assert recs, "review 信号 A 必须能穿透合并视图看到 raw 源段的可疑值"
+    assert any("high_no_speech_prob" in r for rec in recs for r in rec["reasons"])
+    # 事故回归对照：无 raw 回查 = 信号 A 失明（merge 丢字段的历史行为）
+    legacy = review_segments(merged, [])
+    assert not any("high_no_speech_prob" in r
+                   for rec in legacy for r in rec["reasons"])
 
 
-def test_verify_low_confidence_own_fields_still_work():
+def test_review_signal_a_own_fields_still_work():
     """恢复段等自带置信度的段：无指针时按自身字段判定（向后兼容）。"""
-    segs = [_seg(0.0, 1.0, "hallucinated words", nsp=0.9, alp=-0.4)]
-    issues = find_low_confidence_segments(segs)
-    assert len(issues) == 1
-    assert issues[0]["no_speech_prob"] == pytest.approx(0.9)
+    segs = [_seg(2.4, 1.2, "hallucinated words", nsp=0.9, alp=-0.65)]
+    # 静音窗不覆盖该段 → B 判定为"有能量"，配合信号 A 才成 MISSING
+    recs = review_segments(segs, [(0.0, 2.0), (4.0, 5.0)])
+    assert recs and any("high_no_speech_prob" in r for r in recs[0]["reasons"])
 
 
 def test_raw_lookup_out_of_range_is_tolerated():

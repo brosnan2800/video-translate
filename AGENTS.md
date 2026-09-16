@@ -80,7 +80,7 @@ full architectural rationale.
 |---|---|---|---|
 | **声学层**（时间轴压在真语音） | VAD 路由 | 依据 `doctor --video` 音频画像**自动路由**，禁止盲猜 | ADR-011 / ADR-012 |
 | **声学层** | 漂移与漏检 | 对照 `silencedetect` 独立参照，探测静音跨越与 `uncovered-audio` (≥2s 无 cue 语音窗) | ADR-012 / ADR-016 |
-| **声学层** | 幻觉拦截 | 转写层 `drop_hallucination_segments` 五信号：word 塌缩≥50%+邻居3-gram 重复 / 整段落静音窗 / **尾部回音（窗口被邻居时间窗包含且含零时长词，确定性）/ Whisper 低 `avg_logprob`**；**补洞恢复段**另有 `_is_recovered_hallucination` 守卫（重叠>0.12s / 语速>8wps / 低置信度）兜住绕回 fill_gaps 的回音；**resegment 拼接产出同过此守卫**（拦截打印可见）；verify 声学 lane 巡检**段级置信度**（`no_speech_prob`≥0.6 / `avg_logprob`<-1.0 → 红灯）与**相邻段重叠/词碰撞**（恢复段首词骑邻居词 = 幻觉前缀指纹，只报告不修剪） | ADR-012 / ADR-020 / ADR-021 / ADR-031 |
+| **声学层** | 幻觉拦截 | 转写层 `drop_hallucination_segments` 五信号：word 塌缩≥50%+邻居3-gram 重复 / 整段落静音窗 / **尾部回音（窗口被邻居时间窗包含且含零时长词，确定性）/ Whisper 低 `avg_logprob`**；**补洞恢复段**另有 `_is_recovered_hallucination` 守卫（重叠>0.12s / 语速>8wps / 低置信度）兜住绕回 fill_gaps 的回音；**resegment 拼接产出同过此守卫**（拦截打印可见）；verify 声学 lane 巡检**相邻段重叠/词碰撞**（恢复段首词骑邻居词 = 幻觉前缀指纹，只报告不修剪）—— **只用 FFmpeg 独立参照与客观几何，不读 ASR 自评字段**（低置信道已由 ADR-041 移除） | ADR-012 / ADR-020 / ADR-021 / ADR-031 / ADR-041 |
 | **内容层**（zh 忠实于 en） | 覆盖与对齐 | `validate_zh`（覆盖率）→ `verify_align`（Pearson 索引对齐）→ 中英混杂词检测 → **语义回读（默认开启）** | Spec 17 / Spec 18 |
 | **表现层**（出入字时机） | 显示窗口 | 保持 `tail 0.3 / min-dur 1.0` 默认值；防剪映缓存碰撞自动 `_vN` 递增 | Spec 04 / ADR-012 |
 
@@ -132,7 +132,10 @@ flag（原样转发底层 run；显式 flag 即视为决策完成，origin=expli
 2. 逐批翻译 `to_translate` 中的每一项（遵循 `persona` 与 `guidelines` 指定的风格取向，
    默认「信达雅 + 口语感」，保留语气情绪）。
 3. 生成 `<base>.zh_segments.json`（多风格下为 `<base>.<style>.zh_segments.json`），
-   格式为严格的 `{"<str(index)>": "<zh>", ...}` 字典，**必须 100% 覆盖所有 index**。
+   格式为严格的 `{"<str(index)>": "<zh>", ...}` 字典，**必须 100% 覆盖所有 index**，
+   **且每个 `<zh>` 值必须是单行（不得含 `\n` / `\r`）** —— 断行由剪辑软件处理，
+   不由译文携带（[ADR-040](docs/adr/040-single-line-subtitle-text.md)；`generate`
+   虽会在边界兜底压平，但译文自带换行会让语义回读与人工校对更难读）。
 4. （可选）校验覆盖完整性：
    ```bash
    uv run python -c "from video_translate.translate import validate_zh; print(validate_zh('<base>.segments_en.json', '<base>.zh_segments.json'))"

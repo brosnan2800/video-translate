@@ -19,6 +19,7 @@ from typing import Any, Callable
 
 from .config import DEFAULT_PERSONA
 from .io_utils import load_json, load_json_default, save_json
+from .text_utils import to_single_line
 from .proxy import DEFAULT_PROXY, setup_http_proxy
 from .artifacts import workdir
 
@@ -77,7 +78,7 @@ def _make_translator(src: str, tgt: str) -> Callable[[str], str]:
     tr = GoogleTranslator(source=src, target=tgt)
 
     def translate_one(text: str) -> str:
-        text = text.strip()
+        text = to_single_line(text)   # ADR-040
         if not text:
             return ""
         err: Exception | None = None
@@ -131,7 +132,8 @@ def translate_segments(
         if i in done:
             continue
         try:
-            done[i] = translate_fn(s.get("text", ""))
+            # ADR-040: 译文同样单行化（引擎返回的译文可能含换行）
+            done[i] = to_single_line(translate_fn(s.get("text", "")))
         except Exception as e:  # noqa: BLE001
             progress(f"[fail] seg {i}: {str(e)[:80]}")
             pending.append({

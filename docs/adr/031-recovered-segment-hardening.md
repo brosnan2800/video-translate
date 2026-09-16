@@ -44,6 +44,12 @@ ADR-021 完全一致）。命中即丢弃并打印
 
 ### D3 — verify 段级置信度巡检（P1）
 
+> **⚠️ 已被 [ADR-041](041-verify-decoupled-from-asr-self-report.md) supersede（2026-09-16）**：
+> `find_low_confidence_segments` 已从 verify **整体移除** —— 它用 ASR 模型自身的评分字段
+> （`no_speech_prob` / `avg_logprob`）巡检 ASR 自己的产物，属**自证**而非独立验证。
+> 该能力已归位到① ASR 层内部（幻觉过滤 + `review` 的 A∩B 重处理判定）。
+> 以下为历史记录，**不再生效**。
+
 `verify.find_low_confidence_segments(segments, no_speech_thr=0.6, logprob_thr=-1.0)`：
 对携带 `no_speech_prob`/`avg_logprob` 的段（缺失字段跳过——主转写段经 merge 不携带），
 `nsp ≥ 0.6` 或 `alp < −1.0` → issue `low-confidence`。并入声学 lane（strict 红）。

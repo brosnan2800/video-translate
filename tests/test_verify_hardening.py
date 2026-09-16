@@ -2,7 +2,8 @@
 
 kathy_meta_vlog 事故固化（全部为真实实测几何）：
   - "We'll be right back."(nsp=0.906) / "Wait."(nsp=0.851) 逃过全部防线 ->
-    verify 增加段级置信度巡检（D3，find_low_confidence_segments）；
+    ~~verify 增加段级置信度巡检（D3）~~ **D3 已由 ADR-041 移除**（自证，非独立验证）；
+    verify 声学 lane 自此只依赖 FFmpeg 独立参照与 cue 的客观几何；
   - fill_gaps 恢复段 "Is he not going to make it?" 的 "Is"(39.96-40.34) 骑在
     前段 "busy."(39.93-40.16) 上、段重叠 0.2s -> verify 增加相邻段重叠/词碰撞
     巡检（D4/D5，只报告不自动修剪——ADR-012 声学红线）；
@@ -14,9 +15,9 @@ kathy_meta_vlog 事故固化（全部为真实实测几何）：
 全部纯函数（no subprocess）——subprocess 层归 audio_profile.probe_volume_window。
 """
 from video_translate.verify import (
-    ADJACENT_OVERLAP, LOW_CONFIDENCE, build_semantic_reread_task,
+    ADJACENT_OVERLAP, build_semantic_reread_task,
     classify_uncovered_windows, classify_vocals_energy,
-    find_adjacent_overlaps, find_low_confidence_segments, is_recovered_segment,
+    find_adjacent_overlaps, is_recovered_segment,
 )
 
 
@@ -46,37 +47,12 @@ def test_reread_task_marks_recovered_pairs_suspect():
     assert pairs[2]["suspect"] is True          # origin=resegment 同样算恢复段
 
 
-# --------------------------- D3: low-confidence inspection ------------------
-
-def test_find_low_confidence_flags_whisper_non_speech():
-    """真实事故值：idx2/idx15 必须被扫出，idx12（0.486 擦线）不在阈值内。"""
-    segs = [
-        {"start": 17.47, "end": 18.87, "text": "We'll be right back.",
-         "no_speech_prob": 0.90625, "avg_logprob": -0.716},
-        {"start": 39.96, "end": 43.94, "text": "Is he not going to make it?",
-         "no_speech_prob": 0.486, "avg_logprob": -0.573, "_recovered": True},
-        {"start": 54.83, "end": 54.99, "text": "Wait.",
-         "no_speech_prob": 0.851, "avg_logprob": -0.717},
-    ]
-    issues = find_low_confidence_segments(segs)
-    assert [it["index"] for it in issues] == [0, 2]
-    assert all(it["type"] == LOW_CONFIDENCE for it in issues)
-    assert issues[0]["no_speech_prob"] == 0.90625
-
-
-def test_find_low_confidence_thresholds_and_missing_fields():
-    segs = [
-        {"text": "no confidence fields -> skipped"},
-        {"text": "boundary nsp exactly 0.6", "no_speech_prob": 0.6},   # >=0.6 flag
-        {"text": "boundary alp exactly -1.0", "avg_logprob": -1.0},    # <-1.0 才 flag
-        {"text": "alp below threshold", "avg_logprob": -1.01},         # flag
-    ]
-    issues = find_low_confidence_segments(segs)
-    assert [it["index"] for it in issues] == [1, 3]
-    assert issues[1]["avg_logprob"] == -1.01
-
-
 # --------------------------- D4/D5: adjacent overlap + prefix ---------------
+
+# 注：D3「低置信道」（`find_low_confidence_segments`）已由 ADR-041 整体移除 ——
+# 它用 ASR 模型自身的评分字段（no_speech_prob / avg_logprob）巡检 ASR 自己的产物，
+# 属「自证」而非独立验证。该能力归位到① ASR 层内部（幻觉过滤 + review 的 A∩B
+# 重处理判定），相关回归见 tests/test_merge.py 与 tests/test_pipeline_field_contract.py。
 
 def test_find_adjacent_overlaps_flags_real_accident_geometry():
     """真实事故几何：Super busy.[39.26-40.16] vs Is he...[39.96-43.94] 重叠 0.2s。"""
