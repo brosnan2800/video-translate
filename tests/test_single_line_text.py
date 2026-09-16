@@ -151,3 +151,33 @@ def test_translate_flattens_engine_output(tmp_path):
     assert res["0"] == "你好 世界"
     # 落盘内容也必须干净
     assert json.loads(out_path.read_text(encoding="utf-8"))["0"] == "你好 世界"
+
+
+# --------------------------- 6. verify 内容层巡检（ADR-040 §未来 1） ---------------------------
+
+def test_find_embedded_linebreaks_flags_lf_and_cr():
+    from video_translate.verify import find_embedded_linebreaks as f
+
+    assert f("你好\n世界") is True
+    assert f("hello\rworld") is True
+    assert f("a\r\nb") is True
+    assert f("单行文本，没有换行") is False
+    assert f("") is False
+    assert f(None) is False
+    assert f("制表符\t不属于换行") is False   # 与 to_single_line 的规则保持一致
+
+
+# --------------------------- 7. task guidelines 显式声明（ADR-040 §未来 2） ---------------------------
+
+def test_task_guidelines_declare_single_line(tmp_path):
+    """单行要求必须进 task guidelines —— Agent 只读 task 时也应看到该契约。"""
+    from video_translate.translate import prepare_translate_task
+
+    sp = tmp_path / "segs.json"
+    sp.write_text(json.dumps([{"start": 0.0, "end": 1.0, "text": "hi"}]),
+                  encoding="utf-8")
+    tp = tmp_path / "task.json"
+    prepare_translate_task(str(sp), str(tp), progress=lambda *_: None)
+    task = json.loads(tp.read_text(encoding="utf-8"))
+    assert any(("单行" in g) and ("换行" in g) for g in task["guidelines"]), \
+        task["guidelines"]

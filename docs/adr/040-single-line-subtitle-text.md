@@ -97,5 +97,11 @@ re.sub(r"[ \t]*[\r\n]+[ \t]*", " ", text).strip()
 
 ## 未来（不在本 ADR 范围）
 
+> 本节两项已于 **2026-09-16 落地** —— 原条目保留并就地标注实现位置（ADR 正文不删，
+> 只补状态，遵守不可变惯例）。
+
 - `verify` 内容层增加"文本内含换行"的巡检（当前 `validate_zh` 只查覆盖率）。
+  **✅ 已实现**：`verify.py::find_embedded_linebreaks` + `cli.py` 内容 lane（issue 名
+  `embedded-linebreak`，strict 下计入 content flag）。
 - 翻译停点的 task 协议（AGENTS.md §3.2）在 task 文件里显式提示"单行输出"。
+  **✅ 已实现**：`translate.py::TRANSLATION_GUIDELINES` 末条。

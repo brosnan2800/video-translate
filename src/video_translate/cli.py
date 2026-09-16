@@ -38,7 +38,7 @@ from .ffmpeg_utils import probe_duration
 from .toolchain import init_toolchain, resolve_command_entry
 from .verify import (
     ADJACENT_OVERLAP, UNCOVERED_AUDIO, classify_uncovered_windows,
-    find_adjacent_overlaps, find_uncovered_speech,
+    find_adjacent_overlaps, find_embedded_linebreaks, find_uncovered_speech,
     find_untranslated_latin_words, is_recovered_segment, verify_acoustic,
     verify_presentation,
 )
@@ -2086,6 +2086,17 @@ def cmd_verify(args: argparse.Namespace) -> int:
             mixed.append({"index": i, "words": words})
     if mixed:
         content_flags += 1
+    # ADR-040: 内容层巡检「文本内含换行」。write 边界已压平，但 zh / segments
+    # 是可被 Agent / 人工直接编辑的产物，会绕过清洗——故对产物本身再查一遍。
+    linebreaks: list[dict[str, Any]] = []
+    for i, s in enumerate(segments):
+        fields = [name for name, val in (("text", s.get("text")),
+                                         ("zh", zh.get(i, "")))
+                  if find_embedded_linebreaks(val)]
+        if fields:
+            linebreaks.append({"index": i, "fields": fields})
+    if linebreaks:
+        content_flags += 1
 
     # ---- Lane 3: presentation ---------------------------------------------
     first_start = None
@@ -2139,6 +2150,9 @@ def cmd_verify(args: argparse.Namespace) -> int:
           f" ({content_flags} flag(s))")
     for it in mixed:
         print(f"    - [untranslated-latin] cue #{it['index']} {it['words']}")
+    for it in linebreaks:
+        print(f"    - [embedded-linebreak] cue #{it['index']} "
+              f"field(s)={'/'.join(it['fields'])}")
     print(f"  presentation: {len(presentation_issues)} issue(s)")
     for it in presentation_issues:
         detail = it.get("detail") or f"start={it.get('start'):.2f}s"

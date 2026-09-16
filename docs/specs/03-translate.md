@@ -42,5 +42,7 @@ low-quality free engines.
   译文在**源头**即被压平（`translate_one` 与 `translate_segments` 均经
   `text_utils.to_single_line`；后者覆盖所有注入引擎），`generate` 在边界再兜一次。
   断行由剪辑软件处理，不由译文携带；双语 cue 的分行来自 `block()` 的 `lines`，非文本内容。
+  该要求随 task 文件下发（`TRANSLATION_GUIDELINES` 末条），并由 verify 内容 lane
+  对产物巡检（`embedded-linebreak`，见 [Spec 18](18-verify.md)）。
 - Resume: re-running with a full checkpoint performs zero translation calls.
 - Incremental save: a crash after any checkpoint leaves a valid partial `out`.

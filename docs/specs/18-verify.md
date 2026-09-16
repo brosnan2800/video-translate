@@ -47,6 +47,11 @@ Module: `verify.py` + `cmd_verify`. Decision ADR-012. 补充 [Spec 17](17-verify
   残留的**小写拉丁实词**（如 `rivalry` 未译）——覆盖度 / 索引漂移都抓不到这类夹生，
   确定性兜底（不依赖 agent 肉眼回读）。全大写（`OK`/`AI`）与首字母大写专名
   （`Ken`/`Barbenheimer`）不 flag；误报（`app`/`rap` 等外来词）仅报警交 agent 确认。
+- **内嵌换行巡检（ADR-040）**：`find_embedded_linebreaks` 逐 cue 检查 `text` / `zh` 是否
+  残留 `\r` / `\n`。write 边界（transcribe / translate / generate）本应压平，但
+  `segments_en.json` / `zh_segments.json` 可被 Agent / 人工直接编辑而绕过清洗，故对
+  **产物本身**再查一遍；issue 名 `embedded-linebreak`（strict 下计入 content flag）。
+  只报告、不修改（ADR-012：只改文本，绝不重算时间轴）。
 - **语义回读（默认开）**：`build_semantic_reread_task` 逐条列出 en+zh **带中英文邻居
   上下文**（`context_before/after` + `context_before_zh/after_zh`，`window=3`），由
   agent 结合上下文判断「单句看着通、放上下文里指代/语气/术语是否一致」。这是唯一

@@ -110,6 +110,23 @@ def test_clean_run_exits_0(art, no_probe, monkeypatch):
     assert _run(art, []) == cli.EXIT_OK
 
 
+# ---------------------- Lane 2: 内嵌换行巡检 (ADR-040) ---------------------
+
+def test_content_lane_flags_embedded_linebreak(art, no_probe, monkeypatch):
+    """zh 值内嵌换行 -> 内容 lane flag -> strict（默认）下 exit 8。"""
+    (art / "demo.zh_segments.json").write_text(
+        json.dumps({**ZH, "1": "欧比旺\n·克诺比。"}), encoding="utf-8")
+    monkeypatch.setattr(cli, "probe_duration", lambda v: 5.0)
+    assert _run(art, []) == cli.EXIT_GATE_FAIL
+
+
+def test_content_lane_linebreak_report_only_with_no_strict(art, no_probe, monkeypatch):
+    (art / "demo.zh_segments.json").write_text(
+        json.dumps({**ZH, "1": "欧比旺\n·克诺比。"}), encoding="utf-8")
+    monkeypatch.setattr(cli, "probe_duration", lambda v: 5.0)
+    assert _run(art, ["--no-strict"]) == cli.EXIT_OK
+
+
 # --------------------------- missing args -> exit 2 -----------------------
 
 def test_missing_zh_refuses_to_run(art):

@@ -354,6 +354,18 @@ def find_untranslated_latin_words(zh_text: str) -> list[str]:
     return [t for t in tokens if len(t) > 1 and not t.isupper() and not t[0].isupper()]
 
 
+def find_embedded_linebreaks(text: str) -> bool:
+    """ADR-040 内容层巡检：文本值内是否残留内嵌换行（``\\r`` / ``\\n``）。
+
+    write 边界（transcribe / translate / generate）会把内容压成单行，但
+    ``zh_segments.json`` / ``segments_en.json`` 可被 Agent / 人工直接编辑而绕过
+    清洗——此处对**产物本身**做确定性巡检（对应 ADR-040 §未来第一条）。
+
+    只报告、不修改（ADR-012：只改文本，绝不重算时间轴）。纯函数，无 I/O。
+    """
+    return bool(re.search(r"[\r\n]", text or ""))
+
+
 def build_semantic_reread_task(
     segments: list[dict[str, Any]],
     zh: dict[int, str],

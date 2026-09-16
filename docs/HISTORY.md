@@ -269,6 +269,9 @@ wrong. v4 reused v3's mis-aligned translations via `(start,text)` key → inheri
   `\r` / `\n` / 连续空白；cue 的多行**只能**来自 `srt_utils.block` 的 `lines`
   （中英分行 / display-merge 折行），不再来自内容本身。
 - 契约登记：`artifacts.py` 的 `segments_raw` / `segments` / `zh` 条目注明单行不变量（ADR-040 D4）。
+- 延伸（同日落地）：`verify` 内容 lane 增加「内嵌换行」巡检（issue `embedded-linebreak`，
+  strict 下计 flag）；task 文件的 `guidelines` 显式声明「译文必须单行」，
+  使只读 task 的 Agent 也能看到该契约。
 
 **② verify 与 ASR 自证解耦（ADR-041 · Spec 18）**
 - 问题：`verify.find_low_confidence_segments` 用 **ASR 模型自身的评分字段**

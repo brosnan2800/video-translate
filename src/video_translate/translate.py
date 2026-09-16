@@ -39,7 +39,8 @@ FULL_TRANSCRIPT_MAX_CHARS = 24000
 
 # V6 (B3): explicit rules the agent must follow. Shipped in the task file so the
 # contract lives with the data, not in whatever prompt happens to invoke it.
-# 通用守则（所有风格共享，与历史 TRANSLATION_GUIDELINES 字节一致，保证向后兼容）
+# 通用守则（所有风格共享）。末条「单行」由 ADR-040 追加——它是 AGENTS.md §3.2 那条
+# 契约在 task 文件里的显式化身，让只读 task 的 Agent 也能看到（不必另外翻文档）。
 TRANSLATION_GUIDELINES = [
     "先通读 full_transcript 建立全局理解（场景、说话人关系、剧情走向），再逐 batch 翻译。",
     "source 字段给出视频出处/背景。若是已有影视、文学或历史题材作品，专有名词、人名、"
@@ -48,6 +49,8 @@ TRANSLATION_GUIDELINES = [
     "而非「术语」，'withdraw' 是「撤军」而非「退出」。",
     "context_before / context_after 仅供参考，不要翻译、不要出现在输出里。",
     "输出必须覆盖 to_translate[*].index 的每一个下标（字符串形式）。",
+    "每个译文值必须是单行：不得包含换行符（\\n / \\r）。断行由剪辑软件处理，"
+    "不由译文携带（ADR-040）。",
 ]
 
 # 各风格专属守则：与 config.STYLE_PERSONAS 对齐（film 默认空，沿用通用守则）
