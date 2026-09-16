@@ -27,6 +27,12 @@ Both are **lists** of segment dicts:
 - `chunk_N.json`: one chunk's segments, timestamps ALREADY offset by chunk start.
 - `{base}.segments_en.json`: all chunks merged in order (concatenation).
 - Ordering: strictly non-decreasing `start` across the merged list.
+- **ALL-CAPS artifact normalization**: a segment whose text is *entirely* uppercase
+  **and** has ≥4 letters is treated as a Whisper artifact on high-energy / shouted
+  speech, and is lowercased with sentence casing restored
+  (`transcribe._normalize_caps`, applied after `merge_chunks` and before writing).
+  Short tokens (`OK` / `ID` / `TV` / `AI`, <4 letters) and any mixed-case segment
+  are left untouched. Text only — timestamps are never recomputed (ADR-012).
 
 ## {base}.zh_segments.json
 A **dict** mapping stringified segment index (0-based) → Chinese text:

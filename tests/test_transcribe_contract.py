@@ -576,3 +576,87 @@ def test_align_rewrites_word_timestamps_in_merged_output(tmp_path, monkeypatch):
     # +0.25 shift applied
     assert merged[0]["words"][0]["start"] == pytest.approx(0.35)
     assert merged[0]["words"][1]["start"] == pytest.approx(0.75)
+
+
+# --- 转写文本规范化：Whisper 全大写伪影（`_normalize_caps`） ---
+
+
+def test_normalize_caps_lowercases_shouted_segment():
+    """整段全大写 = Whisper 在高能量语音上的伪影 → 小写化 + 恢复句首大写。
+
+    事故几何：`st` 视频后半段（喊叫/高能量）整段输出全大写，读起来像坏字幕。
+    """
+    assert T._normalize_caps("THIS IS A LOUD SCENE") == "This is a loud scene"
+    assert T._normalize_caps("HELLO. WORLD. AGAIN") == "Hello. World. Again"
+
+
+def test_normalize_caps_leaves_mixed_case_untouched():
+    """只有**整段全大写**才算伪影：混合大小写（正常句子 / 含专名）一律不动。"""
+    assert T._normalize_caps("NASA announced the mission") == "NASA announced the mission"
+    assert T._normalize_caps("Hello world") == "Hello world"
+    assert T._normalize_caps("I said STOP it") == "I said STOP it"
+
+
+def test_normalize_caps_protects_short_tokens():
+    """<4 个字母的段受保护：OK / ID / TV / AI 等合法短 token 不被小写化。"""
+    assert T._normalize_caps("OK") == "OK"
+    assert T._normalize_caps("ID") == "ID"
+    assert T._normalize_caps("TV") == "TV"
+    assert T._normalize_caps("AI") == "AI"
+
+
+def test_normalize_caps_known_boundaries():
+    """已知边界（显式记录，以免后人误判为 bug）：
+
+    - 短缩写**拼成整段**且合计 >=4 字母时仍会触发（"AI TV" → "Ai tv"）；
+    - 单独成段的 >=4 字母全大写专名会被小写化（"NASA" → "Nasa"）；
+    - 标点后**无空格**不算句首（"HELLO.WORLD" → "Hello.world"）。
+
+    实践中"整段只含缩写/专名"的字幕极少，权衡（消除常见伪影 > 保护罕见真全大写）
+    后保留此行为。
+    """
+    assert T._normalize_caps("AI TV") == "Ai tv"
+    assert T._normalize_caps("NASA") == "Nasa"
+    assert T._normalize_caps("HELLO.WORLD") == "Hello.world"
+
+
+def test_normalize_caps_edge_cases():
+    """空值 / 无字母 / 纯标点原样返回（不抛异常、不改动）。"""
+    assert T._normalize_caps("") == ""
+    assert T._normalize_caps(None) is None
+    assert T._normalize_caps("12345 !!") == "12345 !!"
+
+
+def test_transcribe_normalizes_all_caps_in_written_segments(tmp_path, monkeypatch):
+    """调用点接线：`transcribe_video` 落盘的 segments_en.json 文本已被规范化。
+
+    守的是「实现存在但没接上」这类缺口——单测过、产物没变的情况。
+    """
+    import json as _json
+    import sys
+
+    monkeypatch.setattr(T, "probe_duration", lambda p: 10.0)
+    monkeypatch.setattr(T, "extract_chunk", lambda *a, **k: None)
+
+    class FakeSeg:
+        def __init__(self):
+            self.text = "THIS IS LOUD"
+            self.start = 1.0
+            self.end = 2.0
+            self.words = []
+
+    class FakeModel:
+        def __init__(self, *a, **k):
+            pass
+
+        def transcribe(self, wav, language=None, **kw):
+            return [FakeSeg()], None
+
+    fake = type(sys)("faster_whisper")
+    fake.WhisperModel = FakeModel
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake)
+
+    out = T.transcribe_video("vid.mp4", str(tmp_path), base="x", lang=None,
+                             align_backend="none", progress=lambda *_: None)
+    merged = _json.load(open(out, encoding="utf-8"))
+    assert merged[0]["text"] == "This is loud"
