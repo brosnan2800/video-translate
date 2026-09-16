@@ -7,8 +7,8 @@
 | **AI Agent**（被召唤来翻译视频） | [`AGENTS.md`](../AGENTS.md)（必读：执行协议 + 避坑红线）→ 用 `pipeline` 单一入口推进 |
 | **新贡献者**（搭环境跑通） | [`TOOLCHAIN.md`](../TOOLCHAIN.md) → [`TOOLING.md`](TOOLING.md) |
 | **想了解全局规划** | [`MAJOR_VERSION_PLAN.md`](../MAJOR_VERSION_PLAN.md) |
-| **想查「为什么这么设计」** | [`adr/`](adr)（架构决策记录，34 篇） |
-| **想查「行为契约是什么」** | [`specs/`](specs)（行为规格，24 篇） |
+| **想查「为什么这么设计」** | [`adr/`](adr)（架构决策记录，39 篇，编号 001–041） |
+| **想查「行为契约是什么」** | [`specs/`](specs)（行为规格，27 篇，编号 00–27） |
 | **想查历史 / 事故复盘** | [`HISTORY.md`](HISTORY.md) · [`POSTMORTEM-JamieFoxx.md`](POSTMORTEM-JamieFoxx.md) |
 
 ---
@@ -22,8 +22,9 @@ docs/
 ├── HISTORY.md                版本演进史（V3–V14）与实战案例
 ├── POSTMORTEM-JamieFoxx.md   Jamie Foxx 混剪事故复盘（V8–V13）
 ├── RESEARCH-voice-pro.md     Voice-Pro 对标研究（E1–E4 论证来源）
-├── adr/                      架构决策记录（不可变历史，001–036）
-├── specs/                    行为规格契约（00–24）
+├── adr/                      架构决策记录（不可变历史，001–041）
+├── specs/                    行为规格契约（00–27）
+├── drafts/                   设计草稿（进行中，不保证与代码同步）
 └── archive/                  已归档（历史/废弃，不参与日常查阅）
 ```
 
@@ -155,6 +156,16 @@ docs/
 
 > Spec 编号 **缺 05**：已删除（说明见 `11-cli-v2.md`）。
 > Spec 00–21 为行为契约、随代码演进，不设 Accepted/Superseded 状态；22–27 带状态字段。
+
+---
+
+## 草稿区（`drafts/`）
+
+进行中的**讨论稿**：**非正式 ADR、不保证与代码同步**，勿作为实现依据；定稿后并入 ADR 或新增 ADR。
+
+| 文件 | 内容 | 状态 |
+|---|---|---|
+| [`drafts/g3l-progressive-separation.md`](drafts/g3l-progressive-separation.md) | G3L 递进式多模型人声分离（G3 救回升级草案，收敛后并入 ADR-034 或新开 ADR） | Discussion Draft（2026-09-11） |
 
 ---
 

@@ -29,10 +29,19 @@ class Artifact(TypedDict):
 
 
 # 段级置信度字段：必须穿透下游变换、永不聚合/覆盖（ADR-035 §2.3 Z2）。
-# merge 合并段时丢弃它们正是本契约要杜绝的事故（G1/G3 与 verify 低置信道的信号 A）。
+# merge 合并段时丢弃它们正是本契约要杜绝的事故（G1/G3 与 review 信号 A）。
+# 注：verify 曾有一道「低置信道」读同一批字段并参与 strict gate，该道已由 ADR-041
+# 整体移除（用 ASR 自评字段巡检 ASR 产物属「自证」，非独立验证）；本 carry 契约保留，
+# 因为①层 review 的信号 A 仍依赖它。
 CONFIDENCE_FIELDS: tuple[str, ...] = (
     "no_speech_prob", "avg_logprob", "compression_ratio",
 )
+
+# ADR-040 单行不变量：`segments_raw[].text` / `segments[].text` / `zh` 的每个 value
+# 都是**单行文本**（不含 \r / \n）。内容换行由 `text_utils.to_single_line` 在写入
+# 边界（transcribe / translate / generate）压平；cue 的多行只能来自 `srt_utils.block`
+# 的 lines（中英分行 / display-merge 折行），不能来自内容本身。
+
 
 ARTIFACTS: tuple[Artifact, ...] = (
     # ---- 内嵌 vt_state.json 的全局/运行级参数（file 为空 = 不落独立文件） ----

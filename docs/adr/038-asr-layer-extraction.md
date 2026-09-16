@@ -112,4 +112,4 @@ class ASRProvider(Protocol):
 
 - **引擎阈值画像**：`avg_logprob=-0.95` / `no_speech_prob=0.6` / `_NSP_SHORT_WORDS=6` / `_ECHO_OVERLAP=1.0` 等随 Provider 声明，换模型时集中重标定（解决「阈值散落 4 个模块 10+ 处」）。
 - **第二个 Provider 实现**（SenseVoice / 商业 API）：验证接口可替换性，是接口设计的最终验收。
-- **verify 与 Whisper 自证解耦**：`find_low_confidence_segments` / `review` 信号 A 的处置——裁判只看选手交出的成品，不看选手的内心活动；低置信道归位到 ① 层内部自检（已规划为独立一轮）。
+- **verify 与 Whisper 自证解耦**：`find_low_confidence_segments` / `review` 信号 A 的处置——裁判只看选手交出的成品，不看选手的内心活动；低置信道归位到 ① 层内部自检。**已落地（[ADR-041](041-verify-decoupled-from-asr-self-report.md)，2026-09-16）**：低置信道整体移除，`review` 信号 A 保留为 ① 层内部自检。

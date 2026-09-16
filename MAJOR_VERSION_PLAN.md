@@ -214,7 +214,9 @@ flowchart TD
 > 断线（[ADR-034](docs/adr/034-audio-routing-redesign.md) §1.2，analyze_audio 不
 > probe、_resolve_routing 不传 → 自动推荐永远 False）；② `merge` 合并段时新建 dict
 > 丢 `no_speech_prob/avg_logprob/compression_ratio` → review 的 G1/G3 在合并后时间轴
-> 拿不到信号 A 而休眠、verify 的 LOW_CONFIDENCE 道被削弱。根因是「JSON 文件即接口」
+> 拿不到信号 A 而休眠、verify 的 LOW_CONFIDENCE 道被削弱（**该道后于 2026-09-16 由
+> [ADR-041](docs/adr/041-verify-decoupled-from-asr-self-report.md) 整体移除**——
+> 它用 ASR 自评字段巡检 ASR 产物，属「自证」而非独立验证）。根因是「JSON 文件即接口」
 > 无 schema、白名单式重建、下游补偿不修根、无跨阶段契约测试。本任务是 T8（编排）/
 > T9（音频路由）共同的数据层地基。
 

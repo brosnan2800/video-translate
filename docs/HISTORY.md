@@ -240,6 +240,7 @@ wrong. v4 reused v3's mis-aligned translations via `(start,text)` key → inheri
 - **Agent engine is decided first; proxy/Google probe only runs under `--engine google`.**
   With `--engine agent` (default) there is no network/proxy dependency at all — this is
   the design from ADR-005. Don't probe Google just because the binary started.
+  `doctor` stays the preflight entry point.
 - The V12 alignment self-check is now **wired into `cmd_generate`** (runs before
   `generate_subtitles`), so drift is caught at render time, not by a human viewer.
 - CLI flags: `--vad` (opt-in Silero VAD; default off), `--no-audit`, `--no-align-check`.
@@ -255,4 +256,30 @@ wrong. v4 reused v3's mis-aligned translations via `(start,text)` key → inheri
 - git 调查确认 ADR-033/034/035 未引入此回归；本案为 v5 起已存在的 recovery 起点设计缺陷（原 `_PROBE_PADS` 假设"洞起点附近即真实起点"）。
 - 测试：`tests/test_fill_gaps_prefix_collapse.py`（5 passed）。
 - 关联：[ADR-036](adr/036-fill-gaps-prefix-collapse-recovery.md)、[ADR-016](adr/016-recall-recovery-net.md)、[spec 16](specs/16-fill-gaps.md)。
-  `doctor` stays the preflight entry point.
+
+### V15 — 字幕文本单行不变量（ADR-040）+ verify 与 ASR 自证解耦（ADR-041）
+
+两项**行为变更**（2026-09-16），均由实测问题驱动：
+
+**① 字幕文本单行不变量（ADR-040 · Spec 01 / 04）**
+- 问题：Agent 写入的 `zh`（以及转写 `text`）可能带内嵌换行，被原样打包进 cue 后与显示层的
+  「中英分行」混叠，剪映导入出现异常断行 / 劈裂。
+- 修法：内容层（`segments_raw[].text` / `segments[].text` / `zh`）统一为**单行文本**，
+  在写入边界（transcribe / translate / generate）用 `text_utils.to_single_line` 压平
+  `\r` / `\n` / 连续空白；cue 的多行**只能**来自 `srt_utils.block` 的 `lines`
+  （中英分行 / display-merge 折行），不再来自内容本身。
+- 契约登记：`artifacts.py` 的 `segments_raw` / `segments` / `zh` 条目注明单行不变量（ADR-040 D4）。
+
+**② verify 与 ASR 自证解耦（ADR-041 · Spec 18）**
+- 问题：`verify.find_low_confidence_segments` 用 **ASR 模型自身的评分字段**
+  （`no_speech_prob` / `avg_logprob`）巡检 ASR 自己的产物，并**参与 strict gate**
+  （不通过即 exit 8）——「用 Whisper 验证 Whisper」，不构成独立验证。
+- 修法：**低置信道整体移除**（函数 + `LOW_CONFIDENCE` 常量 + gate 参与权）。
+  `merge.py::_low_confidence` 与 `review.py` 信号 A **保留** —— 它们是①层**选手自检**，
+  不冒充裁判（裁判只用 FFmpeg 独立参照与客观几何）。
+- 影响：原先仅因低置信道红灯的交付物不再被 strict 拦下；声学 lane 的客观几何项不变。
+
+- 测试：`tests/test_single_line_text.py`（单行不变量）、`tests/test_verify_hardening.py`
+  （低置信道用例已删并注明）、`tests/test_pipeline_field_contract.py`（字段契约）。
+- 关联：[ADR-040](adr/040-single-line-subtitle-text.md) / [ADR-041](adr/041-verify-decoupled-from-asr-self-report.md) /
+  [Spec 01](specs/01-segment-schema.md) / [Spec 04](specs/04-generate-srt.md) / [Spec 18](specs/18-verify.md)。

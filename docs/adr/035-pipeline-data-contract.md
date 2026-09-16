@@ -29,6 +29,9 @@ MAJOR_VERSION_PLAN T8/T9/T10.
 - review 的 `MISSING` 判定依赖信号 A（置信度字段），合并后时间轴上信号 A 全是
   `unknown` → **G1（已上线）与 G3（规划中）在生产里休眠**；
 - verify 的 `LOW_CONFIDENCE` 道（`verify.py` 读同一批字段）同样被削弱；
+  > **补注（2026-09-16 / [ADR-041](041-verify-decoupled-from-asr-self-report.md)）**：该道已
+  > **整体移除**（用 ASR 自评字段巡检 ASR 产物属「自证」），故此处不再是活跃风险；
+  > `CONFIDENCE_FIELDS` 的 carry 契约仍保留，因①层 `review` 信号 A 依赖它。
 - `review.py` 头部注释自述「main-pass segments frequently lose their confidence
   fields during merge, so A is often unknown」——**下游在补偿，而不是修根**。
 

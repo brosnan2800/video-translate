@@ -89,8 +89,9 @@ rebuild 前先 `load()`；已有 state 携带 dict 型 `decisions`（及 `video`
 - `tests/test_verify_hardening.py`：真实事故几何（39.26-40.16 vs 39.96-43.94）flag +
   word_collision + prefix hint / 0.03s 模糊边界不 flag / 置信度阈值边界 / 恢复段 pair
   suspect+hint / BGM/语音/ambiguous/unknown 分级。
-- `tests/test_verify_gate.py`（追加）：low-confidence → exit 8 / adjacent-overlap →
-  exit 8 / vocals 存在时 uncovered 行带 [bgm] 分级 / 无 vocals 跳过 / 回读 task 带 suspect。
+- `tests/test_verify_gate.py`（追加）：~~low-confidence → exit 8~~（**该用例已随 ADR-041
+  移除 D3 一并删除**）/ adjacent-overlap → exit 8 / vocals 存在时 uncovered 行带 [bgm]
+  分级 / 无 vocals 跳过 / 回读 task 带 suspect。
 - `tests/test_state_chain.py`（追加）：stale sha rebuild 保留 decisions / 缺失重建
   decisions 为空。
 
@@ -132,8 +133,9 @@ rebuild 前先 `load()`；已有 state 携带 dict 型 `decisions`（及 `video`
 - `tests/test_verify_hardening.py`：真实事故几何（39.26-40.16 vs 39.96-43.94）flag +
   word_collision + prefix hint / 0.03s 模糊边界不 flag / 置信度阈值边界 / 恢复段 pair
   suspect+hint / BGM/语音/ambiguous/unknown 分级。
-- `tests/test_verify_gate.py`（追加）：low-confidence → exit 8 / adjacent-overlap →
-  exit 8 / vocals 存在时 uncovered 行带 [bgm] 分级 / 无 vocals 跳过 / 回读 task 带 suspect。
+- `tests/test_verify_gate.py`（追加）：~~low-confidence → exit 8~~（**该用例已随 ADR-041
+  移除 D3 一并删除**）/ adjacent-overlap → exit 8 / vocals 存在时 uncovered 行带 [bgm]
+  分级 / 无 vocals 跳过 / 回读 task 带 suspect。
 - `tests/test_verify_retry_limit.py`（新增）：attempt 1-2 strict（红灯 exit 8）/ attempt 3+
   强制报告模式（exit 0）/ 计数器落盘 `stages.verify.attempts`。
 - `tests/test_resegment_guard.py`（追加）：`test_resegment_resets_verify_attempts_on_new_run` /
