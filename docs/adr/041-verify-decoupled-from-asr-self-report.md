@@ -1,6 +1,6 @@
 # ADR-041 — verify 与 ASR 自证解耦（移除低置信道）
 
-- **状态**：接受（实现中）
+- **状态**：接受（已实现）
 - **日期**：2026-09-16
 - **关联**：ADR-012（声学真值 / 三 lane）、ADR-031（**本 ADR supersede 其 D3**）、ADR-038（ASR 层抽离：判据「裁判只看成品，不看选手内心」）、Spec 18（verify 契约）、Spec 27（ASRProvider）、`review.py`（①层自检）
 - **落地**：`verify.py`、`cli.py`、`AGENTS.md`、`tests/test_verify_hardening.py`、`tests/test_verify_gate.py`、`tests/test_pipeline_field_contract.py`

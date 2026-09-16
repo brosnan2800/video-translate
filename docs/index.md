@@ -19,7 +19,7 @@
 docs/
 ├── index.md                  本文件：文档库总索引
 ├── TOOLING.md                工具与依赖管理（操作手册）
-├── HISTORY.md                版本演进史（V3–V14）与实战案例
+├── HISTORY.md                版本演进史（V3–V15）与实战案例
 ├── POSTMORTEM-JamieFoxx.md   Jamie Foxx 混剪事故复盘（V8–V13）
 ├── RESEARCH-voice-pro.md     Voice-Pro 对标研究（E1–E4 论证来源）
 ├── adr/                      架构决策记录（不可变历史，001–041）
@@ -125,12 +125,12 @@ docs/
 | ADR | 主题 | 状态 |
 |---|---|---|
 | [039](adr/039-display-layer-cue-merge.md) | 显示层短块合并（折行，默认 OFF） | 接受 |
-| [040](adr/040-single-line-subtitle-text.md) | 字幕文本单行不变量（清除内嵌换行） | 接受（实现中） |
+| [040](adr/040-single-line-subtitle-text.md) | 字幕文本单行不变量（清除内嵌换行） | 接受（已实现） |
 
 ### 验证层
 | ADR | 主题 | 状态 |
 |---|---|---|
-| [041](adr/041-verify-decoupled-from-asr-self-report.md) | verify 与 ASR 自证解耦（移除低置信道） | 接受（实现中） |
+| [041](adr/041-verify-decoupled-from-asr-self-report.md) | verify 与 ASR 自证解耦（移除低置信道） | 接受（已实现） |
 
 > ADR 编号 **缺 018 / 019**：未分配（非删除）。
 

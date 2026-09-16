@@ -1,9 +1,9 @@
 # ADR-040 — 字幕文本单行不变量（清除内嵌换行）
 
-- **状态**：接受（实现中）
+- **状态**：接受（已实现）
 - **日期**：2026-09-16
 - **关联**：ADR-035（数据契约总线）、ADR-012（只改文本、绝不重算时间轴）、ADR-039（display-layer merge，反向参照：显示层折行是有意的）、Spec 01（segment schema）、Spec 03（translate）、Spec 04（generate）
-- **落地**：`src/video_translate/text_utils.py`、`transcribe.py`、`translate.py`、`generate.py`、`tests/test_single_line_text.py`
+- **落地**：`src/video_translate/text_utils.py`、`transcribe.py`、`translate.py`、`generate.py`、`artifacts.py`（D4 契约登记）、`tests/test_single_line_text.py`
 
 ## 背景
 

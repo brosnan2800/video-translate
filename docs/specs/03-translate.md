@@ -38,5 +38,9 @@ low-quality free engines.
 ## Contract (testable without network — uses golden `zh_segments.json`)
 - Output is `{str_index: str}`.
 - Completeness: for the golden pair, every English index has a Chinese value.
+- **Single-line invariant (ADR-040)**: 每个 value 必须是单行（不含 `\r` / `\n`）。
+  译文在**源头**即被压平（`translate_one` 与 `translate_segments` 均经
+  `text_utils.to_single_line`；后者覆盖所有注入引擎），`generate` 在边界再兜一次。
+  断行由剪辑软件处理，不由译文携带；双语 cue 的分行来自 `block()` 的 `lines`，非文本内容。
 - Resume: re-running with a full checkpoint performs zero translation calls.
 - Incremental save: a crash after any checkpoint leaves a valid partial `out`.
