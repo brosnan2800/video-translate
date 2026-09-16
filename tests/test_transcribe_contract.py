@@ -627,10 +627,11 @@ def test_normalize_caps_edge_cases():
     assert T._normalize_caps("12345 !!") == "12345 !!"
 
 
-def test_transcribe_normalizes_all_caps_in_written_segments(tmp_path, monkeypatch):
-    """调用点接线：`transcribe_video` 落盘的 segments_en.json 文本已被规范化。
+def test_transcribe_video_does_not_normalize_caps(tmp_path, monkeypatch):
+    """连接点**不在** `transcribe_video`：它跑在 `apply_merge` / `fill_gaps` 之前，
+    那两步随后会重写 segs_path——若把归一化放这里会被覆盖（历史缺陷）。
 
-    守的是「实现存在但没接上」这类缺口——单测过、产物没变的情况。
+    归一化落在转写阶段最末（`asr.run_asr`），接线守卫见 `test_asr_facade.py`。
     """
     import json as _json
     import sys
@@ -659,4 +660,5 @@ def test_transcribe_normalizes_all_caps_in_written_segments(tmp_path, monkeypatc
     out = T.transcribe_video("vid.mp4", str(tmp_path), base="x", lang=None,
                              align_backend="none", progress=lambda *_: None)
     merged = _json.load(open(out, encoding="utf-8"))
-    assert merged[0]["text"] == "This is loud"
+    # 刻意原样保留：这一层的归一化会被下游 apply_merge / fill_gaps 覆盖。
+    assert merged[0]["text"] == "THIS IS LOUD"

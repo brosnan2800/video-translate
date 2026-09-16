@@ -453,6 +453,16 @@ def run_asr(
         if recovered is not segs:
             save_json(segs_path, recovered, indent=0)
 
+    # ALL-CAPS cleanup: Whisper emits uppercase for loud/shouted speech. This MUST
+    # run AFTER apply_merge + fill_gaps (both rewrite segs_path) so every finalized
+    # segment — including fill_gaps' re-transcribed (recovered) speech — is covered.
+    from .transcribe import _normalize_caps
+    _final_segs = load_json(segs_path)
+    for _s in _final_segs:
+        if isinstance(_s, dict) and "text" in _s:
+            _s["text"] = _normalize_caps(_s.get("text") or "")
+    save_json(segs_path, _final_segs, indent=0)
+
     return AsrOutcome(
         segments_path=segs_path,
         segments=load_json(segs_path) or [],

@@ -1560,6 +1560,12 @@ def cmd_resegment(args: argparse.Namespace) -> int:
         new_segs.append(seg)
     merged = kept + new_segs
     merged.sort(key=lambda s: s["start"])
+    # Whisper ALL-CAPS artifact on loud speech; normalize the re-transcribed
+    # (recovered) segments too so segments_en.json stays consistent.
+    from .transcribe import _normalize_caps
+    for _s in merged:
+        if isinstance(_s, dict) and "text" in _s:
+            _s["text"] = _normalize_caps(_s.get("text") or "")
     save_json(segs_path, merged, indent=0)
     # Control plane: resegment is a legitimate transcription-layer amendment —
     # refresh the segments_sha anchor so the generate stale-translation gate

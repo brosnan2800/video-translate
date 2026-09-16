@@ -30,9 +30,11 @@ Both are **lists** of segment dicts:
 - **ALL-CAPS artifact normalization**: a segment whose text is *entirely* uppercase
   **and** has ≥4 letters is treated as a Whisper artifact on high-energy / shouted
   speech, and is lowercased with sentence casing restored
-  (`transcribe._normalize_caps`, applied after `merge_chunks` and before writing).
-  Short tokens (`OK` / `ID` / `TV` / `AI`, <4 letters) and any mixed-case segment
-  are left untouched. Text only — timestamps are never recomputed (ADR-012).
+  (`transcribe._normalize_caps`, applied as the **final step of the transcribe
+  stage** in `asr.run_asr` — AFTER `apply_merge` and `fill_gaps`, which both rewrite
+  the segment file). Short tokens (`OK` / `ID` / `TV` / `AI`, <4 letters) and any
+  mixed-case segment are left untouched. Text only — timestamps are never recomputed
+  (ADR-012).
 
 ## {base}.zh_segments.json
 A **dict** mapping stringified segment index (0-based) → Chinese text:

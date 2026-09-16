@@ -496,10 +496,6 @@ def transcribe_video(
         _align.release_align_memory()
 
     all_segs = merge_chunks(chunk_lists)
-    # Fix Whisper's ALL-CAPS artifact on high-energy speech (e.g. st back-half).
-    for _seg in all_segs:
-        if isinstance(_seg, dict) and "text" in _seg:
-            _seg["text"] = _normalize_caps(_seg.get("text") or "")
     out = os.path.join(workdir(outdir, base), f"{base}.segments_en.json")
     save_json(out, all_segs, indent=0)
     progress(f"[merge] total {len(all_segs)} segments -> {out}")

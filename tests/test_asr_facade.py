@@ -196,3 +196,28 @@ def test_run_asr_returns_segments_payload(env):
                   progress=lambda *a: None)
     assert isinstance(out.segments, list) and out.segments
     assert out.segments[0]["text"] == "hello"
+
+
+# --------------------------- 7. 全大写伪影：末端落盘接线 ---------------------------
+
+def test_run_asr_normalizes_all_caps_in_final_segments(env, monkeypatch):
+    """接线：`run_asr` 落盘的 segments_en.json 文本已做全大写伪影规范化。
+
+    守「实现存在但没接上」——且必须发生在 `apply_merge` + `fill_gaps` 之后：
+    这两步会重写 segs_path，早于它们运行会被覆盖（历史缺陷，见 HISTORY V15）。
+    """
+    caps = [{"start": 0.0, "end": 1.0, "text": "THIS IS LOUD"}]
+
+    def _caps_merge(segments_path, *, raw_path, **kw):
+        _write(segments_path, caps)
+        _write(raw_path, caps)
+
+    # merge / fill_gaps 都重写出全大写，模拟它们覆盖"早于其运行的归一化"。
+    monkeypatch.setattr("video_translate.merge.apply_merge", _caps_merge)
+    monkeypatch.setattr("video_translate.fill_gaps.fill_gaps",
+                        lambda input_path, segs, **kw: list(caps))
+
+    run_asr(env["request"], provider=env["provider"], progress=lambda *a: None)
+
+    final = json.load(open(env["segs_path"], encoding="utf-8"))
+    assert final[0]["text"] == "This is loud"

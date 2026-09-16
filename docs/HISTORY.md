@@ -286,13 +286,15 @@ wrong. v4 reused v3's mis-aligned translations via `(start,text)` key → inheri
 - 问题：高能量 / 喊叫段（`st` 视频后半段实测）Whisper 整段输出**全大写**，读起来像坏字幕，
   也容易被误判为模型或配置故障而反复重跑排查。
 - 修法：`transcribe._normalize_caps` —— **整段字母全大写且 ≥4 字母**才触发，小写化并恢复
-  句首大写；短 token（`OK`/`ID`/`TV`/`AI`）与混合大小写段一律不动。位置在 `merge_chunks`
-  之后、落盘之前（只改文本，不碰时间戳，ADR-012）。
+  句首大写；短 token（`OK`/`ID`/`TV`/`AI`）与混合大小写段一律不动。位置在转写阶段**最末**
+  （`asr.run_asr` 内、`apply_merge` + `fill_gaps` 之后——这两步都会重写段文件，早于它们会被
+  覆盖）（只改文本，不碰时间戳，ADR-012）。
 - 已知边界：短缩写拼成整段且合计 ≥4 字母仍会触发（`AI TV` → `Ai tv`）；单独成段的
   ≥4 字母全大写专名会被小写化（`NASA` → `Nasa`）。权衡后保留，边界已写进 Spec 01 与单测。
 
 - 测试：`tests/test_single_line_text.py`（单行不变量）、`tests/test_verify_hardening.py`
   （低置信道用例已删并注明）、`tests/test_pipeline_field_contract.py`（字段契约）、
-  `tests/test_transcribe_contract.py`（全大写伪影规范化 + 落盘接线）。
+  `tests/test_transcribe_contract.py`（全大写伪影单测 + transcribe_video 不越层）、
+  `tests/test_asr_facade.py`（run_asr 末端落盘接线）。
 - 关联：[ADR-040](adr/040-single-line-subtitle-text.md) / [ADR-041](adr/041-verify-decoupled-from-asr-self-report.md) /
   [Spec 01](specs/01-segment-schema.md) / [Spec 04](specs/04-generate-srt.md) / [Spec 18](specs/18-verify.md)。
