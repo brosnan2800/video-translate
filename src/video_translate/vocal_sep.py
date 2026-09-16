@@ -24,6 +24,7 @@ from typing import Any, Callable
 
 from .artifacts import workdir
 from .ffmpeg_utils import extract_chunk, probe_duration
+from .model_cache import LOCAL_MODEL_DIR
 
 # ---------------------------------------------------------------------------
 # Lazy backend probe (NOTHING import demucs/torch at module toplevel)
@@ -37,11 +38,7 @@ _DEMUCS_AVAILABLE_CACHE: bool | None = None
 # TORCH_HOME at <repo>/models/torch so the weight NEVER lands in the user's
 # C:\Users\...\ cache (project tooling rule: no artifacts in the system drive's
 # user dir). See TOOLCHAIN.md §6.
-_REPO_ROOT = os.path.dirname(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-)
-_LOCAL_MODEL_DIR = os.path.join(_REPO_ROOT, "models")
-_DEMUCS_CACHE_DIR = os.path.join(_LOCAL_MODEL_DIR, "torch")
+_DEMUCS_CACHE_DIR = os.path.join(LOCAL_MODEL_DIR, "torch")
 
 
 def demucs_cache_dir() -> str:

@@ -12,7 +12,8 @@ Each stage:
   requires    ctx keys that must exist BEFORE the stage can run
               ("video" = source file, "segments" = <base>.segments_en.json,
                "zh" = <base>.zh_segments.json)
-  caps        capability ids (capabilities.CAPS) that must be available
+  caps        **通用** capability ids (capabilities.CAPS `common=True`) that must
+              be available — 引擎特定前置由 Provider 自报注入 ctx（ADR-038 D7）
   gate        optional registered check id (pipeline.GATES) evaluated before
               entering the stage; failing problems block with guidance
   produces    ctx key of the artifact this stage writes ("" for none)
@@ -39,7 +40,11 @@ STAGES: tuple[dict[str, Any], ...] = (
         "id": "transcribe",
         "title": "转写 (Whisper + 断句合并 + 漏音补洞)",
         "requires": ["video"],
-        "caps": ["ffmpeg", "ffprobe", "model:large-v3"],
+        # ADR-038 D7：本表只声明**通用**前置。引擎特定前置（model:<name> / cuda /
+        # whisperx / demucs）由当前 Provider 的 prerequisites() 自报，在
+        # pipeline.build_ctx 组装 ctx 时注入（`_engine_caps`）——换 ASR 引擎
+        # 不需要改这张表。
+        "caps": ["ffmpeg", "ffprobe"],
         "gate": None,
         "produces": "segments",
         "cli": "uv run video-translate run <video>",

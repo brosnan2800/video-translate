@@ -72,7 +72,10 @@ could not translate, for agent backfill).
 - Hardening (V7–V13): `16-fill-gaps.md` (V11 coverage audit) · `17-verify-align.md` (V12 zh/en index-drift guard) · `18-verify.md` (unified self-check: acoustic/content/presentation lanes, ADR-012)
 - V5 additions (T2/T3/T4 + E1–E4): `19-vocal-separation.md` (T2 demucs) · `20-env-readiness.md` (E1–E4 doctor) · `21-translation-styles.md` (T3 style tracks) · `22-whisperx-alignment.md` (T4 forced alignment) · `23-environment-location.md` (`uv run` entry)
 - Entry point (T8): `24-pipeline-behavior.md`（`pipeline` 幂等推进器，[ADR-033](../adr/033-control-plane-pipeline-entry.md)）
+- Command hygiene: `25-cli-path-hygiene.md`（中文路径等参数边界校验，入口 exit 2）
+- Presentation: `26-display-merge.md`（显示层短块合并，不改内容层）
+- ASR layer extraction (T11): `27-asr-provider.md`（接口契约 · 第一步）· `28-asr-facade-and-readiness.md`（① 层门面 + Provider 自报就绪 · 第二步）
 
 > **完整索引见 [`docs/index.md`](../index.md)**。Spec 05 已删除（说明见 `11-cli-v2.md`）。
-> Spec 00–21 为行为契约、随代码演进，不设 Accepted/Superseded 状态；Spec 22–24 因对应
+> Spec 00–21 为行为契约、随代码演进，不设 Accepted/Superseded 状态；Spec 22 起因对应
 > 明确里程碑而带状态字段。

@@ -17,8 +17,13 @@ def _args(**kw):
 
 def _patch_all(monkeypatch, reachable):
     monkeypatch.setattr(cli, "_has", lambda b: True)
-    monkeypatch.setattr(cli, "_hf_cache_dir", lambda: "/tmp/cache")
-    monkeypatch.setattr(cli, "_model_cached", lambda m: True)
+    # model cache helpers moved cli → model_cache (ADR-038 D7 / 循环依赖收敛)；
+    # doctor 从 cli 命名空间调用它们，故 patch cli 侧的绑定。
+    monkeypatch.setattr(cli, "hf_cache_dir", lambda: "/tmp/cache")
+    monkeypatch.setattr(cli, "model_cached", lambda m: True)
+    # Provider 自报的 model:* 体检项经 capabilities.probe（ADR-038 D7）——
+    # 抹平本机是否真的放了模型，保证断言确定性。
+    monkeypatch.setattr("video_translate.capabilities.probe", lambda n: True)
     monkeypatch.setattr(cli, "_cuda_available", lambda: False)
     monkeypatch.setattr(cli, "resolve_config", lambda **k: Config())
     monkeypatch.setattr(cli, "detect_proxy", lambda **k: None)

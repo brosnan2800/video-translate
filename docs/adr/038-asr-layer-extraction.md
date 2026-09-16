@@ -1,9 +1,9 @@
 # ADR-038 — ASR 层抽离：可插拔 ASRProvider 接口
 
-- **状态**：接受（第一步落地中）
-- **日期**：2026-09-11
-- **关联**：ADR-035（数据契约总线）、ADR-037（产物目录布局）、ADR-030/033（控制平面）、Spec 27（接口契约）、Spec 02/08/12/13/16/22（被收拢的阶段能力）
-- **落地**：`src/video_translate/asr.py`（接口与类型）、`transcribe.py`（包装为 Provider）、`tests/test_asr_provider.py`
+- **状态**：接受（两步均已落地）
+- **日期**：2026-09-11（第二步补注 2026-09-16）
+- **关联**：ADR-035（数据契约总线）、ADR-037（产物目录布局）、ADR-030/033（控制平面）、Spec 27（接口契约 · 第一步）、[Spec 28](../specs/28-asr-facade-and-readiness.md)（门面 + 就绪接线 · 第二步）、Spec 02/08/12/13/16/22（被收拢的阶段能力）
+- **落地**：`src/video_translate/asr.py`（接口与类型 + `run_asr` 门面 + `engine_prerequisites`）、`transcribe.py`（包装为 Provider）、`model_cache.py`（模型缓存单一来源）、`pipeline.py` / `pipeline_def.py`（引擎前置注入与阶段表收窄）、`cli.py`（`cmd_transcribe` 薄壳 + doctor 按 Provider 自报渲染）、`tests/test_asr_provider.py` / `tests/test_asr_facade.py` / `tests/test_model_cache.py`
 
 ## 背景
 
@@ -61,6 +61,18 @@ vocal_sep.py → transcribe.py(+align.py) → merge.py → fill_gaps.py
 
 - **第一步（本 ADR，行为零变化）**：定义 `ASRProvider` Protocol（含 D7 的 `prerequisites()`）+ `TranscriberConfig` / `TranscribeResult` + `FasterWhisperProvider` 包装 `transcribe_video`。**不改任何现有调用路径**，可独立回归。
 - **第二步（后续单独 ADR/Spec）**：新建 `asr.py` 门面 `run_asr()`，把 `cmd_transcribe` 的编排搬入；把 D7 的 Provider 自报接线到 doctor / 闸门；此时才处理层间接缝与执行顺序调整（见「已知问题」）。
+
+> **补注（2026-09-16 / [Spec 28](../specs/28-asr-facade-and-readiness.md)）— 第二步已落地**：
+> - **A 块**：`asr.run_asr()` 门面 + `cmd_transcribe` 薄壳（编排收进 ① 层；产物逐字节不变，经实弹冒烟）。
+> - **B 块（D7 接线）**：能力分**通用**（`ffmpeg`/`ffprobe`）与**引擎特定**；
+>   `pipeline_def.STAGES` 的 transcribe 阶段 `caps` 收窄为通用前置，引擎特定前置由
+>   `asr.engine_prerequisites()` 自报、`pipeline.build_ctx` 注入 `_engine_caps` 并在
+>   `check_stage` 合并检查；doctor 的模型体检项改为按 Provider 自报渲染；`model:<name>`
+>   型能力 id 由**前缀解析**（新引擎声明 `model:sensevoice` 无需改 `capabilities.py`）；
+>   模型缓存探测下沉为单一来源 `model_cache.py`，顺带解掉 `capabilities` → `cli`
+>   的循环依赖与三处 `<repo>/models` 重复推导。
+> - **仍未做**：执行顺序调整（切分与补洞↔短句合并/孤儿并右的顺序），属**行为变更**，
+>   见下「已知问题」。
 
 ### D6. P0 拆解：通用基础设施 / 引擎特定就绪 / 翻译前置
 

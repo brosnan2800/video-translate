@@ -12,6 +12,11 @@ Design (see ADR-030 §2 — 原 CONTROL-PLANE-PLAN 已归档至 docs/archive/):
     honored; ``cli.main()`` catches it and exits ``EXIT_GATE_FAIL`` (8). An
     implicit/default request that can't be honored degrades with a logged
     reason instead (裁决一: explicit must be honored, auto may degrade).
+
+ADR-038 D7（能力分层）: 能力分**通用**（``common=True``：ffmpeg / ffprobe，与引擎
+无关，阶段表可静态声明）与**引擎特定**（模型 / CUDA / whisperx / demucs，由 Provider
+的 ``prerequisites()`` 自报、在组装 ctx 时注入）。``model:<name>`` 型 id 由前缀解析
+而非逐个注册——换引擎时本模块无需改动。
 """
 
 from __future__ import annotations
@@ -40,6 +45,10 @@ class Capability:
     probe: Callable[[], bool]
     guidance: str
     core: bool = True  # core = the control plane enforces it by default
+    # ADR-038 D7 通用前置：与 ASR 引擎无关的就绪要求（ffmpeg / ffprobe 是所有引擎的
+    # 共同前置，同时服务 verify 的独立验证）。阶段表（pipeline_def.STAGES）**只**
+    # 声明这类；引擎特定前置由 Provider 的 prerequisites() 自报，组装 ctx 时注入。
+    common: bool = False
 
 
 def _probe_ffmpeg() -> bool:
@@ -55,11 +64,15 @@ def _probe_ffprobe() -> bool:
 
 
 def _probe_model_large_v3() -> bool:
-    # Deferred import: cli imports capabilities, so importing cli here top-level
-    # would be a cycle. At call time cli is always already loaded.
-    from .cli import _model_cached
+    """large-v3 是否已就位（E3 完整性口径）。
 
-    return _model_cached("large-v3")
+    实现下沉到 ``model_cache``：此前这里 import ``cli._model_cached``，使
+    「控制面通用层」反向依赖「入口壳」（靠延迟 import 勉强绕过循环）——ADR-038 D7
+    的 `model:` 类能力由本模块**按 id 解析**，不再写死具体模型名。
+    """
+    from .model_cache import model_cached
+
+    return model_cached("large-v3")
 
 
 def _probe_cuda() -> bool:
@@ -86,12 +99,14 @@ CAPS: tuple[Capability, ...] = (
         _probe_ffmpeg,
         "ffmpeg missing. Run `video-translate setup --ffmpeg` (downloads the "
         "portable build into tools/ffmpeg; no manual install, no scatter).",
+        common=True,
     ),
     Capability(
         "ffprobe",
         _probe_ffprobe,
         "ffprobe missing (ships together with ffmpeg). Run "
         "`video-translate setup --ffmpeg`.",
+        common=True,
     ),
     Capability(
         "model:large-v3",
@@ -122,10 +137,53 @@ CAPS: tuple[Capability, ...] = (
 
 _CAP_BY_NAME: dict[str, Capability] = {c.name: c for c in CAPS}
 
+# ADR-038 D7: `model:<name>` 型能力 id 由**前缀解析**，不逐个静态注册——新引擎
+# 声明 `model:sensevoice` 时本模块无需改动（命名即契约）。探测实现复用
+# model_cache 的 E3 完整性口径（与 setup 自愈同源）。
+_MODEL_PREFIX = "model:"
+
+
+def _model_guidance(name: str) -> str:
+    return (
+        f"model '{name[len(_MODEL_PREFIX):]}' is not available. Run "
+        "`video-translate setup` (pre-downloads into <repo>/models — never the "
+        "system drive; truncated downloads self-heal), or drop the model dir "
+        "into <repo>/models/<name> manually."
+    )
+
+
+def capability(name: str) -> Capability | None:
+    """Look up a capability definition; synthesize unregistered `model:<name>` ids.
+
+    ADR-038 D7：Provider 自报的 `model:*` 无需事先在 :data:`CAPS` 注册即可探测与
+    取修复指引——引擎侧只负责声明 id（命名即契约）。
+    """
+    cap = _CAP_BY_NAME.get(name)
+    if cap is not None:
+        return cap
+    if name.startswith(_MODEL_PREFIX) and len(name) > len(_MODEL_PREFIX):
+        from .model_cache import model_cached
+
+        model_name = name[len(_MODEL_PREFIX):]
+        return Capability(name, lambda: model_cached(model_name),
+                          _model_guidance(name))
+    return None
+
+
+def guidance_for(name: str) -> str:
+    """Repair guidance for a capability id ("" when the id is unknown)."""
+    cap = capability(name)
+    return cap.guidance if cap is not None else ""
+
+
+def common_cap_names() -> tuple[str, ...]:
+    """通用前置（ADR-038 D7）：与 ASR 引擎无关，阶段表可静态声明。"""
+    return tuple(c.name for c in CAPS if c.common)
+
 
 def probe(name: str) -> bool:
     """Run a single capability probe (never raises for known names)."""
-    cap = _CAP_BY_NAME.get(name)
+    cap = capability(name)
     if cap is None:
         raise GateFail(f"unknown capability {name!r}", "")
     try:
@@ -141,7 +199,7 @@ def probe_all() -> dict[str, bool]:
 
 def require(name: str) -> None:
     """Hard-stop guard: raise GateFail when the capability is unavailable."""
-    cap = _CAP_BY_NAME.get(name)
+    cap = capability(name)
     if cap is None:
         raise GateFail(f"unknown capability {name!r}", "")
     if not probe(name):

@@ -25,7 +25,6 @@ from typing import Any, Sequence
 
 from . import __version__
 from .config import (
-    DEFAULT_HF_CACHE,
     DEFAULT_PERSONA,
     VALID_PROMPTS,
     resolve_config,
@@ -45,6 +44,15 @@ from .verify import (
 from .translate import validate_zh
 from .verify_align import report as align_report
 from .capabilities import GateFail
+# 模型缓存目录 / 完整性探测 / 路径解析的单一来源。此前 cli / transcribe /
+# vocal_sep 各存一份推导，capabilities 还得反向 import cli（见 model_cache docstring）。
+from .model_cache import (
+    LOCAL_MODEL_DIR,
+    find_incomplete_model_bins,
+    hf_cache_dir,
+    model_cached,
+    resolve_model_path,
+)
 
 EXIT_OK = 0
 EXIT_RUNTIME = 1
@@ -70,104 +78,6 @@ def _has(binary: str) -> bool:
     from .toolchain import tool_available
 
     return tool_available(binary)
-
-
-def _hf_cache_dir() -> str:
-    """HuggingFace cache dir, resolved through the toolchain registry.
-
-    Reading HF_HOME at the call site can disagree with the value resolved at
-    startup (unset env, a later .env load), which is what produced false
-    "model missing — re-download" reports.
-    """
-    from .toolchain import model_dir
-
-    return model_dir("hf_cache") or DEFAULT_HF_CACHE
-
-
-# Milestone 3 / E3: a complete large-v3 model.bin is ~3.09 GB. A model.bin
-# smaller than this lower bound is a truncated/corrupt download and must be
-# treated as NOT cached so setup self-heals and the run aborts with a clear fix.
-_MODEL_MIN_BYTES = 2 * 1024 ** 3  # 2 GiB
-
-
-def _model_cached(model_name: str = "large-v3", *, min_bytes: int | None = None) -> bool:
-    """Is a faster-whisper model present (in-repo OR HF cache), file-complete?
-
-    Checks for model.bin AND that it meets ``min_bytes`` (E3: a truncated
-    download smaller than the bound is NOT falsely reported as cached).
-    When ``min_bytes`` is None, the module-level ``_MODEL_MIN_BYTES`` is used
-    (read at call time, so tests can monkeypatch it down without 3 GB stubs).
-    """
-    if min_bytes is None:
-        min_bytes = _MODEL_MIN_BYTES
-    # 1) in-repo local model dir
-    cand = os.path.join(_LOCAL_MODEL_DIR, model_name)
-    mbin = os.path.join(cand, "model.bin")
-    if os.path.isfile(mbin) and os.path.getsize(mbin) >= min_bytes:
-        return True
-    # 2) HF hub snapshot with model.bin present
-    hub = os.path.join(_hf_cache_dir(), "hub")
-    if not os.path.isdir(hub):
-        return False
-    needle = model_name.replace("/", "--").lower()
-    for d in os.listdir(hub):
-        if needle in d.lower():
-            snap_root = os.path.join(hub, d, "snapshots")
-            if not os.path.isdir(snap_root):
-                continue
-            for snap in os.listdir(snap_root):
-                mbin = os.path.join(snap_root, snap, "model.bin")
-                if os.path.isfile(mbin) and os.path.getsize(mbin) >= min_bytes:
-                    return True
-    return False
-
-
-def _find_incomplete_model_bins(model_name: str = "large-v3") -> list[str]:
-    """Return paths of model.bin that EXIST but are below ``_MODEL_MIN_BYTES``.
-
-    Used by setup self-heal (E3): a truncated model.bin is deleted before a
-    fresh download so the run never loads a corrupt snapshot.
-    """
-    found: list[str] = []
-    cand = os.path.join(_LOCAL_MODEL_DIR, model_name, "model.bin")
-    if os.path.isfile(cand) and os.path.getsize(cand) < _MODEL_MIN_BYTES:
-        found.append(cand)
-    hub = os.path.join(_hf_cache_dir(), "hub")
-    if os.path.isdir(hub):
-        needle = model_name.replace("/", "--").lower()
-        for d in os.listdir(hub):
-            if needle in d.lower():
-                snap_root = os.path.join(hub, d, "snapshots")
-                if not os.path.isdir(snap_root):
-                    continue
-                for snap in os.listdir(snap_root):
-                    mbin = os.path.join(snap_root, snap, "model.bin")
-                    if os.path.isfile(mbin) and os.path.getsize(mbin) < _MODEL_MIN_BYTES:
-                        found.append(mbin)
-    return found
-
-
-# Project-local model dir: <repo_root>/models/<name>. Lets users drop a model
-# in-repo (e.g. from a mirror) and bypass HF Hub / network entirely.
-# cli.py lives at <repo>/src/video_translate/cli.py → repo root is three dirs up.
-_REPO_ROOT = os.path.dirname(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-)
-_LOCAL_MODEL_DIR = os.path.join(_REPO_ROOT, "models")
-
-
-def _resolve_model_path(model_name: str) -> str:
-    """Return a local in-repo model dir if it holds model.bin, else pass through.
-
-    This lets `--model large-v3` resolve to `<repo>/models/large-v3` (which
-    contains model.bin) instead of forcing an HF Hub download. Faster-whisper's
-    WhisperModel accepts either a repo-id or a local directory path.
-    """
-    if os.path.sep not in model_name and not os.path.isabs(model_name):
-        cand = os.path.join(_LOCAL_MODEL_DIR, model_name)
-        if os.path.isfile(os.path.join(cand, "model.bin")):
-            return cand
-    return model_name
 
 
 def _cuda_available() -> bool:
@@ -377,9 +287,19 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     checks = [
         ("ffmpeg", _has("ffmpeg")),
         ("ffprobe", _has("ffprobe")),
-        (f"HF cache dir ({_hf_cache_dir()})", os.path.isdir(_hf_cache_dir())),
-        ("large-v3 model cached (reuse, no re-download)", _model_cached("large-v3")),
+        (f"HF cache dir ({hf_cache_dir()})", os.path.isdir(hf_cache_dir())),
     ]
+    # ADR-038 D7：模型类就绪项由当前 Provider **自报**（`model:<name>` id），doctor
+    # 不再写死 large-v3 —— 换引擎时这里的内容跟着变，渲染结构不变。
+    # cuda / whisperx / demucs 在下方各有详细段，不在此重复。
+    from .asr import engine_prerequisites
+    from .capabilities import probe as _cap_probe
+
+    for _pid in engine_prerequisites():
+        if _pid.startswith("model:"):
+            _mname = _pid.split(":", 1)[1]
+            checks.append((f"{_mname} model cached (reuse, no re-download)",
+                           _cap_probe(_pid)))
     failed = False
     ffmpeg_missing = False
     for name, ok in checks:
@@ -532,7 +452,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print("\n  [FIX] NLTK alignment corpora missing. Run:")
         print("        video-translate setup --align")
         print("        (downloads punkt/punkt_tab into models/nltk_data, no C:\\ cache)")
-    if not _model_cached("large-v3"):
+    if not model_cached("large-v3"):
         print("\n  [FIX] large-v3 model missing. Run:")
         print("        make setup     # or: video-translate setup")
 
@@ -591,12 +511,12 @@ def cmd_setup(args: argparse.Namespace) -> int:
         return EXIT_OK
 
     model = args.model
-    if _model_cached(model):
-        print(f"[setup] {model} already present in {_LOCAL_MODEL_DIR} / HF cache "
+    if model_cached(model):
+        print(f"[setup] {model} already present in {LOCAL_MODEL_DIR} / HF cache "
               f"— reusing, no download.")
         return EXIT_OK
     # E3: self-heal truncated downloads before fetching a fresh copy.
-    incomplete = _find_incomplete_model_bins(model)
+    incomplete = find_incomplete_model_bins(model)
     if incomplete:
         print(f"[setup] found {len(incomplete)} incomplete/corrupt model.bin — removing "
               f"before re-download:")
@@ -606,7 +526,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
                 print(f"        removed {p}")
             except OSError as e:
                 print(f"[warn] could not remove {p}: {e}", file=sys.stderr)
-    print(f"[setup] {model} not found; downloading into {_LOCAL_MODEL_DIR} "
+    print(f"[setup] {model} not found; downloading into {LOCAL_MODEL_DIR} "
           f"(~3GB for large-v3, stays in-repo, no C:\\ users cache)...")
     try:
         from faster_whisper import WhisperModel
@@ -616,8 +536,8 @@ def cmd_setup(args: argparse.Namespace) -> int:
         # Download into the project-local models/ dir so the weight never lands
         # in the user's HF cache (C:\Users\...\AppData) — drop-in ready, portable.
         WhisperModel(model, device=dev, compute_type=ct,
-                     download_root=os.path.join(_LOCAL_MODEL_DIR, model))
-        print(f"[setup] {model} ready at {os.path.join(_LOCAL_MODEL_DIR, model)}.")
+                     download_root=os.path.join(LOCAL_MODEL_DIR, model))
+        print(f"[setup] {model} ready at {os.path.join(LOCAL_MODEL_DIR, model)}.")
         return EXIT_OK
     except Exception as e:  # noqa: BLE001
         print(f"[error] model download failed: {e}", file=sys.stderr)
@@ -702,7 +622,7 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
          "align": getattr(args, "align", None)},
         cwd=os.getcwd(),
     )
-    cfg.model = _resolve_model_path(cfg.model)
+    cfg.model = resolve_model_path(cfg.model)
 
     from .asr import AsrRequest, TranscriberConfig, run_asr
 

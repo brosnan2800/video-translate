@@ -166,6 +166,22 @@ class FasterWhisperProvider:
         )
 
 
+def engine_prerequisites(provider: ASRProvider | None = None) -> tuple[str, ...]:
+    """当前引擎自报的就绪要求（ADR-038 D7）。
+
+    doctor / 闸门据此拼出「通用体检 + Provider 自报体检」；阶段表只声明通用前置，
+    引擎特定前置由这里在组装 ctx 时注入。默认 Provider 的构造是纯数据（不加载模型、
+    不碰引擎），可按需构造。
+
+    Provider 侧任何异常一律降级为**空元组**——就绪声明失败不该让 doctor / 位置解析
+    崩掉（通用前置仍会被照常检查）。
+    """
+    try:
+        return tuple((provider or FasterWhisperProvider()).prerequisites())
+    except Exception:  # noqa: BLE001
+        return ()
+
+
 def _read_detected_lang(outdir: str, base: str) -> str | None:
     """读回 ``{base}.{fp}.detected_lang.json``（取最新的同 base sidecar）。
 

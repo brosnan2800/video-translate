@@ -1,14 +1,15 @@
 # Spec 27 — ASRProvider 接口契约（ASR 层抽离 · 第一步）
 
-- 状态：批准（实现）
+- 状态：批准（已实现）
 - 日期：2026-09-11
-- 关联：ADR-038（决策）、ADR-035（数据契约总线）、Spec 02（transcribe 行为）、Spec 22（对齐）
+- 关联：ADR-038（决策）、ADR-035（数据契约总线）、Spec 02（transcribe 行为）、Spec 22（对齐）、**[Spec 28](28-asr-facade-and-readiness.md)（第二步 · 已落地）**
 
 ## 范围
 
 - **IN（第一步）**：`ASRProvider` Protocol（含 `prerequisites()`）；`TranscriberConfig` / `TranscribeResult` / `RawSegment` 类型；`FasterWhisperProvider`（薄包装 `transcribe.transcribe_video`）。
-- **OUT（第二步）**：`asr.py` 门面 `run_asr()` 与 `cmd_transcribe` 编排搬迁；Provider 自报接线到 doctor / 闸门；层间接缝的物理实现；执行顺序调整（切分与补洞的顺序，见 ADR-038「已知问题」）。
-- **OUT（更远）**：引擎阈值画像；第二个 Provider 实现；verify 与 Whisper 自证解耦。
+- **OUT（第二步）** → **已落地，见 [Spec 28](28-asr-facade-and-readiness.md)**：`asr.py` 门面 `run_asr()` 与 `cmd_transcribe` 编排搬迁；Provider 自报接线到 doctor / 闸门；`model:<name>` id 前缀解析；模型缓存单一来源（解 `capabilities` → `cli` 循环依赖）。
+- **OUT（第二步 · 仍未做）**：执行顺序调整（切分与补洞的顺序，见 ADR-038「已知问题」，属**行为变更**，须单独评估与回归）。
+- **OUT（更远）**：引擎阈值画像；第二个 Provider 实现；verify 与 Whisper 自证解耦（已由 [ADR-041](../adr/041-verify-decoupled-from-asr-self-report.md) 落地）。
 
 ## 不变量（load-bearing）
 

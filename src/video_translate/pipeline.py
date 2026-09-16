@@ -104,9 +104,22 @@ def _find_srt(outdir: str | Path, base: str) -> str | None:
     return None
 
 
+def _engine_cap_names(provider: Any | None = None) -> tuple[str, ...]:
+    """当前引擎自报的就绪要求（ADR-038 D7）——实现归 ① 层（``asr``）。"""
+    from .asr import engine_prerequisites
+
+    return engine_prerequisites(provider)
+
+
 def build_ctx(outdir: str | Path, base: str,
-              video: str | None = None) -> dict[str, Any]:
-    """Collect the per-base artifact paths into a context dict for the table."""
+              video: str | None = None, *,
+              provider: Any | None = None) -> dict[str, Any]:
+    """Collect the per-base artifact paths into a context dict for the table.
+
+    ADR-038 D7: 引擎特定前置由 Provider **自报**注入（``_engine_caps``），使
+    ``STAGES`` 只声明通用前置 —— 换 ASR 引擎不必改阶段表。``provider`` 仅供测试
+    替换默认引擎。
+    """
     root = Path(outdir)
     return {
         "outdir": str(root),
@@ -116,6 +129,8 @@ def build_ctx(outdir: str | Path, base: str,
         "segments": artifact_path("segments", root, base),
         "zh": artifact_path("zh", root, base),
         "srt": _find_srt(outdir, base),
+        # ADR-038 D7: 引擎特定就绪要求（Provider 自报；不参与 _CTX_REQUIREMENTS）
+        "_engine_caps": _engine_cap_names(provider),
     }
 
 
@@ -137,11 +152,13 @@ def check_stage(stage_id: str, ctx: dict[str, Any], *,
         if not _exists(ctx.get(key)):
             desc, fix = _CTX_REQUIREMENTS.get(key, (key, ""))
             problems.append(f"missing {key} ({desc}) — {fix}")
-    for name in spec["caps"]:
+    # ADR-038 D7: 通用前置（表内静态）+ 引擎特定前置（Provider 自报，经 ctx 注入）。
+    for name in (*spec["caps"], *(ctx.get("_engine_caps") or ())):
         if not caps_probe(name):
-            from .capabilities import CAPS
-            guidance = next((c.guidance for c in CAPS if c.name == name), "")
-            problems.append(f"capability '{name}' unavailable — {guidance}")
+            from .capabilities import guidance_for
+
+            problems.append(
+                f"capability '{name}' unavailable — {guidance_for(name)}")
     if with_gate and spec["gate"]:
         gate_fn = GATES.get(spec["gate"])
         if gate_fn is None:

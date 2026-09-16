@@ -8,7 +8,7 @@
 | **新贡献者**（搭环境跑通） | [`TOOLCHAIN.md`](../TOOLCHAIN.md) → [`TOOLING.md`](TOOLING.md) |
 | **想了解全局规划** | [`MAJOR_VERSION_PLAN.md`](../MAJOR_VERSION_PLAN.md) |
 | **想查「为什么这么设计」** | [`adr/`](adr)（架构决策记录，39 篇，编号 001–041） |
-| **想查「行为契约是什么」** | [`specs/`](specs)（行为规格，27 篇，编号 00–27） |
+| **想查「行为契约是什么」** | [`specs/`](specs)（行为规格，28 篇，编号 00–28） |
 | **想查历史 / 事故复盘** | [`HISTORY.md`](HISTORY.md) · [`POSTMORTEM-JamieFoxx.md`](POSTMORTEM-JamieFoxx.md) |
 
 ---
@@ -23,7 +23,7 @@ docs/
 ├── POSTMORTEM-JamieFoxx.md   Jamie Foxx 混剪事故复盘（V8–V13）
 ├── RESEARCH-voice-pro.md     Voice-Pro 对标研究（E1–E4 论证来源）
 ├── adr/                      架构决策记录（不可变历史，001–041）
-├── specs/                    行为规格契约（00–27）
+├── specs/                    行为规格契约（00–28）
 ├── drafts/                   设计草稿（进行中，不保证与代码同步）
 └── archive/                  已归档（历史/废弃，不参与日常查阅）
 ```
@@ -119,7 +119,7 @@ docs/
 | ADR | 主题 | 状态 |
 |---|---|---|
 | [037](adr/037-artifact-directory-layout.md) | 产物目录布局（`<outdir>/<base>/`） | 接受 |
-| [038](adr/038-asr-layer-extraction.md) | ASR 层抽离：可插拔 ASRProvider（含 P0 拆解 / Provider 自报就绪） | 接受（第一步落地中） |
+| [038](adr/038-asr-layer-extraction.md) | ASR 层抽离：可插拔 ASRProvider（含 P0 拆解 / Provider 自报就绪） | 接受（两步已落地） |
 
 ### 表现层与文本契约
 | ADR | 主题 | 状态 |
@@ -152,7 +152,7 @@ docs/
 | 入口（T8） | [24 pipeline 行为](specs/24-pipeline-behavior.md) |
 | 命令卫生 | [25 CLI 路径卫生](specs/25-cli-path-hygiene.md)（参数边界校验） |
 | 表现层 | [26 显示层短块合并](specs/26-display-merge.md) |
-| 架构分层 | [27 ASRProvider 接口](specs/27-asr-provider.md) |
+| 架构分层 | [27 ASRProvider 接口](specs/27-asr-provider.md) · [28 ASR 门面 + 就绪接线](specs/28-asr-facade-and-readiness.md) |
 
 > Spec 编号 **缺 05**：已删除（说明见 `11-cli-v2.md`）。
 > Spec 00–21 为行为契约、随代码演进，不设 Accepted/Superseded 状态；22–27 带状态字段。

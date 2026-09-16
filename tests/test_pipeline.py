@@ -211,3 +211,56 @@ def test_status_explicit_base(tmp_path, capsys):
     rc = cli.main(["status", "--outdir", str(tmp_path), "--base", "older"])
     assert rc == 0
     assert "stage=translate" in capsys.readouterr().out
+
+
+# ------------------- ADR-038 D7: 引擎特定 caps 由 Provider 自报注入 ----------
+
+
+def test_transcribe_stage_declares_only_common_caps():
+    """阶段表只声明**通用**前置 —— 引擎特定前置由 Provider 自报注入；否则换
+    ASR 引擎就得改这张表（D7 要杜绝的正是这件事）。"""
+    spec = next(s for s in STAGES if s["id"] == "transcribe")
+    assert spec["caps"] == ["ffmpeg", "ffprobe"]
+
+
+def test_build_ctx_injects_provider_prerequisites(art):
+    """ctx 带 `_engine_caps`，内容 = 当前 Provider 自报的就绪要求。"""
+    from video_translate.asr import FasterWhisperProvider
+
+    ctx = pipeline.build_ctx(art, "demo")
+    assert ctx["_engine_caps"] == FasterWhisperProvider().prerequisites()
+    assert "model:large-v3" in ctx["_engine_caps"]
+
+
+def test_build_ctx_accepts_provider_override(art):
+    """换引擎只需换 Provider：注入内容随其声明而变，阶段表不动。"""
+
+    class FakeProvider:
+        def prerequisites(self):
+            return ("model:fake-asr",)
+
+    ctx = pipeline.build_ctx(art, "demo", provider=FakeProvider())
+    assert ctx["_engine_caps"] == ("model:fake-asr",)
+
+
+def test_check_stage_checks_injected_engine_caps(art):
+    """注入的引擎前置**参与**检查：缺 model:large-v3 → problem（且带修复指引）。"""
+    _seg_file(art)
+    ctx = pipeline.build_ctx(art, "demo", video="demo.mp4")
+    problems = pipeline.check_stage(
+        "transcribe", ctx, caps_probe=lambda n: n in ("ffmpeg", "ffprobe"))
+    assert any("model:large-v3" in p for p in problems)
+    assert any("setup" in p for p in problems)  # guidance 来自 capabilities
+
+
+def test_engine_prereq_failure_degrades_to_empty(art):
+    """Provider 自报抛错 → 降级为空元组：就绪声明失败不该让 ctx / 位置解析崩掉。"""
+
+    class BoomProvider:
+        def prerequisites(self):
+            raise RuntimeError("boom")
+
+    ctx = pipeline.build_ctx(art, "demo", provider=BoomProvider())
+    assert ctx["_engine_caps"] == ()
+    problems = pipeline.check_stage("transcribe", ctx, caps_probe=lambda n: True)
+    assert not any("model:" in p for p in problems)

@@ -343,7 +343,7 @@ T10 落地后：声学数据（silence_intervals/duration）读 state 契约不�
 > 散落、无归属；`capabilities.py` 的就绪检查写死 `large-v3` / `whisperx`。
 > 本项是对「换掉 Whisper 会不会一堆逻辑作废」的直接回答：**让作废范围可枚举、可收敛**。
 
-> **完整设计**：[ADR-038](docs/adr/038-asr-layer-extraction.md) + [Spec 27](docs/specs/27-asr-provider.md)。
+> **完整设计**：[ADR-038](docs/adr/038-asr-layer-extraction.md) + [Spec 27](docs/specs/27-asr-provider.md)（第一步）+ [Spec 28](docs/specs/28-asr-facade-and-readiness.md)（第二步）。
 
 **核心设计**：
 1. **分层**：① ASR 方案层（人声分离 → 转写 → 对齐 → 幻觉过滤 → 断句合并 → 漏音补洞 →
@@ -368,7 +368,7 @@ T10 落地后：声学数据（silence_intervals/duration）读 state 契约不�
   doctor / 闸门。**已知问题**：切分当前夹在合并与补洞之间（其后还有短句合并 / 孤儿并右 /
   补洞作用于「切分后的段」），严格按 D2 归位需调整执行顺序，属行为变更、必须单独回归。
 
-**落地文档**：ADR-038（决策）+ Spec 27（接口契约）；单测 `tests/test_asr_provider.py`。
+**落地文档**：ADR-038（决策）+ Spec 27（接口契约）+ Spec 28（门面与就绪接线）；单测 `tests/test_asr_provider.py` / `tests/test_asr_facade.py` / `tests/test_model_cache.py` / `tests/test_capabilities.py` / `tests/test_pipeline.py`。
 
 **验收标准**：
 - **第一步**：`asr.py` + 单测新增，现有文件零改动（除索引）；全量 `uv run pytest` 绿；

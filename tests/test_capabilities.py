@@ -12,6 +12,9 @@ from video_translate.capabilities import (
     CAPS,
     _CAP_BY_NAME,
     GateFail,
+    capability,
+    common_cap_names,
+    guidance_for,
     probe,
     probe_all,
     require,
@@ -89,3 +92,39 @@ def test_gatefail_default_guidance_empty():
     err = GateFail("boom")
     assert err.message == "boom"
     assert err.guidance == ""
+
+
+# ------------------- ADR-038 D7: 能力分层 + model:* 动态解析 -------------------
+
+
+def test_common_caps_are_the_engine_agnostic_subset():
+    """通用前置只有 ffmpeg / ffprobe —— 阶段表可静态声明的那部分。"""
+    common = set(common_cap_names())
+    assert common == {"ffmpeg", "ffprobe"}
+    assert all(c.common for c in CAPS if c.name in common)
+    # 引擎特定（模型 / CUDA / whisperx / demucs）绝不标成通用
+    assert not any(c.common for c in CAPS if c.name not in common)
+
+
+def test_unregistered_model_capability_is_synthesized(monkeypatch):
+    """`model:<name>` 无需预先注册即可探测 / 取指引（换引擎不必改本模块）。"""
+    monkeypatch.setattr("video_translate.model_cache.model_cached",
+                        lambda m: m == "sensevoice")
+    cap = capability("model:sensevoice")
+    assert cap is not None and cap.name == "model:sensevoice"
+    assert cap.probe() is True
+    assert "sensevoice" in cap.guidance
+    # 命名合法但未就绪 → False（降级，而不是异常）
+    assert capability("model:nope").probe() is False
+
+
+def test_unknown_non_model_capability_is_still_an_error():
+    assert capability("no-such-capability") is None
+    assert guidance_for("no-such-capability") == ""
+    with pytest.raises(GateFail):
+        probe("no-such-capability")
+
+
+def test_guidance_for_works_for_registered_and_model_ids():
+    assert "setup --ffmpeg" in guidance_for("ffmpeg")
+    assert "setup" in guidance_for("model:large-v3")
