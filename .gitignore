@@ -42,8 +42,13 @@ docs/golden/
 # WorkBuddy private data (memory / skills) — never track
 .workbuddy/
 
-# CodeBuddy project data — 有意纳入版本控制（2026-09-16 起）：
-#   rules/*.mdc  工程规则集（SDD/TDD · 数据契约 D1-D5 · R1-R7 · C1-C4 · PowerShell harness）
-#   plans/*.md   开发计划留档
-# 目的：规则集随仓库分发，clone 即生效，不再依赖本机私有目录。
-# 若日后出现 session / agent 运行时状态文件，再按需单独 ignore。
+# CodeBuddy 工程规则集 —— 有意纳入版本控制（2026-09-16 起）：
+#   rules/*.mdc  SDD/TDD（S1-S5）· 数据契约（D1-D5）· 依赖（R1-R7）·
+#                操作约束（C1-C5）· PowerShell harness（H0-H5）
+# 规则集随仓库分发，clone 即生效，不再依赖本机私有目录。
+.codebuddy/*
+!.codebuddy/rules/
+
+# .codebuddy/plans/ 被上面 .codebuddy/* 一并忽略（无需单独列出）：
+# 它是 plan 模式的自动产物（文件名带 hash 后缀、frontmatter 为 todos 清单），
+# 属**工具中间产物**，不是项目契约 —— 契约一律走 docs/adr/ + docs/specs/。
