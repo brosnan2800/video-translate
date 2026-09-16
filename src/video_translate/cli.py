@@ -184,13 +184,10 @@ def _default_base(input_path: str) -> str:
     return Path(input_path).stem
 
 
-def _derive_base(path: str) -> str:
-    """Derive <base> from a segments/zh file path (strips known suffixes)."""
-    name = Path(path).name
-    for suffix in (".segments_en.json", ".segments_raw.json", ".zh_segments.json"):
-        if name.endswith(suffix):
-            return name[: -len(suffix)]
-    return Path(path).stem
+# 注：此处曾另有一份 ``_derive_base``（只剥 3 种后缀）。Python 模块级后定义覆盖
+# 前定义，文件后部那份（剥 ``_BASE_STRIP_SUFFIXES`` 全部 6 种）才是实际生效的，
+# 本处从未被执行。2026-09-16 清理死代码，唯一实现见 ``_BASE_STRIP_SUFFIXES`` 附近
+# （S5 单一来源）。
 
 
 # --- Spec 25: CLI path / filename hygiene ---------------------------------------
@@ -636,115 +633,59 @@ def _require_ffmpeg() -> int | None:
     return None
 
 
-def _gate_vsep(args: argparse.Namespace, message: str, guidance: str) -> bool:
-    """Control-plane hard-stop for an explicit vsep request (裁决一).
+def _resolve_silence_reference(
+    input_path: str, outdir: str, base: str,
+) -> list[tuple[float, float]] | None:
+    """独立静音参照（``ffmpeg silencedetect``）——ADR-012 同一份喂 merge 与 fill_gaps。
 
-    --separate-vocals is EXPLICIT. When demucs is unavailable the request
-    cannot be honored → raise ``GateFail`` (cli.main → exit 8) with repair
-    guidance, unless ``--allow-degrade`` explicitly opts out (then warn and
-    degrade, so automation/CI can still proceed — the reason is still
-    recorded in the state file).
+    ADR-035 M2: silencedetect 全链只算一次（artifact ``audio_profile``，单一生产 =
+    preflight）。优先读 state 落盘的声学事实；缺失（老目录 / 直调）才兜底重算并回写，
+    绝不作为常规路径。空区间列表是「探测成功但全片无静音」的真实结果，不是缓存缺失。
 
-    Returns True when the caller should *degrade* (… and use original audio),
-    False when the gate hard-stops (the caller must not continue past this).
+    Spec 19 Invariant #4: 参照永远取自原始输入（绝不使用清洗后的 audio_source）。
+
+    本函数留在 cli 层（控制面）：state 的读取/回写属控制面，① 层门面
+    ``asr.run_asr`` 只接收已解析好的参照（ADR-038 D5 第二步 A 块）。
     """
-    if getattr(args, "allow_degrade", False):
-        print(
-            f"[warn] {message} --allow-degrade set; proceeding on the original "
-            f"audio (reason recorded in state)",
-            file=sys.stderr,
-        )
-        return True
-    raise GateFail(message, guidance)
+    from . import state as vt_state
 
-
-def _vocal_sep_step(
-    args: argparse.Namespace, cfg, input_path: str, outdir: str, base: str,
-) -> tuple[bool, str | None, str, str, str | None]:
-    """Run vocal separation BEFORE loading Whisper (8GB GPU safe).
-
-    Spec 19 / ADR-017 §5: we MUST run demucs FIRST, release ALL demucs GPU
-    memory, THEN start Whisper — otherwise two big models on an 8GB card OOM.
-
-    Control plane 裁决一: --separate-vocals is an EXPLICIT request. When demucs
-    is not installed the request cannot be honored — hard-stop (GateFail →
-    exit 8) with repair guidance, unless --allow-degrade explicitly opts out
-    (then warn + fall back, reason recorded in state).
-
-    Returns:
-      (do_separate_was_requested_flag,
-       audio_source_path_or_None,
-       vsep_backend ("demucs"),
-       vsep_model,
-       vsep_input_hash_or_None)
-    """
-    sep = bool(getattr(args, "separate_vocals", False) or getattr(cfg, "separate_vocals", False))
-    dm_model = (
-        getattr(args, "demucs_model", None)
-        or getattr(cfg, "demucs_model", None)
-        or "htdemucs"
-    )
-    backend = "demucs"
-    if not sep:
-        return False, None, backend, dm_model, None
-    # user explicitly asked for separation — probe & try
-    from .vocal_sep import demucs_available, separate_vocals, separate_fingerprint, _input_fingerprint
-    if not demucs_available():
-        # _gate_vsep raises GateFail (→ exit 8) unless --allow-degrade set.
-        _gate_vsep(
-            args,
-            "--separate-vocals requires the demucs package, which is not "
-            "installed. Explicit requests are never silently degraded — the "
-            "whole point of vsep is preventing strong-BGM hallucinations.",
-            "Run `uv sync` (`pip install -e .` fallback). To skip separation "
-            "and proceed on the original audio, drop --separate-vocals or "
-            "explicitly bypass with --allow-degrade.",
-        )
-        return False, None, backend, dm_model, None
+    silences: list[tuple[float, float]] | None = None
     try:
-        audio_source = separate_vocals(
-            input_path, outdir, base=base,
-            backend=backend, model_name=dm_model,
-        )
-    except Exception as exc:  # noqa: BLE001
-        print(f"[warn] demucs separation failed ({exc}); falling back to original audio",
-              file=sys.stderr)
-        audio_source = None
-    if audio_source is None:
-        # Separation failed or demucs didn't actually run (e.g. backend mismatch)
-        return False, None, backend, dm_model, None
-    vsep_input_hash = _input_fingerprint(input_path)
-    # Force-assert the duration invariant (ADR-017 §2 load-bearing guard)
-    try:
-        from .ffmpeg_utils import probe_duration
-        din = probe_duration(input_path)
-        dout = probe_duration(audio_source)
-        if abs(din - dout) >= 0.05:
-            print(f"[warn] demucs output duration {dout:.3f}s ≠ input {din:.3f}s;\n"
-                  f"       refusing to shift timestamps — falling back to original audio")
-            return False, None, backend, dm_model, None
-    except Exception:
-        # profile failed — be safe and keep the separation output only if
-        # demucs itself already enforced the invariant inside separate_vocals;
-        # here we just trust the step.
-        pass
-    # Spec 19 / ADR-017 §5 — EXPLICIT demucs / torch GPU memory release BEFORE
-    # WhisperModel is constructed anywhere downstream:
-    try:
-        import gc
-        gc.collect()
+        ac = vt_state.get_acoustics(outdir, base)
+        if ac is not None and ac.get("silence_intervals") is not None:
+            silences = [tuple(iv) for iv in ac["silence_intervals"]]
+    except Exception:  # noqa: BLE001 - state 是增强，永不阻断
+        silences = None
+    if silences is None:
         try:
-            import torch  # type: ignore
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except Exception:
-            pass
-    except Exception:
-        pass
-    return True, audio_source, backend, dm_model, vsep_input_hash
+            prof = analyze_audio(input_path)
+            silences = prof.silence_intervals if prof.ok else None
+            if prof is not None and prof.ok:
+                try:
+                    vt_state.record_acoustics(outdir, base, prof)
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception:  # noqa: BLE001
+            silences = None
+    return silences
+
+
+# T2 人声分离 + 裁决一意图闸已下沉到 ① 层门面（ADR-038 D5 第二步 A 块）：
+#   ``asr._vocal_sep_step``（编排）/ ``asr._gate_vsep``（显式意图硬停）。
+# cli 不再持有第二份实现（S5 单一来源）。
 
 
 def cmd_transcribe(args: argparse.Namespace) -> int:
+    """转写薄壳（ADR-038 D5 第二步 A 块）。
+
+    ① 层编排已收归 ``asr.run_asr``；本函数只做四件事：
+
+      1. **入口前置**：ffmpeg/ffprobe 是硬依赖（缺失即 exit 3，不进入编排）
+      2. **参数归一化**：``args`` + ``Config`` → ``AsrRequest`` / ``TranscriberConfig``
+         （``asr.py`` 刻意不接收 Namespace，避免反向耦合 cli 入口壳）
+      3. **静音参照解析**：state 优先（控制面，ADR-035 M2）
+      4. **控制面记账**：audio_source 落盘 + transcribe stage 落 state + 异常→退出码
+    """
     dep = _require_ffmpeg()
     if dep is not None:
         return dep
@@ -763,125 +704,65 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
     )
     cfg.model = _resolve_model_path(cfg.model)
 
-    # T2 (ADR-017 / Spec 19) — vocal separation MUST happen FIRST, before any
-    # heavy Whisper import (8GB GPU sequential scheduling). If this returns
-    # (False, None, ...) we run on the normal path with zero behaviour change.
-    _sep_on, _audio_src, _vsep_backend, _vsep_model, _vsep_ihash = _vocal_sep_step(
-        args, cfg, input_path, outdir, base,
-    )
-    # ADR-035 M2: T2 分离产物关联显式落盘（artifact "audio_source"），
-    # 下游 resegment / verify / fill_gaps 不再靠 separate_fingerprint 反推。
-    if _sep_on and _audio_src:
-        try:
-            from . import state as vt_state
-            vt_state.record_audio_source(
-                outdir, base, vocals_wav=_audio_src,
-                vsep_backend=_vsep_backend, vsep_model=_vsep_model,
-                vsep_input_hash=_vsep_ihash)
-        except Exception:  # noqa: BLE001 - state 是增强，永不阻断
-            pass
+    from .asr import AsrRequest, TranscriberConfig, run_asr
 
-    try:
-        from .transcribe import transcribe_video
-        transcribe_video(
-            input_path, outdir, base=base, model_name=cfg.model,
-            chunk=cfg.chunk, threads=args.threads, lang=cfg.lang,
+    allow_degrade = getattr(args, "allow_degrade", False)
+    request = AsrRequest(
+        input_path=input_path, outdir=outdir, base=base,
+        config=TranscriberConfig(
+            model=cfg.model, chunk=cfg.chunk, threads=args.threads,
+            lang=cfg.lang,
             vad_threshold=getattr(args, "vad_threshold", None),
             use_vad=getattr(args, "vad", False),
             adaptive_vad=getattr(args, "adaptive_vad", False),
             device=cfg.device, compute_type=cfg.compute_type,
-            # T2 fields: only non-default when separation was actually used.
-            audio_source=_audio_src,
-            separate_vocals=_sep_on,
-            vocal_sep_backend=_vsep_backend,
-            vocal_sep_model=_vsep_model,
-            vocal_sep_input_hash=_vsep_ihash,
+            # T2 / ADR-017: 显式 flag 或配置任一为真即视为请求分离
+            separate_vocals=bool(getattr(args, "separate_vocals", False)
+                                 or cfg.separate_vocals),
+            vocal_sep_model=(getattr(args, "demucs_model", None)
+                             or cfg.demucs_model or "htdemucs"),
             # T4 (ADR-028 / Spec 22): forced-acoustic-alignment backend.
             align_backend=cfg.align,
-            align_allow_degrade=getattr(args, "allow_degrade", False),
-        )
-        segs_path = artifact_path("segments", outdir, base)
-        # ADR-012: compute the independent silence reference ONCE and share it
-        # with both the hallucination filter (merge) and the gap audit.
-        # Spec 19 Invariant #4: this reference ALWAYS consults the original
-        # input_path (never a cleaned audio_source) — no change here.
-        # ADR-035 M2: silencedetect 全链只算一次（artifact "audio_profile"，
-        # 单一生产 = preflight）。读 state 落盘的声学事实；缺失（老目录/直调
-        # transcribe）才兜底重算并回写，绝不作为常规路径。空区间列表是
-        # "探测成功但全片无静音"的真实结果，不是缓存缺失。
-        silences: list[tuple[float, float]] | None = None
-        try:
-            from . import state as vt_state
-            ac = vt_state.get_acoustics(outdir, base)
-            if ac is not None and ac.get("silence_intervals") is not None:
-                silences = [tuple(iv) for iv in ac["silence_intervals"]]
-        except Exception:  # noqa: BLE001 - state 是增强，永不阻断
-            silences = None
-        if silences is None:
+            align_allow_degrade=allow_degrade,
+        ),
+        # 后处理参数与开关（搬迁前散读 args.* / cfg.*，现集中归一化）
+        merge_max_dur=cfg.merge_max_dur,
+        merge_max_gap=cfg.merge_max_gap,
+        merge_max_chars=cfg.merge_max_chars,
+        merge=cfg.merge_enabled and not args.no_merge,
+        split=not getattr(args, "no_split", False),
+        snap_drift=not getattr(args, "no_drift_snap", False),
+        audit=not getattr(args, "no_audit", False),
+        review=not getattr(args, "no_review", False),
+        g3=not getattr(args, "no_g3", False),
+        allow_degrade=allow_degrade,
+    )
+
+    # ADR-012 / Spec 19 Invariant #4: 独立静音参照取自原始输入（绝不用清洗后的音轨），
+    # 同一份喂 merge 与 fill_gaps。state 的读取/回写属控制面，留在本层。
+    silences = _resolve_silence_reference(input_path, outdir, base)
+
+    try:
+        outcome = run_asr(request, silence_intervals=silences, progress=print)
+        # ADR-035 M2: T2 分离产物关联显式落盘（artifact "audio_source"），
+        # 下游 resegment / verify / fill_gaps 不再靠 separate_fingerprint 反推。
+        if outcome.audio_source:
             try:
-                prof = analyze_audio(input_path)
-                silences = prof.silence_intervals if prof.ok else None
-                if prof is not None and prof.ok:
-                    try:
-                        from . import state as vt_state
-                        vt_state.record_acoustics(outdir, base, prof)
-                    except Exception:  # noqa: BLE001
-                        pass
-            except Exception:  # noqa: BLE001
-                silences = None
-        if cfg.merge_enabled and not args.no_merge:
-            from .merge import apply_merge
-            raw_path = artifact_path("segments_raw", outdir, base)
-            apply_merge(
-                segs_path, raw_path=raw_path,
-                max_dur=cfg.merge_max_dur, max_gap=cfg.merge_max_gap,
-                split_enabled=not getattr(args, "no_split", False),
-                split_max_chars=cfg.merge_max_chars,
-                snap_drift=not getattr(args, "no_drift_snap", False),
-                silence_intervals=silences,
-            )
-            print(f"[merge] merged + split -> {segs_path} (raw kept at {raw_path})")
-        # B: coverage self-audit + automatic gap recovery (skip with --no-audit)
-        if not getattr(args, "no_audit", False):
-            from .fill_gaps import fill_gaps
-            from .io_utils import load_json, save_json, tee_progress
-            segs = load_json(segs_path)
-            # ADR-035 M3（Z2）: review 按 _raw_indices 回查 raw 段置信度（G1
-            # 在合并后时间轴复明）。raw 缺失/损坏时降级为旧行为，不阻断。
-            raw_segs = None
-            try:
-                _rp = artifact_path("segments_raw", outdir, base)
-                if os.path.isfile(_rp):
-                    raw_segs = load_json(_rp)
-            except Exception:  # noqa: BLE001
-                raw_segs = None
-            recovered = fill_gaps(
-                input_path, segs, lang=cfg.lang,
-                model_name=cfg.model,
-                use_vad=False,  # ADR-016 (T2a): recovery is always bare
-                silence_intervals=silences,
-                device=cfg.device, compute_type=cfg.compute_type,
-                # T2 / Spec 19 §(B): recovery decodes from the SAME source as
-                # the main pass — either vocals.wav (if used) or original video.
-                audio_source=_audio_src,
-                # ADR-034 §6.2: dual-signal review + G1/G2 re-processing.
-                review=not getattr(args, "no_review", False),
-                # ADR-034 §6.3: G3 局部 separate-vocals（强 BGM 兜底）。随
-                # review 一并可关，也能单独用 --no-g3 逃生。
-                g3=not getattr(args, "no_g3", False),
-                # ADR-034 §5.2: independent cache layer, so a re-run only
-                # re-processes suspect windows instead of the whole video.
-                outdir=outdir, base=base,
-                # ADR-035 M3（Z2）: 信号 A 经 _raw_indices 回查 raw 源段。
-                raw_segments=raw_segs,
-                # ADR-035 可观测性: [audit] 审计行同时落盘 <base>.review.log
-                # （用户翻产物文件看结果，不依赖 stdout）。
-                progress=tee_progress(artifact_path("review_log", outdir, base)),
-            )
-            if recovered is not segs:
-                save_json(segs_path, recovered, indent=0)
-        _record_transcribe_stage(segs_path, video=input_path)
+                from . import state as vt_state
+                vt_state.record_audio_source(
+                    outdir, base, vocals_wav=outcome.audio_source,
+                    vsep_backend=outcome.vsep_backend,
+                    vsep_model=outcome.vsep_model,
+                    vsep_input_hash=outcome.vsep_input_hash)
+            except Exception:  # noqa: BLE001 - state 是增强，永不阻断
+                pass
+        _record_transcribe_stage(outcome.segments_path, video=input_path)
         return EXIT_OK
+    except GateFail:
+        # 裁决一：显式意图硬停（如 --separate-vocals 缺 demucs）必须冒泡到
+        # cli.main → exit 8，不得被下面的兜底吞成 EXIT_RUNTIME。
+        # （搬迁前 _vocal_sep_step 在 try 之外，同等效果；此处显式放行。）
+        raise
     except Exception as e:  # noqa: BLE001
         msg = str(e).lower()
         # E3: a corrupt/truncated model snapshot can pass the existence check but
@@ -1625,8 +1506,9 @@ def cmd_resegment(args: argparse.Namespace) -> int:
         else:
             # 裁决一: explicit --separate-vocals on resegment + demucs missing
             # => hard-stop (exit 8) unless --allow-degrade explicitly opts out.
+            from .asr import _gate_vsep
             _gate_vsep(
-                args,
+                getattr(args, "allow_degrade", False),
                 "--separate-vocals requested on resegment but the demucs "
                 "package is not installed.",
                 "Run `uv sync` (`pip install -e .` fallback), or drop "

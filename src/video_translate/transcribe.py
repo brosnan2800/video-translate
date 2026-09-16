@@ -35,6 +35,29 @@ from . import align as _align
 from .capabilities import GateFail
 from .artifacts import workdir
 
+import re  # for ALL-CAPS artifact normalization (see _normalize_caps)
+
+
+def _normalize_caps(text: str) -> str:
+    """Normalize faster-whisper's ALL-CAPS artifact on loud/shouted speech.
+
+    Whisper returns fully-uppercase segments when the audio is loud or shouted.
+    That is a transcription artifact, not intentional emphasis, and reads as
+    broken in subtitles. We lowercase such segments (requiring >=4 letters so
+    genuine short tokens like "OK", "ID", "TV", "AI" survive) and restore
+    sentence casing.
+    """
+    if not text:
+        return text
+    letters = [c for c in text if c.isalpha()]
+    if len(letters) < 4 or not all(c.isupper() for c in letters):
+        return text
+    low = text.lower()
+    # Capitalize the first letter of every sentence (split on . ! ?).
+    return re.sub(r"(^|[.!?]\s+)([a-z])",
+                  lambda m: m.group(1) + m.group(2).upper(), low)
+
+
 # Default device/compute_type — kept as module-level defaults for backward
 # compatibility, but no longer forced: transcribe_video/transcribe_window accept
 # ``device``/``compute_type`` (defaulting to "auto") and resolve them at call
@@ -473,6 +496,10 @@ def transcribe_video(
         _align.release_align_memory()
 
     all_segs = merge_chunks(chunk_lists)
+    # Fix Whisper's ALL-CAPS artifact on high-energy speech (e.g. st back-half).
+    for _seg in all_segs:
+        if isinstance(_seg, dict) and "text" in _seg:
+            _seg["text"] = _normalize_caps(_seg.get("text") or "")
     out = os.path.join(workdir(outdir, base), f"{base}.segments_en.json")
     save_json(out, all_segs, indent=0)
     progress(f"[merge] total {len(all_segs)} segments -> {out}")

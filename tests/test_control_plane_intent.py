@@ -10,8 +10,10 @@ import argparse
 
 import pytest
 
-from video_translate.capabilities import GateFail
+from video_translate import asr as A
 from video_translate import cli
+from video_translate.asr import AsrRequest, TranscriberConfig
+from video_translate.capabilities import GateFail
 
 
 def _ns(**kw):
@@ -21,20 +23,25 @@ def _ns(**kw):
 
 
 # ---------------------------------------------------------------------------
-# vsep gate (静默点 2: cli._vocal_sep_step)
+# vsep gate (静默点 2: asr._vocal_sep_step —— ADR-038 第二步 A 块后归位 ① 层门面)
 # ---------------------------------------------------------------------------
+
+def _req(separate_vocals: bool, *, allow_degrade: bool = False) -> AsrRequest:
+    """构造最小 AsrRequest（vsep 路径只关心这两个输入）。"""
+    return AsrRequest(
+        input_path="in.mp4", outdir="out", base="base",
+        config=TranscriberConfig(separate_vocals=separate_vocals),
+        allow_degrade=allow_degrade,
+    )
+
 
 def test_vsep_missing_demucs_hard_stops(monkeypatch):
     """显式 --separate-vocals + demucs 缺 -> GateFail（exit 8），绝不静默回退。"""
     monkeypatch.setattr(
         "video_translate.vocal_sep.demucs_available", lambda: False
     )
-    cfg = argparse.Namespace(separate_vocals=True, demucs_model=None)
     with pytest.raises(GateFail) as exc:
-        cli._vocal_sep_step(
-            _ns(separate_vocals=True, allow_degrade=False),
-            cfg, "in.mp4", "out", "base",
-        )
+        A._vocal_sep_step(_req(separate_vocals=True))
     assert "separate-vocals" in exc.value.message
     assert "uv sync" in exc.value.guidance
 
@@ -44,20 +51,14 @@ def test_vsep_missing_demucs_with_escape_hatch_degrades(monkeypatch):
     monkeypatch.setattr(
         "video_translate.vocal_sep.demucs_available", lambda: False
     )
-    cfg = argparse.Namespace(separate_vocals=True, demucs_model=None)
-    sep_on, audio_src, *_ = cli._vocal_sep_step(
-        _ns(separate_vocals=True, allow_degrade=True),
-        cfg, "in.mp4", "out", "base",
-    )
+    sep_on, audio_src, *_ = A._vocal_sep_step(
+        _req(separate_vocals=True, allow_degrade=True))
     assert sep_on is False  # degraded: no separation actually ran
     assert audio_src is None
 
 
 def test_vsep_not_requested_stays_off():
-    cfg = argparse.Namespace(separate_vocals=False, demucs_model=None)
-    sep_on, audio_src, *_ = cli._vocal_sep_step(
-        _ns(separate_vocals=False), cfg, "in.mp4", "out", "base",
-    )
+    sep_on, audio_src, *_ = A._vocal_sep_step(_req(separate_vocals=False))
     assert sep_on is False and audio_src is None
 
 
@@ -67,9 +68,8 @@ def test_vsep_resegment_missing_demucs_hard_stops(monkeypatch):
         "video_translate.vocal_sep.demucs_available", lambda: False
     )
     with pytest.raises(GateFail):
-        from video_translate import cli as C
-        C._gate_vsep(
-            _ns(separate_vocals=True, allow_degrade=False),
+        A._gate_vsep(
+            False,
             "--separate-vocals requested on resegment but the demucs "
             "package is not installed.",
             "Run `uv sync` (`pip install -e .` fallback)",
@@ -135,7 +135,8 @@ def test_gatefail_flow_through_main_returns_8(monkeypatch):
 
     # ffmpeg present on host (doctor green); keep hermetic regardless:
     monkeypatch.setattr(cli, "_require_ffmpeg", lambda: None)
-    monkeypatch.setattr(cli, "_vocal_sep_step", _boom)
+    # 分离步骤已下沉 ① 层门面（ADR-038 第二步 A 块）：打在 asr 模块属性上
+    monkeypatch.setattr("video_translate.asr._vocal_sep_step", _boom)
 
     rc = cli.main(["transcribe", "vid.mp4"])
     assert rc == cli.EXIT_GATE_FAIL == 8
