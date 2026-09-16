@@ -1,0 +1,60 @@
+---
+description: "命令执行 harness（条件生效：宿主环境为 Windows PowerShell 时）：H0 环境判定 + H1-H5 命令书写规范 + bashism 对照表，消灭『PowerShell 语法不同，重试』。入口唯一 uv run 见 Spec 23。"
+alwaysApply: true
+enabled: true
+updatedAt: 2026-09-03T00:00:00.000Z
+---
+
+# 命令执行 Harness（Windows / PowerShell）
+
+## H0：先判环境，再选语法（本节**条件生效**）
+- 判据取 `<user_info>` 的 `OS Version` / `Shell`：
+  - `win32` + PowerShell → **本节 H1-H5 全适用**，命令按 PowerShell 写。
+  - macOS / Linux（bash / zsh）→ **本节不适用**，用常规 bash 语法
+    （`&&` / `export` / heredoc 照常）；只保留 H3 的 `uv run` 入口约定
+    （跨平台一致，见 Spec 23）。
+- ❌ 不问环境就默认 PowerShell，或反过来在 PowerShell 里写 bash 再等报错重试。
+
+## H1：形态约定（PowerShell 下）
+- 一律**单行**；多步用 `;` 串联，不要换行续行。
+- 需要「失败即停」：`cmd1; if ($LASTEXITCODE -ne 0) { exit 1 }; cmd2`。
+- ❌ `cmd1 && cmd2`（PS5.1 不支持）。
+
+## H2：bashism 对照表
+| bash 写法 | PowerShell 等价 |
+|---|---|
+| `cmd1 && cmd2` | `cmd1; cmd2`（PS7 才支持 `&&`，保险起见用 `;`） |
+| `FOO=bar cmd` | `$env:FOO="bar"; cmd` |
+| `export FOO=bar` | `$env:FOO="bar"` |
+| `cat <<EOF > f` | 用 `write_to_file` 工具（❌ 别在 shell 里造文件） |
+| `cat f` / `head f` | 用 `read_file` |
+| `grep -rn p` / `sed` / `awk` | 用 `search_content`（❌ 别用 shell 处理文本） |
+| `rm -rf d` | `Remove-Item -Recurse -Force d` |
+| `touch f` | `New-Item -ItemType File -Force f` |
+| `which x` / `where x` | `Get-Command x`（工具路径走 `toolchain.resolve_tool()`，别搜全盘） |
+| `2>/dev/null` | `2>$null` |
+| `make xxx` | Windows 本机无 make → `uv run ...`（见 H3，跨平台通用） |
+
+## H3：入口唯一 = `uv run`（Spec 23 / ADR-029）
+- 全部命令在项目根执行、一律 `uv run ...`：`uv run video-translate ...`、
+  `uv run python ...`、`uv run pytest ...`。
+- 复杂逻辑优先 `uv run python -c "..."`（外层双引号、内层单引号）；超过一行的
+  落成临时 `.py` 再 `uv run python <file>`，**用完删掉**。
+- ❌ 裸 `python` / `video-translate` / `make`（命中 PATH 旧环境）。
+
+## H4：编码（中文输出，Windows 下）
+- 终端中文乱码：`$env:PYTHONIOENCODING="utf-8"; uv run ...`（必要时前置
+  `[Console]::OutputEncoding=[System.Text.Encoding]::UTF8`）。
+- 产物文件写入统一 utf-8，不用 `Out-File` 默认编码（Windows 上是 UTF-16）。
+
+## H5：路径与引号
+- 含空格 / 中文 / 反斜杠的路径一律**双引号**包裹。
+- 传给 Python 的字符串参数：最外层双引号，内层单引号；路径分隔符直接写 `\`，
+  不要手转 `/`（Python 侧认）。
+- PowerShell 下：单引号**不做变量展开**，别用它包变量。
+
+## 禁止行为
+- ❌ 用 shell 做文本处理（grep/sed/awk/cat/echo 重定向）
+- ❌ 用 heredoc / `echo >` 生成文件（改用 `write_to_file`）
+- ❌ `make` / 裸 `python` / 裸 `video-translate`
+- ❌ 命令报错后原样重试（先按 H0 判定环境、按 H1-H5 改写，再跑）

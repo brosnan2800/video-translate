@@ -1,0 +1,43 @@
+---
+description: "依赖与外部工具管理规则（R1-R7，收编自 MAJOR_VERSION_PLAN §3.2）。涵盖：依赖进顶层、CUDA 镜像、uv.lock 成对提交、外部二进制不入 git、模型零 C 盘、准入清单、镜像固化、toolchain 中央登记。"
+alwaysApply: true
+enabled: true
+updatedAt: 2026-09-02T00:00:00.000Z
+---
+
+# 依赖与外部工具管理（R1-R7）
+
+> 完整规则与反例见 `MAJOR_VERSION_PLAN.md` §3.2；工具路径一律走
+> `src/video_translate/toolchain.py` 的 `resolve_tool()` / `tool_available()` /
+> `model_dir()`（由 `init_toolchain()` 从 `.env.local` 解析一次并缓存，不随 CWD 漂移）。
+
+## R1：运行时依赖一律进 `pyproject` 顶层 `dependencies`
+- ❌ 藏进 optional extra（如 `[audio]`）或只写 `requirements.txt`。
+
+## R2：CUDA wheel 只走镜像索引
+- `uv sync`（认 `[tool.uv.sources]`，自动按平台选 wheel）或显式 `--index-url`（当前 **cu128** / torch 2.8 线）。
+- ❌ 裸 `pip install torch`（会装成 `+cpu`，GPU 失效）。
+
+## R3：`uv.lock` 是依赖唯一事实来源
+- 改 `pyproject` 必须同 commit 重跑 `uv lock` 并提交。
+- ❌ 攠 pyproject 不提交 lockfile。
+
+## R4：外部二进制不手动装、不进 git
+- ffmpeg 等由 `setup --ffmpeg` 自动下载到 `tools/`，路径登记 `.env.local`。
+- ❌ 手动下载塞仓库 / 全盘搜二进制。
+
+## R5：模型权重项目本地优先（零 C 盘）
+- 默认落 `<repo>/models/<name>/`，随项目拷贝、不进 git；缓存必须过完整性校验（残缺自愈重下）。
+- ❌ 散落系统用户目录、残缺 model.bin 静默使用。
+
+## R6：新依赖准入清单（合并前逐项确认）
+- ① 跨平台（Mac/CPU 降级路径）② 影响转写产物 → 是否进 chunk 缓存指纹 ③ GPU 显存预算（**8GB 红线，单一大模型串行**）④ 有无纯标准库 / 既有依赖等价实现 ⑤ lockfile 同步。
+
+## R7：镜像固化进配置，不靠临场决策
+- PyPI/PyTorch 镜像进 `[tool.uv.index]` / `PIP_EXTRA_INDEX_URL`；HF 镜像进 `HF_ENDPOINT`。
+- ❌ 每次安装现场拼镜像源。
+
+## 禁止行为
+- ❌ 调用点现场 `shutil.which` / `os.environ.get("VT_*")`
+- ❌ 二进制 / 权重进 git 或散落系统盘
+- ❌ 现场挑镜像源

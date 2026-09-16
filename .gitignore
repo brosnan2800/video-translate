@@ -42,5 +42,8 @@ docs/golden/
 # WorkBuddy private data (memory / skills) — never track
 .workbuddy/
 
-# CodeBuddy project data (session/agent state) — never track
-.codebuddy/
+# CodeBuddy project data — 有意纳入版本控制（2026-09-16 起）：
+#   rules/*.mdc  工程规则集（SDD/TDD · 数据契约 D1-D5 · R1-R7 · C1-C4 · PowerShell harness）
+#   plans/*.md   开发计划留档
+# 目的：规则集随仓库分发，clone 即生效，不再依赖本机私有目录。
+# 若日后出现 session / agent 运行时状态文件，再按需单独 ignore。

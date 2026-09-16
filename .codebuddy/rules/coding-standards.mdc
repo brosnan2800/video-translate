@@ -1,0 +1,30 @@
+---
+description: "编码规范：SDD（Spec/ADR 契约先行）+ TDD（测试先行）（S1-S5）。涵盖：契约先行、测试先行、事故复现用例、跨阶段契约测试、规则与文档精简。"
+alwaysApply: true
+enabled: true
+updatedAt: 2026-09-02T00:00:00.000Z
+---
+
+# 编码规范：SDD + TDD
+
+## S1：SDD —— 契约先行
+- 动代码前先写 / 改 Spec（`docs/specs/`）或 ADR（`docs/adr/`）定契约。
+- 实现不得偏离契约；改行为先改契约。
+
+## S2：TDD —— 测试先行
+- 先写测试再实现；新模块测试先行。
+
+## S3：事故必须有回归用例
+- 修 bug 先写复现用例（用**事故几何数据**），再修；用例注释记录事故来源（如"kathy_meta_vlog 的 We'll be right back. 幻觉"）。
+
+## S4：跨阶段流转必须有契约测试
+- 阶段间数据流转的变化必须同步 `tests/test_pipeline_field_contract.py`。
+
+## S5：规则与文档精简
+- 规则文件**不复制 ADR/Spec 全文**，只给结论 + 文件引用；严格控制行数。
+- ❌ 把规则写成散文长文，撑爆 agent 上下文。
+
+## 禁止行为
+- ❌ 无契约直接改行为
+- ❌ 修 bug 不留回归用例
+- ❌ 规则文件复制粘贴 ADR/Spec 正文

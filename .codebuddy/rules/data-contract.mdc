@@ -1,0 +1,46 @@
+---
+description: "数据契约总线五条铁律（D1-D5）与可观测性。涵盖：单一生产、copy-then-override、命名单一来源、边界校验、state 永不做 gate、审计落盘、segments_raw 不可变。"
+alwaysApply: true
+enabled: true
+updatedAt: 2026-09-02T00:00:00.000Z
+---
+
+# 数据契约总线（ADR-035）
+
+阶段间数据一律走声明式契约表 `src/video_translate/artifacts.py`（**唯一事实来源**）。
+完整设计见 `docs/adr/035-pipeline-data-contract.md`。
+
+## D1：单一生产
+- 一个数据只准 `produced_by` 阶段写，其余阶段只读。
+- `recompute=False` 的数据**禁止下游重算**（如 silencedetect / duration 只在 preflight 算一次落 `vt_state.json`）。
+
+## D2：copy-then-override
+- 变换数据用 `{**原对象, 改动字段}`，未知字段默认保留。
+- ❌ 白名单式新建 dict 丢字段（merge 丢置信度事故的根因）。
+
+## D3：命名单一来源
+- 字段名 / 文件后缀 / 参数名 / stage id / decision key 一律查 `artifacts.py`。
+- ❌ 模块自造字符串。
+
+## D4：边界校验
+- 阶段边界用 `validate_artifact` / `enforce_contract` 断言必需字段；缺字段 = 当场报错。
+- ❌ 静默退化、吞异常装没事。
+
+## D5：state 永不做 gate
+- 闸门只看 segments / zh 产物文件；state 损坏不得阻断管道。
+
+## 数据分工
+| 数据 | 落点 | 约束 |
+|---|---|---|
+| 全局/运行级参数（duration、静音区间、routing、阶段状态） | `vt_state.json` | preflight 单一生产，下游只读 |
+| 每段字幕级参数（no_speech_prob / avg_logprob / compression_ratio） | `segments_raw.json`（跟段绑死） | **不可变**；合并视图 `segments_en.json` 用 `_raw_indices` 回查，不聚合不覆盖 |
+
+## 可观测性
+- 审计 / 诊断 / 校验结果必须**落盘成文件**（如 `<base>.review.log`，经 `io_utils.tee_progress`）。
+- ❌ 只打 stdout（用户翻产物文件看结果，不看终端）。
+
+## 禁止行为
+- ❌ 在调用点重算 `recompute=False` 的数据
+- ❌ 新建 dict 只挑字段重建
+- ❌ 自造产物文件名 / 字段名
+- ❌ 让 gate 依赖 state 文件

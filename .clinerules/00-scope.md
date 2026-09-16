@@ -16,3 +16,13 @@ VAD 路由决策表）。它不是编码规范，不要往里加工程规则。
 - `04-pipeline-extension.md` — 新阶段/新子命令/新守卫的接入清单
 - `05-testing.md` — 测试分层、mock 规范、真实事故几何
 - `06-commits-and-docs.md` — 提交纪律与文档同步义务
+
+## 读取约定（C5，指引）
+
+读项目内**文档 / 代码 / 产物 / `videos/`** 一律走**本地文件系统目录**，不用 git 追踪范围
+判断存在性 —— **不在 git ≠ 不存在**：`.gitignore` 覆盖的 `videos/` / `.codebuddy/` /
+`models/` / `tools/` / `docs/golden/` 都真实可读。**否定性判断**（「不存在」「已删除」）
+必须先正向验证（`Test-Path` / 显式列目录 / 含隐藏项），不得从带过滤条件的枚举结果反推。
+
+> **主源**：`.codebuddy/rules/operation-constraints.mdc` §C5（全文与理由）；
+> 本处只作指引，不复制正文（避免双源漂移）。
