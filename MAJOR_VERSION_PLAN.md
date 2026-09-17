@@ -54,14 +54,28 @@ flowchart TD
     E3 --> E4[E4. CUDA 解析 venv torch/lib 优先<br/>✅ 已完成 ADR-026]
     E4 --> T3[T3. 双轨翻译风格体系<br/>✅ 已完成 ADR-027 🎬 影视意译 / 📘 忠实直译]
     T3 --> T4[T4. WhisperX 强制声学对齐<br/>✅ 已完成 ADR-028 ⏱️ 解决极端声学漂移]
-    T4 --> T5[T5. 说话人分离 Diarization<br/>🔒 待落地 pyannote 角色标签]
-    T5 --> T6[T6. 独立大模型直连引擎<br/>🤖 DeepSeek / OpenAI API / Ollama]
-    T6 --> T7[T7. 批量常驻服务 & Web 校对看板<br/>🖥️ FastAPI + Inspector UI]
-    T7 --> T8[T8. Pipeline 单一入口 + Agent 协议瘦身<br/>🔧 控制平面收口 / 入口统一]
-    T7 --> T9[T9. 音频路由重构：默认裸跑 + 数据驱动闭环<br/>🎯 ADR-034 / 与 T8 正交可并行]
-    T9 --> T10[T10. 流水线数据契约总线<br/>📋 ADR-035 / 声明式 artifacts 表 + 五条铁律]
-    T10 --> T11[T11. ASR 层抽离：可插拔 ASRProvider<br/>🔌 ADR-038 / 换引擎影响面可枚举]
+    T4 --> T5[T5. 说话人分离 Diarization<br/>⬜ 未开始 · pyannote 角色标签]
+    T5 --> T6[T6. 独立大模型直连引擎<br/>⬜ 未开始 · DeepSeek / OpenAI API / Ollama]
+    T6 --> T7[T7. 批量常驻服务 & Web 校对看板<br/>⬜ 未开始 · FastAPI + Inspector UI]
+    T7 --> T8[T8. Pipeline 单一入口 + Agent 协议瘦身<br/>✅ 已完成 2026-09-03]
+    T7 --> T9[T9. 音频路由重构：默认裸跑 + 数据驱动闭环<br/>✅ 已完成（三期全落地）ADR-034]
+    T9 --> T10[T10. 流水线数据契约总线<br/>✅ 已完成 ADR-035 / 声明式 artifacts 表 + 五条铁律]
+    T10 --> T11[T11. ASR 层抽离：可插拔 ASRProvider<br/>✅ 两步已落地 ADR-038 / 换引擎影响面可枚举]
+    T11 --> T2B[T2B. 接口型 ASR（远程取现成字幕）<br/>✅ 已完成 ADR-042 + Spec 29 / 第二个 Provider 落地]
 ```
+
+> **进度快照（2026-09-17）** —— 从这里判断「接下来做什么」：
+>
+> - ✅ **已完成**：T1 / T2 / E1-E4 / T3 / T4 / **T8** / **T9**（三期全）/ **T10** /
+>   **T11**（两步）/ **T2B**（接口型 ASR）。
+> - ⬜ **未开始（主线剩余）**：**T5**（说话人分离，`pyannote` 角色标签）→ **T6**（LLM
+>   直连引擎）→ **T7**（批量常驻服务 & Web 校对看板）。
+> - 🔧 **已知遗留小项**（均非阻塞，可随时插入）：
+>   1. **T11 第二步的「切分按 D2 归位」**——切分当前夹在合并与补洞之间，严格归位属
+>      行为变更、需单独回归（详见 T11 节）；
+>   2. **`RESEARCH-voice-pro` P3**：`fetch` 下载片源 → 本地转写（与 T2B 互不替代、可串用）；
+>   3. **`merge.split_long_cues` 的 `max_chars` 是软上限**——`merge_short_cues` 会为可读性把
+>      过短尾块并回左邻居，故偶有 >42 字符 cue（词级/文本级路径行为一致，Spec 13 已注明）。
 
 ---
 
@@ -209,7 +223,7 @@ flowchart TD
 
 ---
 
-### T10 — 流水线数据契约总线（声明式 artifacts 表 + 五条铁律）【P0 · 地基】
+### T10 — 流水线数据契约总线（声明式 artifacts 表 + 五条铁律）【P0 · 地基】✅ 已落地
 > **背景**：阶段间「参数丢失 / 重复重算 / 变换丢字段」已发生两起事故：① `duration`
 > 断线（[ADR-034](docs/adr/034-audio-routing-redesign.md) §1.2，analyze_audio 不
 > probe、_resolve_routing 不传 → 自动推荐永远 False）；② `merge` 合并段时新建 dict
@@ -296,7 +310,7 @@ flowchart TD
 
 ---
 
-### T9 — 音频路由重构：默认裸跑 + 数据驱动闭环（S2）【P0】
+### T9 — 音频路由重构：默认裸跑 + 数据驱动闭环（S2）【P0】✅ 已落地（三期全）
 
 > **背景**：通用流水线默认全局 `--vad` 会系统性 eject 笑声/欢呼下的真音（5:52 漏音根因，
 > ADR-015 §Context 已记录此现象但 adaptive-vad 仅降到 240s chunk 粒度未根治）。画像机制
@@ -335,7 +349,7 @@ T10 落地后：声学数据（silence_intervals/duration）读 state 契约不�
 
 ---
 
-### T11 — ASR 层抽离：可插拔 ASRProvider 接口【P0 · 可替换性地基】
+### T11 — ASR 层抽离：可插拔 ASRProvider 接口【P0 · 可替换性地基】✅ 已落地（两步）
 
 > **背景**：语音识别层当前是 6 个模块（`vocal_sep` / `transcribe` / `align` / `merge` /
 > `fill_gaps`）+ 约 150 行散落在 `cli.cmd_transcribe` 的编排，整条链焊死：换 ASR 引擎
@@ -364,9 +378,13 @@ T10 落地后：声学数据（silence_intervals/duration）读 state 契约不�
 **分步实施**：
 - **第一步（已落地 2026-09-11）**：接口 + `FasterWhisperProvider` 包装。
   **行为零变化**——旁挂接口，现有调用路径完全不改。
-- **第二步（待做）**：`run_asr()` 门面 + `cmd_transcribe` 编排搬迁 + Provider 自报接线到
-  doctor / 闸门。**已知问题**：切分当前夹在合并与补洞之间（其后还有短句合并 / 孤儿并右 /
-  补洞作用于「切分后的段」），严格按 D2 归位需调整执行顺序，属行为变更、必须单独回归。
+- **第二步（已落地 2026-09-17）**：`run_asr()` 门面 + `cmd_transcribe` 编排搬迁 + Provider
+  自报接线到 doctor / 闸门（`model_cache.py` 解 capabilities→cli 环 + `capabilities.common`
+  通用/引擎区隔 + `pipeline._engine_caps` 注入 + `cli.cmd_doctor` 渲染）。**验收项的第三个
+  「第二个 Provider 实现」已由 §2B 的 `YtCaptionProvider` 满足**（ADR-042），接口可替换性
+  由此得到实证。
+  **遗留（未做）**：切分当前夹在合并与补洞之间（其后还有短句合并 / 孤儿并右 / 补洞作用于
+  「切分后的段」），严格按 D2 归位需调整执行顺序，属行为变更、必须单独回归。
 
 **落地文档**：ADR-038（决策）+ Spec 27（接口契约）+ Spec 28（门面与就绪接线）；单测 `tests/test_asr_provider.py` / `tests/test_asr_facade.py` / `tests/test_model_cache.py` / `tests/test_capabilities.py` / `tests/test_pipeline.py`。
 
@@ -378,7 +396,7 @@ T10 落地后：声学数据（silence_intervals/duration）读 state 契约不�
 
 ---
 
-## 2B. 接口型 ASR 方案（另一条线，与 Whisper 主线并列）
+## 2B. 接口型 ASR 方案（另一条线，与 Whisper 主线并列）✅ 已落地
 
 > **为什么单列**：上面 T 系列的任务基本都围绕 **Whisper 主线**。本项**不改 Whisper**，而是
 > 新增**第二套 ASR 方案**——通过接口取平台现成的 ASR 结果。T11 把 ① 层做成可插拔，本项
@@ -407,7 +425,10 @@ T10 落地后：声学数据（silence_intervals/duration）读 state 契约不�
    （计入 flag，strict 默认下 exit 8；`--no-strict` 才显式弃权）；**几何子检查
    （相邻重叠）照常执行**。不引入新退出码、不引入「partial pass」新结论。
 
-**落地文档**：ADR-042 + Spec 29（待写）。
+**落地文档**：[ADR-042](docs/adr/042-youtube-captions-as-asr-source.md)（接受 · 已实现）
++ [Spec 29](docs/specs/29-interface-asr-captions.md)（已实现）；首轮真实数据实测暴露并修掉
+两个缺陷（库的 `find_*` 抛异常语义、滚动片段时间侧），另补齐 `merge` 无词段切分，
+详见 HISTORY V16。
 
 **验收标准**：
 - `captions <url>` 产出与转写同契约的 `segments_en.json`，`pipeline` 位置解析**直接进入 translate**；
