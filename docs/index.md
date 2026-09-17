@@ -7,7 +7,7 @@
 | **AI Agent**（被召唤来翻译视频） | [`AGENTS.md`](../AGENTS.md)（必读：执行协议 + 避坑红线）→ 用 `pipeline` 单一入口推进 |
 | **新贡献者**（搭环境跑通） | [`TOOLCHAIN.md`](../TOOLCHAIN.md) → [`TOOLING.md`](TOOLING.md) |
 | **想了解全局规划** | [`MAJOR_VERSION_PLAN.md`](../MAJOR_VERSION_PLAN.md) |
-| **想查「为什么这么设计」** | [`adr/`](adr)（架构决策记录，39 篇，编号 001–041） |
+| **想查「为什么这么设计」** | [`adr/`](adr)（架构决策记录，40 篇，编号 001–042） |
 | **想查「行为契约是什么」** | [`specs/`](specs)（行为规格，28 篇，编号 00–28） |
 | **想查历史 / 事故复盘** | [`HISTORY.md`](HISTORY.md) · [`POSTMORTEM-JamieFoxx.md`](POSTMORTEM-JamieFoxx.md) |
 
@@ -22,7 +22,7 @@ docs/
 ├── HISTORY.md                版本演进史（V3–V15）与实战案例
 ├── POSTMORTEM-JamieFoxx.md   Jamie Foxx 混剪事故复盘（V8–V13）
 ├── RESEARCH-voice-pro.md     Voice-Pro 对标研究（E1–E4 论证来源）
-├── adr/                      架构决策记录（不可变历史，001–041）
+├── adr/                      架构决策记录（不可变历史，001–042）
 ├── specs/                    行为规格契约（00–28）
 ├── drafts/                   设计草稿（进行中，不保证与代码同步）
 └── archive/                  已归档（历史/废弃，不参与日常查阅）
@@ -120,6 +120,7 @@ docs/
 |---|---|---|
 | [037](adr/037-artifact-directory-layout.md) | 产物目录布局（`<outdir>/<base>/`） | 接受 |
 | [038](adr/038-asr-layer-extraction.md) | ASR 层抽离：可插拔 ASRProvider（含 P0 拆解 / Provider 自报就绪） | 接受（两步已落地） |
+| [042](adr/042-youtube-captions-as-asr-source.md) | 接口型 ASR 方案：YouTube 字幕轨作为第二 ASR 来源 | **草案（待评审）** |
 
 ### 表现层与文本契约
 | ADR | 主题 | 状态 |
@@ -166,6 +167,7 @@ docs/
 | 文件 | 内容 | 状态 |
 |---|---|---|
 | [`drafts/g3l-progressive-separation.md`](drafts/g3l-progressive-separation.md) | G3L 递进式多模型人声分离（G3 救回升级草案，收敛后并入 ADR-034 或新开 ADR） | Discussion Draft（2026-09-11） |
+| [`drafts/cue-rate-audit.md`](drafts/cue-rate-audit.md) | cue 语速/密度物理巡检（候选增强 · **未立项**，需先有真实案例） | Discussion Draft（2026-09-17） |
 
 ---
 
