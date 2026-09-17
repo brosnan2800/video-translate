@@ -3,7 +3,15 @@ import os
 
 import pytest
 
-from video_translate.proxy import DEFAULT_PROXY, detect_proxy, is_socks, setup_http_proxy
+from video_translate.proxy import (
+    DEFAULT_PROXY,
+    DEFAULT_PROXY_PORT,
+    detect_proxy,
+    is_socks,
+    probe_http_endpoint,
+    resolve_probe_port,
+    setup_http_proxy,
+)
 
 _ALL = ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "all_proxy", "ALL_PROXY")
 
@@ -47,7 +55,26 @@ def test_setup_rejects_socks():
 
 
 def test_default_proxy_value():
-    assert DEFAULT_PROXY == "http://127.0.0.1:7890"
+    assert DEFAULT_PROXY == f"http://127.0.0.1:{DEFAULT_PROXY_PORT}"
+    assert DEFAULT_PROXY_PORT == 7899  # 本地代理软件的实际监听端口（可经 VT_PROXY_PORT 覆盖）
+
+
+# --- VT_PROXY_PORT: 探测端口可配置（写死端口会让自动探测在他人机器上恒定失败） ---
+
+
+def test_resolve_probe_port_default():
+    assert resolve_probe_port(env={}) == DEFAULT_PROXY_PORT
+
+
+def test_resolve_probe_port_env_override():
+    assert resolve_probe_port(env={"VT_PROXY_PORT": "7890"}) == 7890
+    assert resolve_probe_port(env={"VT_PROXY_PORT": " 7891 "}) == 7891
+
+
+def test_resolve_probe_port_invalid_falls_back():
+    """非法值一律回落默认 —— 一个环境变量写错不该让整条探测链崩掉。"""
+    for bad in ("", "abc", "0", "-1", "70000", "78.9"):
+        assert resolve_probe_port(env={"VT_PROXY_PORT": bad}) == DEFAULT_PROXY_PORT
 
 
 # --- V2: direct connection (None / "") ---
@@ -98,7 +125,54 @@ def test_detect_http_proxy_env_fallback():
 
 def test_detect_probe_success(monkeypatch):
     monkeypatch.setattr("video_translate.proxy._probe", lambda h, p, t: True)
-    assert detect_proxy(env={}) == "http://127.0.0.1:7890"
+    assert detect_proxy(env={}) == f"http://127.0.0.1:{DEFAULT_PROXY_PORT}"
+
+
+def test_detect_probe_uses_configured_port(monkeypatch):
+    """VT_PROXY_PORT 改变探测端口 —— 代理不在默认端口时也能被自动发现。"""
+    seen: list[int] = []
+
+    def _probe(h, p, t):
+        seen.append(p)
+        return True
+
+    monkeypatch.setattr("video_translate.proxy._probe", _probe)
+    assert detect_proxy(env={"VT_PROXY_PORT": "7890"}) == "http://127.0.0.1:7890"
+    assert seen == [7890]
+
+
+# --- probe_http_endpoint: 「端到端通路」判定的唯一实现 ---
+
+
+class _OkResp:
+    status = 200
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_probe_http_endpoint_never_raises(monkeypatch):
+    """探测失败只返回 False（DNS / 连接 / TLS / 超时一律如此），绝不抛。"""
+    import urllib.request
+
+    def boom(*a, **k):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(urllib.request, "urlopen", boom)
+    assert probe_http_endpoint("https://x.invalid/", None, timeout=0.01) is False
+
+
+def test_probe_http_endpoint_ok_and_restores_proxy_env(monkeypatch):
+    """成功时返回 True，且**原样恢复**代理环境（探测不得污染进程状态）。"""
+    import urllib.request
+
+    os.environ["http_proxy"] = "http://before:1"
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=0: _OkResp())
+    assert probe_http_endpoint("https://x.invalid/", "http://during:2") is True
+    assert os.environ["http_proxy"] == "http://before:1"
 
 
 def test_detect_probe_failure_returns_none(monkeypatch):

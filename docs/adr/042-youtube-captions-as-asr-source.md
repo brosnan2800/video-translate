@@ -1,9 +1,9 @@
 # ADR-042 — YouTube 字幕轨作为 ASR 来源（独立通道）
 
-- **状态**：接受（待实现）
+- **状态**：接受（**已实现** —— 见 [Spec 29](../specs/29-interface-asr-captions.md)）
 - **日期**：2026-09-17
 - **关联**：[ADR-038](038-asr-layer-extraction.md)（ASR 层抽离：本项是「**第二个 Provider**」的具体化）、[ADR-012](012-acoustic-timestamp-truth.md)（声学真值 / 三 lane）、[ADR-035](035-pipeline-data-contract.md)（数据契约总线）、[ADR-003](003-http-proxy-only.md)（仅 HTTP 代理）、Spec 02（transcribe 行为）、Spec 18（verify）、[**Spec 29**](../specs/29-interface-asr-captions.md)（实现契约）、[`RESEARCH-voice-pro.md`](../RESEARCH-voice-pro.md)（P3 · yt-dlp）
-- **落地**：（待实现 —— 实现契约见 [Spec 29](../specs/29-interface-asr-captions.md)）
+- **落地**：`src/video_translate/ytcaptions.py`（`YtCaptionProvider` + 句子化纯函数 + 通路硬闸 + 缓存）、`cli.py`（`cmd_captions` 子命令 + `asr_source` 标记 + verify 的 `acoustic-unavailable` 分支）、`proxy.py`（`VT_PROXY_PORT` + 通用端点探测）、`artifacts.py`（`asr_source` / `captions_cache` 条目）、`verify.py`（`ACOUSTIC_UNAVAILABLE`）；测试 `tests/test_ytcaptions.py` / `tests/test_captions_cli.py` / `tests/test_proxy.py` / `tests/test_verify_gate.py`
 
 ## 背景
 
@@ -182,7 +182,7 @@ ADR-038 把 ① 层做成可插拔，**切点就是 `segments_en.json` 这一个
 
 非官方通道的三种典型死法（实测观察）：上游接口变动（端点失效）、IP 被标记（云出口）、PO token 校验（裸请求返回空）。`baoyu-youtube-transcript` 的处置是一条三级链（换 client identity → `yt-dlp` → 浏览器 Cookie）。本 ADR **只取其中零额外依赖的一级**：
 
-- **L1（做）换 client identity 重试一次**：`youtube-transcript-api` 内置多套 client 配置（web / android / ios…），反爬常只命中某一套。零新依赖、成本极低，值得做 ✅
+- **~~L1 换 client identity 重试~~（实现时核实后否决）**：原设想是「库内置 web/android/ios 多套 client，反爬常只命中某一套」——**核实发现不成立**：该库只有**一套硬编码 client**（`_settings.INNERTUBE_CONTEXT` = `ANDROID` / v20.10.38），不存在可轮换的身份。既然换不了身份，同 client 盲目重试对 IP 封禁型失败也无意义（反爬针对**出口 IP**，不是 client 标识）。故**不做重试**：失败即按下方分类给确定性指引。
 - **L2（不做）`yt-dlp` 兜底**：需额外依赖（D5 已决定不引入），且它仍是同一条自爬路线的另一个入口，并不解决根因。
 - **L3（不做）浏览器 Cookie 注入**：读取本地浏览器凭证，隐私/合规代价过高，与「本地 CLI 无状态」的定位冲突。
 - **更不引入 Bun/Node 运行时去复用那个 skill 的脚本** —— 本项目是纯 Python 工具链，为一条可选通道背一个 JS 运行时得不偿失。

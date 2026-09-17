@@ -28,6 +28,11 @@ TAIL_STRIPPED = "tail-stripped"
 MIN_DUR_STRIPPED = "min-dur-stripped"
 UNCOVERED_AUDIO = "uncovered-audio"
 ADJACENT_OVERLAP = "adjacent-overlap"    # ADR-031 D4: 相邻段声学窗口重叠
+# ADR-042 D7：本来源无音频参照 ⇒ 声学层中**依赖音频**的子检查未执行。
+# 它是一条**红灯式的状态**（计入 flag），不是"跳过"——「无法检查」绝不能读作
+# 「检查通过」（ADR-030 静默点 7 / ADR-041 的同一原则）。几何子检查
+# （adjacent-overlap）不依赖音频，照常执行。
+ACOUSTIC_UNAVAILABLE = "acoustic-unavailable"
 
 # ADR-031 D7: BGM/语音能量分级阈值（kathy_meta_vlog 人声轨实测标定，
 # 与轮 2 人工仲裁同标准）。确认语音窗人声轨 mean ≈ -15..-20dB / max ≈ -2..-6dB；

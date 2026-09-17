@@ -127,6 +127,63 @@ def test_content_lane_linebreak_report_only_with_no_strict(art, no_probe, monkey
     assert _run(art, ["--no-strict"]) == cli.EXIT_OK
 
 
+# ------------- 无音频来源的声学 lane（ADR-042 D7） -------------
+
+
+def _run_no_video(art: Path, extra: list[str]) -> int:
+    """与 `_run` 相同，但**不传** `--video`（接口型 ASR 的真实调用形态）。"""
+    ns = cli.build_parser().parse_args(
+        ["verify", "--segments", str(art / "demo.segments_en.json"),
+         "--zh", str(art / "demo.zh_segments.json"), *extra])
+    return cli.cmd_verify(ns)
+
+
+def _mark_interface_asr(art: Path) -> None:
+    """写 ADR-042 D6 的来源标记：接口型 ASR（无音频参照）。"""
+    (art / "demo.asr_source.json").write_text(
+        json.dumps({"kind": "youtube-captions", "track": "manual", "lang": "en",
+                    "video_id": "dQw4w9WgXcQ", "has_audio_reference": False}),
+        encoding="utf-8")
+
+
+def test_missing_video_still_refuses_when_audio_reference_exists(art):
+    """**旧行为逐字节不变**：没给 --video 且产物有音频参照（或压根没有来源标记，
+    即本轮之前的旧产物）→ 仍然拒绝运行（exit 2）。"""
+    assert _run_no_video(art, []) == cli.EXIT_ARGS
+
+
+def test_interface_asr_yields_acoustic_unavailable_gate(art, capsys):
+    """接口型 ASR → **不拒绝**，而是产 `acoustic-unavailable`；strict（默认）下 exit 8。
+
+    「无法验证」必须是一条**红灯**：否则「内容/表现都过、声学压根没验」会被读作
+    完整通过 —— 那正是 ADR-041 反对的「装作看过它没看的东西」。
+    """
+    _mark_interface_asr(art)
+    assert _run_no_video(art, []) == cli.EXIT_GATE_FAIL
+    assert "acoustic-unavailable" in capsys.readouterr().out
+
+
+def test_interface_asr_acoustic_unavailable_report_only_under_no_strict(art, capsys):
+    """`--no-strict` 是**显式弃权**（与 `--allow-degrade` 同一模式）→ exit 0，
+    但报告里仍明确标出该 issue（不静默）。"""
+    _mark_interface_asr(art)
+    assert _run_no_video(art, ["--no-strict"]) == cli.EXIT_OK
+    assert "acoustic-unavailable" in capsys.readouterr().out
+
+
+def test_interface_asr_still_runs_geometry_checks(art, capsys):
+    """几何子检查（相邻重叠）**不需要音频** → 即便无音频参照也必须照常执行。"""
+    _mark_interface_asr(art)
+    (art / "demo.segments_en.json").write_text(json.dumps([
+        _seg(0, "Hello there.", 0.0, 1.5),
+        _seg(1, "General Kenobi.", 1.0, 2.4),      # 与上一段重叠 0.5s
+    ]), encoding="utf-8")
+    (art / "demo.zh_segments.json").write_text(
+        json.dumps({"0": "你好呀。", "1": "欧比旺·克诺比。"}), encoding="utf-8")
+    _run_no_video(art, ["--no-strict"])
+    assert "adjacent-overlap" in capsys.readouterr().out
+
+
 # --------------------------- missing args -> exit 2 -----------------------
 
 def test_missing_zh_refuses_to_run(art):

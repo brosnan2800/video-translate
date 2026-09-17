@@ -73,11 +73,14 @@ STAGES: tuple[dict[str, Any], ...] = (
     {
         "id": "verify",
         "title": "三 Lane 门禁 (声学/内容/表现/语义)",
-        "requires": ["segments", "zh", "video"],
+        # ADR-042 D7：`video` 不再列为**硬前置** —— 接口型 ASR 方案本就没有本地
+        # 音频，此时 verify 仍应运行（内容 / 表现 lane 与几何子检查都不依赖音频），
+        # 由 `acoustic-unavailable` issue 如实标注「依赖音频的声学检查未执行」。
+        "requires": ["segments", "zh"],
         "caps": ["ffmpeg", "ffprobe"],
         "gate": "zh_covers_segments",
         "produces": "",
-        "cli": "uv run video-translate verify --segments ... --zh ... --video ...",
+        "cli": "uv run video-translate verify --segments ... --zh ... [--video ...]",
         "stop_point": False,
     },
 )

@@ -1,6 +1,6 @@
 # Spec 29 — 接口型 ASR 方案（`captions` 子命令）
 
-- 状态：批准（待实现）
+- 状态：批准（**已实现**）
 - 日期：2026-09-17
 - 关联：[ADR-042](../adr/042-youtube-captions-as-asr-source.md)（决策）、[ADR-038](../adr/038-asr-layer-extraction.md)（ASR 层抽离 / Provider 边界）、[ADR-035](../adr/035-pipeline-data-contract.md)（数据契约总线）、[ADR-003](../adr/003-http-proxy-only.md)（仅 HTTP 代理）、Spec 01（数据 schema）、Spec 02（transcribe 行为 · 对照）、Spec 18（verify 三 lane）、Spec 23（环境入口）
 
@@ -12,6 +12,13 @@
 ## 不变量（load-bearing）
 
 1. **产出同契约**：`<base>.segments_en.json` 的字段与形状与 `transcribe` 产出**完全一致**（Spec 01 / ADR-035 契约表为准）。② 层不得因来源不同而改变读取方式。
+
+### 实现形态（落地时的选择，记录以免被误读）
+
+抓取被实现为 **ADR-038 的第二个 Provider**（`ytcaptions.YtCaptionProvider`，满足 `ASRProvider` 协议），由 **`asr.run_asr` 统一编排**完成后处理 —— 而不是在 `cmd_captions` 里手写一套。
+
+这样做的收益：合并 / 全大写归一化等后处理**与 Whisper 路径共用同一段代码**（`run_asr` 是唯一编排者），两条来源之间不存在"第二套整理逻辑"。补洞 / review / G3 通过 `AsrRequest` 的开关关掉（`audit=False, review=False, g3=False, snap_drift=False`）—— 它们全部建立在音频参照上（D3）。
+
 2. **不静默回退**：无可用字幕轨 → **报错退出**，绝不回退本地转写（ADR-042 D2）。
 3. **不下载音视频**：任何情况下都不得为"补词级/跑对齐"而下载音频（ADR-042 D3/D4）。
 4. **代理仅 HTTP**：沿用 ADR-003；SOCKS 一律拒绝（`setup_http_proxy` 会 pop SOCKS 变量）。
@@ -56,7 +63,7 @@ uv run video-translate captions <url-or-id> [选项]
 | 被限流 / IP 被拒（`RequestBlocked` / `IpBlocked`） | 提示配置 HTTP 代理（`--proxy` / `VT_PROXY`），并说明云 IP 更易被拒 |
 | 反爬拦截（换 client 仍失败） | 说明 L1 已重试，建议过段时间或换出口 IP |
 
-- **L1 降级**：按 ADR-042 D8，先尝试一次换 client identity 重试（库内置多套 client）；仍失败才报错。**不重试第二次**。
+- **不做重试**（ADR-042 D8 实现时已据实修正）：原设想的「换 client identity 重试」**不可实现** —— 核实发现该库只有一套硬编码 client（`_settings.INNERTUBE_CONTEXT` = ANDROID），没有可轮换的 web/ios 身份；且 IP 封禁型失败针对的是**出口 IP**，同 client 重试无意义。失败即按上表分类给指引。
 
 ## 句子化（本 Spec 的核心算法）
 

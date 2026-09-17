@@ -384,7 +384,7 @@ T10 落地后：声学数据（silence_intervals/duration）读 state 契约不�
 > 新增**第二套 ASR 方案**——通过接口取平台现成的 ASR 结果。T11 把 ① 层做成可插拔，本项
 > 正是往那个切点里接**第二个上游**（不是 T11 的子项，也不是「T12 顺延」）。
 >
-> **完整设计**：[ADR-042](docs/adr/042-youtube-captions-as-asr-source.md)（**接受 · 待实现**）。
+> **完整设计**：[ADR-042](docs/adr/042-youtube-captions-as-asr-source.md)（**接受 · 已实现**）+ [Spec 29](docs/specs/29-interface-asr-captions.md)。
 
 **核心设计**：
 1. **两套并列方案**（非「主 + 辅」）：

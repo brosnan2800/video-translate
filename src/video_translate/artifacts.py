@@ -171,6 +171,21 @@ ARTIFACTS: tuple[Artifact, ...] = (
         "consumed_by": ("translate", "generate"),
         "recompute": False,
     },
+    # ADR-042 D6：ASR 来源标记。两种来源（本地 Whisper / 接口型取字幕）产出的
+    # `segments_en.json` 在字节上无法区分 —— 而它们的**能力集不同**（后者无
+    # words[] 与置信度、无音频参照）。下游（尤其 verify）必须能读到这个差异，
+    # 否则「无法验证」会被误读成「验证通过」。`produced_by` 记 transcribe：接口型
+    # 取字幕是转写阶段的**等价入口**（ADR-042 D1），不是新阶段。
+    {
+        "id": "asr_source",
+        "file": "{base}.asr_source.json",
+        "fields": ("kind", "track", "lang", "video_id", "has_audio_reference"),
+        "required": (),
+        "carry": (),
+        "produced_by": "transcribe",
+        "consumed_by": ("transcribe", "verify"),
+        "recompute": False,
+    },
     {
         "id": "chunk_cache",
         "file": "{base}.{fp}.chunk_{ci}.json",
@@ -180,6 +195,19 @@ ARTIFACTS: tuple[Artifact, ...] = (
         "produced_by": "transcribe",
         "consumed_by": ("transcribe",),
         "recompute": True,  # 断点缓存可重建，但删除即重转写（AGENTS.md 红线）
+    },
+    # ADR-042 D9：接口型 ASR 的原始字幕缓存。取字幕是**随时可能被拒**的网络操作
+    # （D8），一旦成功就该复用 —— 反复重抓只会加速撞限流。同视频同语言命中即
+    # **零网络**（并因此跳过通路预检）。
+    {
+        "id": "captions_cache",
+        "file": "{base}.captions_cache.json",
+        "fields": ("kind", "video_id", "lang", "track", "snippets"),
+        "required": (),
+        "carry": (),
+        "produced_by": "transcribe",
+        "consumed_by": ("transcribe",),
+        "recompute": True,  # 可重建，但重建要再打一次网络
     },
     {
         "id": "align_cache",

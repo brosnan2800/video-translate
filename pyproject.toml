@@ -24,6 +24,10 @@ dependencies = [
     # still selected per-platform via [tool.uv.sources] below.
     "torch~=2.8.0",
     "torchaudio~=2.8.0",
+    # 2B 接口型 ASR（ADR-042 / Spec 29）：取 YouTube 现成字幕当 ASR 结果。
+    # 纯 Python、无 API Key、无浏览器；代理经 GenericProxyConfig **显式注入**
+    # （该库用构造参数配置代理，不保证读 HTTP_PROXY 环境变量）。
+    "youtube-transcript-api==1.2.4",
 ]
 
 [project.optional-dependencies]

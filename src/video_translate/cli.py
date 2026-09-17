@@ -36,10 +36,10 @@ from .audio_profile import analyze_audio, probe_volume_window
 from .ffmpeg_utils import probe_duration
 from .toolchain import init_toolchain, resolve_command_entry
 from .verify import (
-    ADJACENT_OVERLAP, UNCOVERED_AUDIO, classify_uncovered_windows,
-    find_adjacent_overlaps, find_embedded_linebreaks, find_uncovered_speech,
-    find_untranslated_latin_words, is_recovered_segment, verify_acoustic,
-    verify_presentation,
+    ACOUSTIC_UNAVAILABLE, ADJACENT_OVERLAP, UNCOVERED_AUDIO,
+    classify_uncovered_windows, find_adjacent_overlaps, find_embedded_linebreaks,
+    find_uncovered_speech, find_untranslated_latin_words, is_recovered_segment,
+    verify_acoustic, verify_presentation,
 )
 from .translate import validate_zh
 from .verify_align import report as align_report
@@ -677,6 +677,15 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
             except Exception:  # noqa: BLE001 - state 是增强，永不阻断
                 pass
         _record_transcribe_stage(outcome.segments_path, video=input_path)
+        # ADR-042 D6：标记来源 = 本地转写（词级 / 置信度齐备，有音频参照）。
+        # 与 captions 的标记**对称** —— 下游据此判断声学 lane 能否执行。
+        _write_asr_source(
+            os.path.dirname(os.path.dirname(os.path.abspath(outcome.segments_path))),
+            _derive_base(outcome.segments_path),
+            {"kind": "faster-whisper", "track": "n/a",
+             "lang": outcome.detected_lang or "", "video_id": "",
+             "has_audio_reference": True},
+        )
         return EXIT_OK
     except GateFail:
         # 裁决一：显式意图硬停（如 --separate-vocals 缺 demucs）必须冒泡到
@@ -695,6 +704,129 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
             return EXIT_MISSING_DEP
         print(f"[error] transcription failed: {e}", file=sys.stderr)
         return EXIT_RUNTIME
+
+
+def _write_asr_source(outdir: str, base: str, payload: dict) -> None:
+    """ADR-042 D6：写 ASR 来源标记（best-effort —— 它是可观测性，不是闸门）。
+
+    两种来源产出的 ``segments_en.json`` 在字节上无法区分，而能力集不同（接口型
+    无 words[] / 无置信度 / 无音频参照）。没有这个标记，``verify`` 就无法判断声学
+    lane 该跑还是该如实标红，人工也无从判断"断点粗糙是正常还是回归"。
+    """
+    try:
+        from .artifacts import artifact_path
+        save_json(artifact_path("asr_source", outdir, base), payload, indent=0)
+    except Exception:  # noqa: BLE001 - 来源标记是增强，永不阻断
+        pass
+
+
+def _has_audio_reference(outdir: str, base: str) -> bool:
+    """本产物是否有音频参照（ADR-042 D6）。
+
+    **缺 `asr_source.json` 时返回 True** —— 那是本轮之前产生的旧产物，全部来自
+    本地 ``transcribe``（本来就有音频）。据此让 ``verify`` 的旧行为**逐字节不变**：
+    只有**显式标记为无音频来源**（接口型 ASR）时，才走 `acoustic-unavailable` 那条路。
+    """
+    try:
+        from .artifacts import artifact_path
+        data = load_json(artifact_path("asr_source", outdir, base)) or {}
+        return bool(data.get("has_audio_reference", True))
+    except Exception:  # noqa: BLE001 - 读不到就按"有音频"（保守，维持旧行为）
+        return True
+
+
+def cmd_captions(args: argparse.Namespace) -> int:
+    """接口型 ASR（ADR-042 / Spec 29）：取平台现成字幕当 ASR 结果。
+
+    它是 ``transcribe`` 的**等价入口** —— 产出同契约的 ``segments_en.json``，
+    跑完直接接 P2（translate）。区别只在"原始段从哪来"：这里从 URL **取**，
+    不跑本地 Whisper。
+
+    通路不通 → :func:`ytcaptions.preflight_network` 抛 ``GateFail`` → **exit 8**：
+    这是门的语义（核心前提不成立就停），不是可以静默降级为本地转写的情形
+    （ADR-042 D2 明令禁止）。
+    """
+    from .asr import AsrRequest, TranscriberConfig, run_asr
+    from .ytcaptions import (
+        CaptionUnavailable, YtCaptionProvider, list_transcripts, load_cache,
+        parse_video_id, preflight_network, save_cache,
+    )
+
+    try:
+        video_id = parse_video_id(args.url)
+    except ValueError as e:
+        print(f"[captions] {e}", file=sys.stderr)
+        return EXIT_ARGS
+
+    outdir = getattr(args, "outdir", None) or "videos"
+    base = getattr(args, "base", None) or video_id
+    langs = tuple(s.strip() for s in (getattr(args, "lang", None) or "en").split(",")
+                  if s.strip())
+    if not langs:
+        print("[captions] --lang 不能为空", file=sys.stderr)
+        return EXIT_ARGS
+
+    # 代理：与 translate 同口径（SOCKS 拒绝 → exit 4）
+    try:
+        proxy = _translate_proxy(args)
+    except ValueError:
+        return EXIT_PROXY
+
+    # --list：只列轨道，不落盘、不产出
+    if getattr(args, "list", False):
+        preflight_network(proxy)
+        rows = list_transcripts(video_id, proxy=proxy)
+        if not rows:
+            print(f"[captions] {video_id}: no transcript tracks")
+            return EXIT_OK
+        print(f"[captions] {video_id} — {len(rows)} track(s):")
+        for r in rows:
+            print(f"  {str(r.get('track')):6} {str(r.get('lang')):8} "
+                  f"{r.get('language')}")
+        return EXIT_OK
+
+    os.makedirs(workdir(outdir, base), exist_ok=True)
+    cache_path = artifact_path("captions_cache", outdir, base)
+    cached = None if getattr(args, "refresh", False) else load_cache(
+        cache_path, video_id, list(langs))
+
+    provider = YtCaptionProvider(
+        proxy=proxy, langs=langs,
+        allow_auto=not getattr(args, "no_auto", False),
+        cached=cached,
+    )
+    request = AsrRequest(
+        input_path=video_id, outdir=outdir, base=base,
+        config=TranscriberConfig(lang=langs[0]),
+        merge=True,
+        # 无音频 ⇒ 补洞 / review / G3 / 漂移吸附全部不适用（它们都建立在音频参照上）
+        audit=False, review=False, g3=False, snap_drift=False,
+    )
+    try:
+        outcome = run_asr(request, provider=provider,
+                          silence_intervals=[],   # 显式空 = 不重算音频画像
+                          progress=print)
+    except GateFail:
+        raise                                  # 通路硬闸 → exit 8，必须冒泡
+    except CaptionUnavailable as e:
+        print(f"[captions] {e.message}", file=sys.stderr)
+        if e.guidance:
+            print(f"          {e.guidance}", file=sys.stderr)
+        return EXIT_RUNTIME
+
+    if cached is None and provider.fetched is not None:
+        save_cache(cache_path, video_id, provider.fetched)
+
+    _write_asr_source(outdir, base, {
+        "kind": "youtube-captions",
+        "track": provider.track,
+        "lang": langs[0],
+        "video_id": video_id,
+        "has_audio_reference": False,
+    })
+    _record_transcribe_stage(outcome.segments_path)
+    _print_pipeline_next(outdir, base)
+    return EXIT_OK
 
 
 def cmd_translate(args: argparse.Namespace) -> int:
@@ -1787,17 +1919,37 @@ def cmd_verify(args: argparse.Namespace) -> int:
     semantic = not getattr(args, "no_semantic", False)  # ADR-016/V14: ON by default
     semantic_out = getattr(args, "semantic_out", None)
 
-    if not zh_path or not video:
-        missing = "--zh" if not zh_path else "--video"
-        print(f"[verify] refusing to run: {missing} is required — verify must "
-              "execute every lane (acoustic/content/presentation); a partial "
-              "self-check would read as a pass.", file=sys.stderr)
+    outdir = os.path.dirname(os.path.dirname(os.path.abspath(segments_path))) or "."
+    base = _derive_base(segments_path)
+
+    if not zh_path:
+        print("[verify] refusing to run: --zh is required — verify must execute "
+              "every lane (acoustic/content/presentation); a partial self-check "
+              "would read as a pass.", file=sys.stderr)
         return EXIT_ARGS
+
+    # ADR-042 D7：`--video` 缺失**不再一律拒绝**。接口型 ASR（captions）本就没有
+    # 本地媒体，此时：
+    #   - 依赖音频参照的声学子检查 → 产 `acoustic-unavailable` issue（**计入 flag**，
+    #     即 strict（默认）下仍 exit 8；要放行须 --no-strict 显式弃权）；
+    #   - 几何子检查（相邻重叠）照常执行 —— 它不需要音频。
+    # 只有「本产物**确有**音频参照却没给 --video」才维持旧的拒绝行为。
+    # 红线：绝不静默放行 ——「无法检查」必须是一条红灯，而不是绿灯。
+    acoustic_unavailable: str | None = None
+    if not video:
+        if _has_audio_reference(outdir, base):
+            print("[verify] refusing to run: --video is required — verify must "
+                  "execute every lane (acoustic/content/presentation); a partial "
+                  "self-check would read as a pass.", file=sys.stderr)
+            return EXIT_ARGS
+        acoustic_unavailable = (
+            "no audio reference (interface-based ASR artifact — no local media). "
+            "Acoustic sub-checks that need silence intervals (in-silence / "
+            "cross-silence / first-cue-early / uncovered-audio) were NOT executed. "
+            "Geometry checks (adjacent-overlap) still ran.")
 
     # ---- ADR-031 D8: retry counting + circuit-breaker -------------------------
     from .state import MAX_VERIFY_ATTEMPTS, increment_verify_attempts
-    outdir = os.path.dirname(os.path.dirname(os.path.abspath(segments_path))) or "."
-    base = _derive_base(segments_path)
     attempts = increment_verify_attempts(outdir, base)
     print(f"[verify] attempt {attempts}/{MAX_VERIFY_ATTEMPTS}", flush=True)
     if attempts > MAX_VERIFY_ATTEMPTS:
@@ -1918,11 +2070,14 @@ def cmd_verify(args: argparse.Namespace) -> int:
     # ---- report -----------------------------------------------------------
     any_flag = (bool(acoustic_issues) or bool(uncovered)
                 or prof_error is not None or uncovered_error is not None
+                or acoustic_unavailable is not None
                 or content_flags > 0 or bool(presentation_issues))
     print(f"\n=== verify report ===")
     print(f"  acoustic : {len(acoustic_issues)} issue(s)"
           + ("" if (prof_error is None and uncovered_error is None)
              else " (probe FAILED — lane is RED)"))
+    if acoustic_unavailable:
+        print(f"    - [{ACOUSTIC_UNAVAILABLE}] {acoustic_unavailable}")
     for it in acoustic_issues:
         st, en = it.get("start"), it.get("end")
         span = (f" {st:.2f}->{en:.2f}s"
@@ -2114,6 +2269,28 @@ def build_parser() -> argparse.ArgumentParser:
                         "of hard-stopping with exit 8. The reason is recorded in "
                         "<base>.vt_state.json.")
     t.set_defaults(func=cmd_transcribe)
+
+    cap = sub.add_parser(
+        "captions",
+        help="Interface-based ASR: fetch an existing platform transcript "
+             "(ADR-042) and emit segments_en.json (same contract as transcribe)")
+    cap.add_argument("url", help="YouTube URL or 11-char video id")
+    cap.add_argument("--outdir", default=None,
+                     help="artifact directory (default: videos)")
+    cap.add_argument("--base", default=None,
+                     help="artifact basename (default: the video id)")
+    cap.add_argument("--lang", default="en",
+                     help="transcript language(s), comma-separated by priority "
+                          "(default: en)")
+    cap.add_argument("--list", action="store_true",
+                     help="only list available tracks (no fetch, no artifacts)")
+    cap.add_argument("--no-auto", action="store_true",
+                     help="exclude auto-generated tracks (manually-created CC only)")
+    cap.add_argument("--refresh", action="store_true",
+                     help="ignore the local transcript cache and re-fetch")
+    cap.add_argument("--proxy", default=None)
+    cap.add_argument("--no-proxy", action="store_true")
+    cap.set_defaults(func=cmd_captions)
 
     tr = sub.add_parser("translate", help="Translate segments_en.json -> zh_segments.json")
     tr.add_argument("--segments", required=True)
