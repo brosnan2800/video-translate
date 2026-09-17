@@ -2,8 +2,8 @@
 
 - **状态**：接受（待实现）
 - **日期**：2026-09-17
-- **关联**：[ADR-038](038-asr-layer-extraction.md)（ASR 层抽离：本项是「**第二个 Provider**」的具体化）、[ADR-012](012-acoustic-timestamp-truth.md)（声学真值 / 三 lane）、[ADR-035](035-pipeline-data-contract.md)（数据契约总线）、Spec 02（transcribe 行为）、Spec 18（verify）、[`RESEARCH-voice-pro.md`](../RESEARCH-voice-pro.md)（P3 · yt-dlp）
-- **落地**：（待实现）
+- **关联**：[ADR-038](038-asr-layer-extraction.md)（ASR 层抽离：本项是「**第二个 Provider**」的具体化）、[ADR-012](012-acoustic-timestamp-truth.md)（声学真值 / 三 lane）、[ADR-035](035-pipeline-data-contract.md)（数据契约总线）、[ADR-003](003-http-proxy-only.md)（仅 HTTP 代理）、Spec 02（transcribe 行为）、Spec 18（verify）、[**Spec 29**](../specs/29-interface-asr-captions.md)（实现契约）、[`RESEARCH-voice-pro.md`](../RESEARCH-voice-pro.md)（P3 · yt-dlp）
+- **落地**：（待实现 —— 实现契约见 [Spec 29](../specs/29-interface-asr-captions.md)）
 
 ## 背景
 

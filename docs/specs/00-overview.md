@@ -75,6 +75,7 @@ could not translate, for agent backfill).
 - Command hygiene: `25-cli-path-hygiene.md`（中文路径等参数边界校验，入口 exit 2）
 - Presentation: `26-display-merge.md`（显示层短块合并，不改内容层）
 - ASR layer extraction (T11): `27-asr-provider.md`（接口契约 · 第一步）· `28-asr-facade-and-readiness.md`（① 层门面 + Provider 自报就绪 · 第二步）
+- Interface-based ASR (plan §2B): `29-interface-asr-captions.md`（`captions` 取平台现成字幕 → 与转写同契约产出，直接接 P2）
 
 > **完整索引见 [`docs/index.md`](../index.md)**。Spec 05 已删除（说明见 `11-cli-v2.md`）。
 > Spec 00–21 为行为契约、随代码演进，不设 Accepted/Superseded 状态；Spec 22 起因对应

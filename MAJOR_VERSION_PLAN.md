@@ -378,6 +378,46 @@ T10 落地后：声学数据（silence_intervals/duration）读 state 契约不�
 
 ---
 
+## 2B. 接口型 ASR 方案（另一条线，与 Whisper 主线并列）
+
+> **为什么单列**：上面 T 系列的任务基本都围绕 **Whisper 主线**。本项**不改 Whisper**，而是
+> 新增**第二套 ASR 方案**——通过接口取平台现成的 ASR 结果。T11 把 ① 层做成可插拔，本项
+> 正是往那个切点里接**第二个上游**（不是 T11 的子项，也不是「T12 顺延」）。
+>
+> **完整设计**：[ADR-042](docs/adr/042-youtube-captions-as-asr-source.md)（**接受 · 待实现**）。
+
+**核心设计**：
+1. **两套并列方案**（非「主 + 辅」）：
+
+   | | Whisper 方案（本地） | 接口型方案（远程取） |
+   |---|---|---|
+   | 词级 `words[]` | ✅ | ❌ |
+   | 置信度字段 | ✅ | ❌ |
+   | 成本 | GPU 算力（分钟级） | 近乎零 |
+   | 入口 | `run <video>` | `captions <url>` |
+
+2. **契约切点**：产出 `<base>.segments_en.json`，与转写产物**同契约** ⇒ ② 层
+   （`translate` / `generate` / `verify`）**零改动**，`captions` 跑完**直接接 P2**。
+3. **入口独立**：新增 `captions <url>` 子命令 —— 不并入 `run`，因为输入是 URL 而非本地文件，
+   且「取现成字幕」与「跑转写」是两个不同的用户意图（并入会让「我明明没让它转写」变成隐性长任务）。
+4. **代理**：复用现有 `detect_proxy` / `setup_http_proxy`（`--proxy` / `--no-proxy` 已存在），
+   显式传给库的 `GenericProxyConfig`（该库用参数配置代理，**不保证读环境变量**）；沿用
+   ADR-003「仅 HTTP，禁 SOCKS」。
+5. **verify 的处置**：无音频 ⇒ 依赖音频的子检查产出 `acoustic-unavailable` issue
+   （计入 flag，strict 默认下 exit 8；`--no-strict` 才显式弃权）；**几何子检查
+   （相邻重叠）照常执行**。不引入新退出码、不引入「partial pass」新结论。
+
+**落地文档**：ADR-042 + Spec 29（待写）。
+
+**验收标准**：
+- `captions <url>` 产出与转写同契约的 `segments_en.json`，`pipeline` 位置解析**直接进入 translate**；
+- 无字幕 → **报错**（绝不静默回退本地转写）；
+- 同视频重复调用**零网络**（本地缓存）；
+- `verify` 在无音频来源下给出明确的 `acoustic-unavailable`，**而非静默通过**；
+- 与 `RESEARCH-voice-pro` **P3**（`fetch` 下载片源 → 本地转写）**互不替代、可串用**。
+
+---
+
 ## 3. 依赖与环境隔离矩阵
 
 | 特性模块 | 依赖项 | 依赖分组 (pyproject.toml) | 运行环境要求 |
