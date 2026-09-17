@@ -120,7 +120,7 @@ docs/
 |---|---|---|
 | [037](adr/037-artifact-directory-layout.md) | 产物目录布局（`<outdir>/<base>/`） | 接受 |
 | [038](adr/038-asr-layer-extraction.md) | ASR 层抽离：可插拔 ASRProvider（含 P0 拆解 / Provider 自报就绪） | 接受（两步已落地） |
-| [042](adr/042-youtube-captions-as-asr-source.md) | 接口型 ASR 方案：YouTube 字幕轨作为第二 ASR 来源 | **草案（待评审）** |
+| [042](adr/042-youtube-captions-as-asr-source.md) | 接口型 ASR 方案：YouTube 字幕轨作为第二 ASR 来源 | 接受（待实现） |
 
 ### 表现层与文本契约
 | ADR | 主题 | 状态 |
