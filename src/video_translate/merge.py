@@ -43,6 +43,8 @@ DEFAULT_DRIFT_GAP = 2.0    # seconds
 DEFAULT_DRIFT_MAX_RUN = 1  # words
 DEFAULT_DRIFT_MAX_DUR = 1.0  # seconds, the drifted run's own span
 _SENT_END = re.compile(r"[.!?]\s*$")
+# 无词段（接口型 ASR，ADR-042）文本级切分的候选断点；与空白一起取窗口内最靠后者。
+_WORDLESS_BREAK_CHARS = ",;:.!?。，；：！？、"
 _TOKEN_RE = re.compile(r"[a-z0-9']+")
 
 
@@ -572,6 +574,59 @@ def snap_drifted_words(
     return out
 
 
+def _split_wordless(
+    seg: dict[str, Any],
+    max_chars: int = DEFAULT_MAX_CHARS,
+) -> list[dict[str, Any]]:
+    """接口型 ASR 的**无词** cue：按文本切分，时间戳按字符数比例分摊。
+
+    词级路径（`_split_by_length`）切在**词边界**、时间戳取词的声学边界；无词时没有
+    词边界可用，只能在窗口内回退到**空白 / 标点 / 硬切**，并把 ``[start, end]`` 按
+    **字符数比例**分摊 —— 这些时间戳本就不是声学真值（ADR-042 D3 已接受），
+    分摊只需保持「单调、连续、与文本长度成比例」。
+
+    必要性：接口型 ASR 的段没有 ``words[]``（ADR-042），原实现在
+    :func:`split_long_cues` 里直接原样放行，于是 >``max_chars``（默认 42，剪映单行
+    上限）的长句会原样进入最终字幕。Whisper 路径不受影响：两条转写路径都写死
+    ``word_timestamps=True``（transcribe.py:378/613），不存在无词段。
+    """
+    text = (seg.get("text") or "").strip()
+    if max_chars <= 0 or len(text) <= max_chars:
+        return [seg]
+    start = float(seg.get("start") or 0.0)
+    end = float(seg.get("end") or 0.0)
+    span = max(0.0, end - start)
+    n = len(text)
+
+    # 切点：窗口内取空白与标点中**最靠后**的一个（不劈开单词，且尽量吃满行宽）。
+    # 窗口长度取 max_chars，使 cut = cur + rel + 1 <= cur + max_chars —— 标点断点
+    # 也绝不会产出超过 max_chars 的块。
+    cuts: list[int] = []
+    cur = 0
+    while n - cur > max_chars:
+        window = text[cur:cur + max_chars]
+        rel = max(window.rfind(" "),
+                  max(window.rfind(p) for p in _WORDLESS_BREAK_CHARS))
+        cut = cur + rel + 1 if rel > 0 else cur + max_chars
+        cuts.append(cut)
+        cur = cut
+    cuts.append(n)
+
+    out: list[dict[str, Any]] = []
+    prev = 0
+    for cut in cuts:
+        chunk = text[prev:cut].strip()
+        if chunk:
+            s = start + span * (prev / n)
+            e = start + span * (cut / n)
+            if e <= s:
+                e = s + 0.01          # start < end 必须成立
+            out.append({"start": round(s, 2), "end": round(e, 2),
+                        "text": chunk})
+        prev = cut
+    return out or [seg]
+
+
 def split_long_cues(
     segs: list[dict[str, Any]],
     *,
@@ -579,12 +634,17 @@ def split_long_cues(
     max_gap: float = DEFAULT_SPLIT_GAP,
     enabled: bool = True,
 ) -> list[dict[str, Any]]:
-    """V3: after merge, split over-long / silence-spanning cues at word level.
+    """V3: after merge, split over-long / silence-spanning cues.
 
     Order (Spec 13 invariant: merge first, then split — irreversible):
       1. _split_by_gap  — break at real intra-segment silences (issue #001).
       2. _split_by_length — break over-long groups to <= max_chars (剪映 limit).
-    Sub-cue timestamps are word boundaries, never recomputed.
+
+    两条切分路径：
+      - **词级**（Whisper，有 ``words[]``）：切点为词边界，子 cue 时间戳取词的真实
+        边界，**不重算**（Spec 13 原语义）。
+      - **文本级**（接口型 ASR，无 ``words[]``，ADR-042）：见 :func:`_split_wordless`
+        —— 切点为空白/标点，时间戳按字符数比例分摊（本就不是声学真值）。
     """
     if not enabled:
         return segs
@@ -592,7 +652,8 @@ def split_long_cues(
     for s in segs:
         words = s.get("words")
         if not words or len(words) < 2:
-            out.append(s)
+            # 无词段：词级切分无从下手，退到文本级切分（否则长句原样进最终字幕）
+            out.extend(_split_wordless(s, max_chars))
             continue
         # 1) gap split ALWAYS runs — real scene-break silence must survive into
         #    the timeline even for short cues (issue #001). It is NOT length-gated:

@@ -328,10 +328,15 @@ wrong. v4 reused v3's mis-aligned translations via `(start,text)` key → inheri
 
 - 实测结果（24s Shorts，auto 轨）：18 条原始片段 → 14 段句子化 → 合并后 13 条 cue；
   零微段、零重叠，时间戳与真实换行点对齐（`2.56` / `3.36` 等）。
-- **已知遗留（非本层缺陷）**：`merge.split_long_cues` 是**词级**切分器，接口型 ASR 的段
-  没有 `words[]` 故切不动；而合并又会把本层的**句内**兜底切合回去
-  （`respect_sentence_end`），于是偶有 >42 字符的长 cue 进入最终字幕。属共享合并层的
-  能力缺口，本次未修。
+- **连带修复（合并层）**：`merge.split_long_cues` 原是**纯词级**切分器 —— 接口型 ASR 的段
+  没有 `words[]`，落进「无词 → 整段不拆」的退化路径（Spec 13 原写「理论上不会发生，
+  因 Spec 12 已保证」，**ADR-042 后该前提失效**）。叠加合并阶段 `respect_sentence_end`
+  又把本层的**句内**兜底切合回去，于是 >42 字符的长 cue 会原样进最终字幕。
+  已补**文本级退化路径** `merge._split_wordless`（切点空白 → 标点 → 硬切，不劈开单词；
+  时间戳按字符数比例分摊），Spec 13 同步更正。实测同一条视频：超限 cue 由 **4 条
+  （最长 95 字符）降到 1 条**；剩下那条是 `merge_short_cues` 为可读性把 0.69s 尾块并回
+  所致 —— **词级路径行为完全相同**（既有取舍，非本次引入）。Whisper 路径零影响：
+  两条转写路径都写死 `word_timestamps=True`，不存在无词段。
 - 文档：Spec 29 步骤 3 改为有效窗口模型（原文为错模型）并说明反面教训；TDD 清单补
   两条回归守卫。
 - 测试：`tests/test_ytcaptions.py`（`_pick_transcript` 四分支 + `effective_windows`

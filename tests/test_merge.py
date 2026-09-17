@@ -185,6 +185,55 @@ def test_no_split_keeps_whole():
     assert split_long_cues([seg], enabled=False) == [seg]
 
 
+# --- 无词段（接口型 ASR，ADR-042）：文本级切分 ---
+#
+# Spec 13 原写「若 segment 无 words（理论上不会发生，因 Spec 12 已保证）→ 整段不拆」。
+# ADR-042 引入接口型 ASR 后该前提失效：captions 来源**本来就没有 words[]**，
+# 于是 >42 字符的长句原样进入最终字幕。以下用例钉住新的文本级退化路径。
+
+
+def test_wordless_long_cue_is_split_by_text():
+    """实测事故：真实 Shorts 视频合并后出现 95 字符 / 5.17s 的单条 cue。"""
+    long = ('" [music] He said, "Well, because it it shows a decided lack of'
+            " faith in providence and in God.")
+    seg = {"start": 10.0, "end": 15.2, "text": long}
+
+    out = split_long_cues([seg])
+
+    assert len(out) == 3                        # 95 字符 / 42 ≈ 3 块
+    assert all(len(s["text"]) <= DEFAULT_MAX_CHARS for s in out)
+    assert all("words" not in s for s in out)   # 无词段不凭空造 words
+    # 文本无损（只在断点处吃掉空白）
+    assert ("".join(s["text"] for s in out).replace(" ", "")
+            == long.replace(" ", ""))
+
+
+def test_wordless_split_never_breaks_inside_a_word():
+    seg = {"start": 0.0, "end": 10.0, "text": "word " * 30}
+    out = split_long_cues([seg])
+    assert len(out) > 1
+    for s in out:
+        assert s["text"] == s["text"].strip()   # 块首尾无残留空白
+        assert len(s["text"]) <= DEFAULT_MAX_CHARS
+
+
+def test_wordless_split_timestamps_are_monotonic_and_span_preserving():
+    """切出的时间戳按字符比例分摊：首尾保住原跨度，且严格非递减、互不重叠。"""
+    seg = {"start": 4.0, "end": 12.0, "text": "word " * 30}
+    out = split_long_cues([seg])
+    assert out[0]["start"] == 4.0
+    assert out[-1]["end"] == 12.0
+    for s in out:
+        assert s["start"] < s["end"]
+    for a, b in zip(out, out[1:]):
+        assert b["start"] >= a["end"]
+
+
+def test_wordless_short_cue_is_untouched():
+    seg = {"start": 0.0, "end": 1.0, "text": "short enough"}
+    assert split_long_cues([seg]) == [seg]
+
+
 def test_split_preserves_real_silence():
     """split_long_cues must not invent gaps; a real silence stays between cues."""
     words = [
