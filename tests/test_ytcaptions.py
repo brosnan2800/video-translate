@@ -9,6 +9,7 @@ import pytest
 
 from video_translate.ytcaptions import (
     accumulate,
+    effective_windows,
     parse_video_id,
     snippets_to_segments,
     split_points,
@@ -142,13 +143,53 @@ def test_segments_have_monotonic_non_overlapping_windows():
 
 
 def test_segment_window_comes_from_first_and_last_snippet():
-    """start 取首片段、end 取末片段（Spec 29 的插值口径）。"""
+    """start 取首片段、end 取**末片段窗口的终点**（Spec 29 的插值口径）。"""
     segs = snippets_to_segments(_ROLLING)
     assert segs[0]["start"] == 0.0
-    # 第一句覆盖到第 4 条片段结束：2.4 + 1.6
-    assert segs[0]["end"] == pytest.approx(4.0)
-    # 第二句从第 5 条片段开始
-    assert segs[1]["start"] == pytest.approx(4.2)
+    # 第一句的窗口止于**第 5 条片段的 start（4.2）** —— 即滚动轨的真实换行时刻，
+    # 而不是第 4 条片段的 start+duration（4.0，那是"显示时长"，会越过换行点）。
+    assert segs[0]["end"] == pytest.approx(4.2)
+    assert segs[1]["start"] == segs[0]["end"]
+    assert segs[1]["end"] == pytest.approx(5.4)
+
+
+# --- 滚动窗口模型（实测事故：duration 是显示时长，会越过下一条的 start） ---
+
+
+def test_effective_windows_stops_at_next_start():
+    """滚动轨：片段 k 的有效窗口止于片段 k+1 的 start。"""
+    assert effective_windows([
+        {"text": "a", "start": 0.0, "duration": 3.0},
+        {"text": "b", "start": 2.0, "duration": 2.0},
+    ]) == [(0.0, 2.0), (2.0, 4.0)]
+
+
+def test_effective_windows_keeps_non_overlapping_data():
+    """非滚动数据不受影响：窗口仍是 ``[start, start+duration]``（留出真实间隙）。"""
+    assert effective_windows([
+        {"text": "a", "start": 0.0, "duration": 1.0},
+        {"text": "b", "start": 4.0, "duration": 1.0},
+    ]) == [(0.0, 1.0), (4.0, 5.0)]
+
+
+def test_two_sentences_in_one_snippet_are_not_squeezed():
+    """实测事故（Shorts 视频）：一条片段含两句 → 第二句被挤成 0.01s 不可见微段。
+
+    成因是「窗口 = start + duration」+「互不重叠」钳制：第一句占满整个显示窗口，
+    第二句无处可放。正解是按**字符长度比例**分摊窗口（ADR-042 D2 的「成比例」）。
+    """
+    segs = snippets_to_segments([
+        {"text": "Just forgive. And don't worry.", "start": 0.0, "duration": 3.0},
+        {"text": "Next.", "start": 2.0, "duration": 2.0},
+    ])
+    assert [s["text"] for s in segs] == [
+        "Just forgive.", "And don't worry.", "Next."]
+    # 关键断言：没有 0.01s 微段
+    assert all(s["end"] - s["start"] > 0.3 for s in segs)
+    # 比例性：第二句（16 字符）分到的窗口应长于第一句（13 字符）
+    d0 = segs[0]["end"] - segs[0]["start"]
+    d1 = segs[1]["end"] - segs[1]["start"]
+    assert d1 > d0
 
 
 def test_text_is_single_line():
@@ -174,3 +215,68 @@ def test_no_punctuation_falls_back_to_soft_limit():
 def test_empty_input_yields_no_segments():
     assert snippets_to_segments([]) == []
     assert snippets_to_segments([{"text": "   ", "start": 0.0, "duration": 1.0}]) == []
+
+
+# --------------------------------------------------------------------------- #
+# _pick_transcript：只有自动轨时必须回退（实测事故）
+# --------------------------------------------------------------------------- #
+
+class _FakeTranscriptList:
+    """模拟 ``TranscriptList`` 的**关键语义**：``find_*`` 无匹配时**抛异常**，
+    不是返回 ``None``（见库的 ``_find_transcript``）。"""
+
+    def __init__(self, manual=(), generated=("en",)):
+        self._manual, self._generated = set(manual), set(generated)
+
+    def _find(self, langs, pool, label):
+        from youtube_transcript_api import NoTranscriptFound
+
+        for lang in langs:
+            if lang in pool:
+                return {"lang": lang, "track": label}
+        raise NoTranscriptFound("vid", list(langs), None)
+
+    def find_manually_created_transcript(self, langs):
+        return self._find(langs, self._manual, "manual")
+
+    def find_generated_transcript(self, langs):
+        return self._find(langs, self._generated, "auto")
+
+
+def test_pick_transcript_falls_back_to_auto_when_no_manual():
+    """实测事故：视频只有自动轨时，人工轨查找抛 ``NoTranscriptFound`` 被误判成
+    「整个视频没有字幕」—— 而 ``--list`` 明明列得出轨道（Shorts 视频即如此）。
+
+    修法：逐类轨道接住异常再试下一类。
+    """
+    from video_translate.ytcaptions import _pick_transcript
+
+    picked = _pick_transcript(_FakeTranscriptList(manual=(), generated=("en",)),
+                              ["en"], allow_auto=True)
+    assert picked == {"lang": "en", "track": "auto"}
+
+
+def test_pick_transcript_prefers_manual_over_auto():
+    from video_translate.ytcaptions import _pick_transcript
+
+    picked = _pick_transcript(_FakeTranscriptList(manual=("en",),
+                                                  generated=("en",)),
+                              ["en"], allow_auto=True)
+    assert picked["track"] == "manual"
+
+
+def test_pick_transcript_no_auto_excludes_generated():
+    """``--no-auto`` 时自动轨被排除 → 明确报「没有可用字幕」（不静默接受自动轨）。"""
+    from video_translate.ytcaptions import CaptionUnavailable, _pick_transcript
+
+    with pytest.raises(CaptionUnavailable):
+        _pick_transcript(_FakeTranscriptList(manual=(), generated=("en",)),
+                         ["en"], allow_auto=False)
+
+
+def test_pick_transcript_language_priority():
+    from video_translate.ytcaptions import _pick_transcript
+
+    picked = _pick_transcript(_FakeTranscriptList(manual=("ja", "en")),
+                              ["en", "ja"], allow_auto=True)
+    assert picked["lang"] == "en"

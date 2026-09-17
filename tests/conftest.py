@@ -57,6 +57,24 @@ def _read_bytes(path: str) -> bytes:
         return f.read()
 
 
+def pytest_configure(config) -> None:
+    """ADR-029 / Spec 23 §2.1: 测试入口必须在项目 ``.venv`` 内。
+
+    ``uv run pytest`` 只有在 pytest **已装进 .venv** 时才用项目环境；否则它
+    **静默回退 PATH**（本机实测命中 ``F:\\Python311\\Scripts\\pytest.exe``）。
+    而 plain ``uv sync`` 会剪掉 dev extra —— 于是「加了依赖顺手 sync 一下」
+    就把测试挪到了另一个解释器上，还照常报绿。
+
+    这里硬失败：宁可停在门口，也不要拿另一个环境的结果当结论。
+    """
+    from video_translate.toolchain import EntryDriftError, require_project_venv
+
+    try:
+        require_project_venv(action="pytest")
+    except EntryDriftError as e:
+        raise pytest.UsageError(str(e)) from e
+
+
 @pytest.fixture(scope="session")
 def read_bytes():
     return _read_bytes

@@ -164,8 +164,60 @@ def split_points(text: str) -> list[int]:
     return out
 
 
-def _snippet_end(sn: dict[str, Any]) -> float:
-    return float(sn.get("start") or 0.0) + float(sn.get("duration") or 0.0)
+def effective_windows(snippets: list[dict[str, Any]]) -> list[tuple[float, float]]:
+    """每条片段的**有效时间窗**（真实换行时刻，而非 ``start + duration``）。
+
+    ⚠️ 实测结论（YouTube 自动轨）：``duration`` 是**显示时长**，会越过下一条片段的
+    ``start`` —— 片段是**滚动窗口**。某真实 Shorts 的前两条：
+
+        0.00 +3.36  "Just forgive. [music] And don't worry."
+        2.56 +2.68  '>> Huh.'      ← 2.56 就把上一条**替换**掉了（而非 3.36）
+
+    若按 ``[start, start+duration]`` 取窗，同一条片段里的**第二句**会被前一句占满
+    窗口、再被"互不重叠"钳制挤成 0.01s 的不可见微段（实测复现）。真实锚点是
+    **下一条的 start**：片段 k 的有效窗口是 ``[s_k, s_{k+1})``，末条用自身 end。
+
+    非滚动数据（``s_{k+1} >= e_k``）保持原窗口，不受影响。
+    """
+    n = len(snippets)
+    out: list[tuple[float, float]] = []
+    for k, sn in enumerate(snippets):
+        start = float(sn.get("start") or 0.0)
+        end = start + float(sn.get("duration") or 0.0)
+        if k + 1 < n:
+            nxt = float(snippets[k + 1].get("start") or 0.0)
+            if start < nxt < end:
+                end = nxt
+        out.append((start, max(end, start)))
+    return out
+
+
+def char_times(owners: list[int],
+               windows: list[tuple[float, float]]) -> list[float]:
+    """每个字符的**起始时刻**；长度 = ``len(owners) + 1``（末尾为整体结束哨兵）。
+
+    片段窗口内按**字符长度比例**线性插值 —— 这正是 ADR-042 D2 要求的「成比例」：
+    一条片段里若含多个句子，它们按各自字符数**分摊**该窗口，而不是「先到先得」
+    （后者会把后续句子挤成 0.01s）。最后强制单调不减，抵御异常数据回跳。
+    """
+    if not owners:
+        return [0.0]
+    span_of: dict[int, list[int]] = {}
+    for i, own in enumerate(owners):
+        if own in span_of:
+            span_of[own][1] = i + 1
+        else:
+            span_of[own] = [i, i + 1]
+    times: list[float] = []
+    for i, own in enumerate(owners):
+        start, end = windows[own]
+        a, b = span_of[own]
+        times.append(start + (end - start) * ((i - a) / max(1, b - a)))
+    times.append(windows[owners[-1]][1])
+    for i in range(1, len(times)):
+        if times[i] < times[i - 1]:
+            times[i] = times[i - 1]
+    return times
 
 
 def snippets_to_segments(
@@ -189,18 +241,18 @@ def snippets_to_segments(
     text, owners = accumulate(snippets)
     if not text.strip():
         return []
+    windows = effective_windows(snippets)
+    times = char_times(owners, windows)
 
     # 切点 → 区间
     bounds = [0] + split_points(text) + [len(text)]
-    spans: list[tuple[int, int]] = []
-    for a, b in zip(bounds, bounds[1:]):
-        if b > a:
-            spans.append((a, b))
+    spans: list[tuple[int, int]] = [(a, b) for a, b in zip(bounds, bounds[1:])
+                                    if b > a]
 
-    # 无标点兜底：把超限的长块按软上限再切
+    # 软上限兜底：把超限的长块再切（理由见 _enforce_fallbacks docstring）
     max_chars_fallback = max(1, int(max_chars * _NO_PUNCT_MAX_CHARS_MULT))
     max_dur_fallback = max(0.1, float(max_dur) * _NO_PUNCT_MAX_DUR_FRAC)
-    spans = _enforce_fallbacks(spans, text, owners, snippets,
+    spans = _enforce_fallbacks(spans, owners, times,
                                max_chars_fallback, max_dur_fallback)
 
     out: list[dict[str, Any]] = []
@@ -209,10 +261,7 @@ def snippets_to_segments(
         chunk = to_single_line(text[a:b]).strip()
         if not chunk:
             continue
-        first = owners[a] if a < len(owners) else 0
-        last = owners[b - 1] if b - 1 < len(owners) else first
-        start = float(snippets[first].get("start") or 0.0)
-        end = _snippet_end(snippets[last])
+        start, end = times[a], times[b]
         if start < prev_end:                 # 互不重叠：重叠归前一段
             start = prev_end
         if end <= start:
@@ -225,35 +274,41 @@ def snippets_to_segments(
 
 def _enforce_fallbacks(
     spans: list[tuple[int, int]],
-    text: str,
     owners: list[int],
-    snippets: list[dict[str, Any]],
+    times: list[float],
     max_chars: int,
     max_dur: float,
 ) -> list[tuple[int, int]]:
-    """把超长块按软上限切开（优先在 snippet 边界切，找不到就按字符硬切）。"""
+    """把超限块切开（优先落在片段边界，找不到就按软上限硬切）。
+
+    两个软上限**同时**生效、取先到者：字符数（``2 × 剪映单行上限`` ≈ 84）与时长
+    （``0.6 × merge 的 cue 上限`` ≈ 4.8s）。
+
+    **为什么本方案必须自带这道切**：接口型 ASR 的段**没有 ``words[]``**，`merge`
+    的词级切分对它无效 —— 若不在这里切，一条 90+ 字符的长句会原样进入最终字幕
+    （超出剪映单行上限）。切点优先选**片段边界**，避免把一条滚动片段从中间劈开。
+    """
     out: list[tuple[int, int]] = []
     for a, b in spans:
         cur = a
-        while b - cur > max_chars:
-            limit = cur + max_chars
-            # 尽量落在 snippet 边界上（不切碎一个滚动片段）
-            cut = -1
-            for i in range(limit, cur, -1):
-                if i < len(owners) and owners[i] != owners[cur]:
+        while True:
+            if b - cur <= max_chars and times[b] - times[cur] <= max_dur:
+                out.append((cur, b))           # 未超限 → 整段保留（勿漏！）
+                break
+            # 硬上限：字符与时长谁先到听谁的
+            limit = min(b - 1, max(cur + 1, cur + max_chars))
+            t_limit = times[cur] + max_dur
+            while limit > cur + 1 and times[limit] > t_limit:
+                limit -= 1
+            cut = limit
+            for i in range(limit, cur, -1):    # 回退到最近的片段边界
+                if owners[i] != owners[cur]:
                     cut = i
                     break
-            if cut <= cur:
-                cut = limit
-            first = owners[cur] if cur < len(owners) else 0
-            last = owners[cut - 1] if cut - 1 < len(owners) else first
-            dur = _snippet_end(snippets[last]) - float(
-                snippets[first].get("start") or 0.0)
-            if b - cur > max_chars or dur > max_dur:
-                out.append((cur, cut))
+            if cut <= cur:                     # 保证前进，避免死循环
+                cut = cur + 1
+            out.append((cur, cut))
             cur = cut
-        if b > cur:
-            out.append((cur, b))
     return out
 
 
@@ -391,16 +446,24 @@ def list_transcripts(video_id: str, *, proxy: str | None = None) -> list[dict[st
 
 
 def _pick_transcript(tl: Any, langs: list[str], *, allow_auto: bool) -> Any:
-    """人工 CC 优先于自动 ASR（ADR-042 D2）；同优先内按 ``langs`` 顺序。"""
-    for lang in langs:
-        picked = tl.find_manually_created_transcript([lang])
-        if picked is not None:
-            return picked
-    if allow_auto:
-        for lang in langs:
-            picked = tl.find_generated_transcript([lang])
-            if picked is not None:
-                return picked
+    """人工 CC 优先于自动 ASR（ADR-042 D2）；同优先内按 ``langs`` 顺序。
+
+    ⚠️ **库的语义陷阱**（实测踩到）：``find_manually_created_transcript`` /
+    ``find_generated_transcript`` 在**没有匹配时抛 ``NoTranscriptFound``，而不是
+    返回 ``None``**（见 ``TranscriptList._find_transcript``）。若按「返回 None」写，
+    「只有自动轨、没有人工轨」这一**最常见**情形会在第一类轨道上直接抛出去，被
+    误判成「整个视频没有字幕」——而 ``--list`` 明明看得到轨道。故必须逐类接住再试。
+    """
+    from youtube_transcript_api import NoTranscriptFound
+
+    for finder, enabled in ((tl.find_manually_created_transcript, True),
+                            (tl.find_generated_transcript, allow_auto)):
+        if not enabled:
+            continue
+        try:
+            return finder(langs)          # 语言优先级由库按 langs 顺序自行处理
+        except NoTranscriptFound:
+            continue
     raise CaptionUnavailable(
         f"no transcript in {langs!r}"
         + ("" if allow_auto else " (auto-generated excluded by --no-auto)"),
@@ -425,7 +488,10 @@ def fetch_transcript(
     """
     api = _make_api(proxy)
     tl = _guarded(lambda: api.list(video_id))
-    transcript = _guarded(lambda: _pick_transcript(tl, langs, allow_auto=allow_auto))
+    # `_pick_transcript` 自带错误语义（逐类轨道接住 NoTranscriptFound），
+    # 不经 `_guarded` —— 否则中间步骤的 NoTranscriptFound 会被误映射成
+    # 「整个视频没有字幕」。
+    transcript = _pick_transcript(tl, langs, allow_auto=allow_auto)
     fetched = _guarded(transcript.fetch)
     snippets: list[dict[str, Any]] = []
     for s in fetched:

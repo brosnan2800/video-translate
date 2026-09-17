@@ -104,6 +104,11 @@ CLI 参数 / 系统运行时 os.environ  >  .env.local (本地私有)  >  .env.<
 
 - ✅ 标准：`uv run video-translate <subcommand>`、`uv run python -c "..."`、`uv run pytest`。
 - ❌ 禁止：裸 `python` / `video-translate` / `make` 指望 PATH 指向项目环境；手动 `.venv\Scripts\Activate.ps1` 激活 venv。
+- ⚠️ **`uv run` 的前提是该命令已装进 `.venv`**：找不到时 uv 会**静默回退 PATH**（不报错、不警告）。
+  `pytest` 属 `[project.optional-dependencies].dev`，而 plain `uv sync`（**不带 `--extra dev`**）
+  会把它从 `.venv` **剪掉** —— 此后 `uv run pytest` 命中系统 `F:\Python311\Scripts\pytest.exe`，
+  测试跑在**没有项目依赖**的解释器上却照常报绿/报红。**依赖变更后正确命令：`uv sync --extra dev`**。
+  （`tests/conftest.py` 已加硬自检：命中漂移即报错并给出修复命令，见 Spec 23 §2.1。）
 - 开新终端先 `cd <repo>` 再加 `uv run` 前缀；`uv` 未装见 [官方安装文档](https://docs.astral.sh/uv/getting-started/installation/)。
 - 详情见 [Spec 23 环境定位](docs/specs/23-environment-location.md) / [ADR-029](docs/adr/029-command-entry-uv-run.md)。
 

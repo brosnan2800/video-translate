@@ -36,7 +36,8 @@
 | 一键就绪 | `cd <repo> && uv run video-translate setup`（等价 `uv sync` + 预拉模型） |
 | 环境自检 | `cd <repo> && uv run video-translate doctor` |
 
-- `uv run` 在项目根自动发现并激活 `<repo>/.venv`，无视 PATH 旧环境。
+- `uv run` 在项目根自动发现并激活 `<repo>/.venv`；但**仅对该命令已装进 `.venv`
+  时才成立** —— 找不到时 uv **静默回退 PATH**（不报错），见 §2.1 的实测与守护。
 - 跨平台一致：Windows（`.venv\Scripts\`）与 macOS/Linux（`.venv/bin/`）
   均由 `uv run` 处理，文档无需区分平台路径。
 - **禁止**裸 `python` / `video-translate` / `make`（PATH 残留旧环境时必然漂移）。
@@ -57,6 +58,29 @@
   不崩溃、不影响其余检查（非致命）。
 - 判定对平台无关：路径比较经 `os.path.normcase` 规范化，Windows 大小写 /
   分隔符差异不误判。
+
+### 2.1 测试入口硬自检（`require_project_venv`）
+
+`doctor` 的 entry 自检只覆盖 **CLI 入口**；§1 表格里**测试**那一行（`uv run pytest`）
+此前无人守，实测发生了静默漂移：
+
+1. plain `uv sync`（**不带 `--extra dev`**，而 R3/E1 把它定为依赖变更后的**常规操作**）
+   会剪掉 `[project.optional-dependencies].dev`，`pytest` 从 `.venv` 消失；
+2. `uv run pytest` **静默回退 PATH**，命中系统
+   `F:\Python311\Scripts\pytest.exe`；
+3. 测试跑在**没有项目依赖**的解释器上，却照常报绿/报红 —— 例如新增依赖
+   `youtube-transcript-api` 后，同一批用例在 venv 里过、在系统 Python 里
+   `ModuleNotFoundError`，而**两次都"跑完了"**，结论完全相反。
+
+**契约**：`toolchain.require_project_venv(action=...)` 在
+`resolve_command_entry() == "bare"` 时抛 `EntryDriftError`，消息必须含**漂移的
+解释器**、**项目 venv** 与**可执行的修复命令**（`uv sync --extra dev`）。
+`tests/conftest.py` 的 `pytest_configure` 调用它并转成 `pytest.UsageError` ——
+**测试会话直接不启动**，而不是拿另一个环境的结果当结论。
+
+判定复用 `resolve_command_entry()`，不引入第二套逻辑；非 `bare`（`uv-run` /
+`venv`）一律放行。CLI 侧仍走 §2 的非致命 `[WARN]`（用户可见即可），
+**测试侧从严**（错误环境下的测试结果无意义）。
 
 ### 3. `uv` 引导器（唯一项目外依赖）
 
@@ -98,4 +122,10 @@
       解释器在外部（系统 python）→ `bare`。
 - [x] `doctor` 输出 entry 状态行：`uv-run` 为 `[OK ]`，`bare` 为 `[WARN]` 并附
       修复命令。
-- [x] 回归：`tests/test_toolchain.py` + `tests/test_doctor.py` 全绿。
+- [x] `require_project_venv()`（§2.1）：`uv-run` / `venv` 放行，`bare` 抛
+      `EntryDriftError` 且消息含解释器、项目 venv 与 `uv sync --extra dev`
+      修复命令；测试进程自身断言在项目 venv 内。
+- [x] `tests/conftest.py::pytest_configure` 在非项目 venv 下拒绝启动会话
+      （实测：系统 `pytest.exe` 直跑被拦下并打印修复指引）。
+- [x] 回归：`tests/test_toolchain.py` + `tests/test_doctor.py` +
+      `tests/test_environment_entry.py` 全绿。

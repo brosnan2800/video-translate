@@ -725,3 +725,40 @@ def resolve_command_entry(root_dir: str | Path | None = None) -> tuple[str, str]
     if interp_norm == venv_norm or interp_norm.startswith(venv_norm + os.sep):
         return "venv", sys.executable
     return "bare", sys.executable
+
+
+class EntryDriftError(RuntimeError):
+    """The running interpreter is NOT the project venv (ADR-029 invariant broken)."""
+
+
+def require_project_venv(*, action: str = "this command") -> None:
+    """Hard-fail when the running interpreter is not this repo's ``.venv``.
+
+    ADR-029 的不变量是「运行环境恒为 ``<repo>/.venv``」，但 ``uv run <cmd>`` **只对
+    已装进 .venv 的命令**保证这点 —— 找不到就**静默回退到 PATH**。两个后果叠加
+    会无声地把测试挪到另一个环境：
+
+      1. plain ``uv sync``（不带 ``--extra dev``）会**剪掉**
+         ``[project.optional-dependencies].dev``，pytest 从 ``.venv`` 消失；
+      2. ``uv run pytest`` 于是命中系统 ``F:\\Python311\\Scripts\\pytest.exe``，
+         测试在一个**没有项目依赖**的解释器上跑，却照常报绿/报红。
+
+    而 R3/E1 把 plain ``uv sync`` 定为依赖变更后的**常规操作**，所以这一定会复发。
+
+    ``doctor`` 的 entry 自检只覆盖 CLI 入口，故测试入口（``tests/conftest.py``）
+    必须自己调用本函数守门 —— 这正是 ADR-029 决策 2 的自检覆盖到「测试」那一行。
+    判定复用 :func:`resolve_command_entry`，不引入第二套逻辑。
+    """
+    entry, interp = resolve_command_entry()
+    if entry != "bare":
+        return
+    raise EntryDriftError(
+        f"{action} is running on a NON-project interpreter.\n"
+        f"  interpreter : {interp}\n"
+        f"  project venv: {project_venv_dir()}\n"
+        "  fix         : cd <repo> && uv sync --extra dev && uv run <command>\n"
+        "Why: `uv run` silently falls back to PATH for commands absent from .venv.\n"
+        "     A plain `uv sync` prunes the `dev` extra (pytest), so tests then run\n"
+        "     on a system python and report results from the WRONG environment.\n"
+        "     See ADR-029 / Spec 23 §2.1."
+    )

@@ -298,3 +298,75 @@ wrong. v4 reused v3's mis-aligned translations via `(start,text)` key → inheri
   `tests/test_asr_facade.py`（run_asr 末端落盘接线）。
 - 关联：[ADR-040](adr/040-single-line-subtitle-text.md) / [ADR-041](adr/041-verify-decoupled-from-asr-self-report.md) /
   [Spec 01](specs/01-segment-schema.md) / [Spec 04](specs/04-generate-srt.md) / [Spec 18](specs/18-verify.md)。
+
+### V16 — 接口型 ASR（captions）首轮真实数据实测：两个真 bug
+
+2B 通路（ADR-042 / Spec 29）落地后首次拿真实视频实弹验证
+（`https://www.youtube.com/shorts/GxggU7XoCLg`），暴露两个单测没覆盖的缺陷：
+
+**① 「只有自动轨」被误判成「整片无字幕」**
+- 现象：`captions --list` 明明列出 `auto en` 一条轨道，`captions <url>` 却报
+  `no usable transcript (NoTranscriptFound)`。
+- 根因：`_pick_transcript` 按「无匹配返回 `None`」写，但库的
+  `find_manually_created_transcript` / `find_generated_transcript` **无匹配时抛
+  `NoTranscriptFound`**（见库 `_find_transcript`）。于是最常见的「只有自动轨」在
+  第一类轨道上就抛出去，并被 `_guarded` 映射成"整片无字幕"的终态结论。
+- 修法：逐类轨道接住异常再试下一类；`_pick_transcript` 不再套 `_guarded`
+  —— 它自带错误语义，中间步骤的 `NoTranscriptFound` 不该被当成终态。
+
+**② 滚动轨的**时间侧**：`duration` 越过下一条 `start` → 同片段内第二句被挤成 0.01s**
+- 现象：句子化产出出现 `0.01s` 的不可见微段（`{start: 3.36, end: 3.37}`）。
+- 根因：YouTube 自动轨的 `duration` 是**显示时长**、会越过下一条的 `start`
+  （滚动窗口在**时间**上的表现）。按 `[start, start + duration]` 取窗时，同一条
+  片段里的**第二句**被前一句占满窗口，再被「互不重叠」钳制挤成 0.01s。
+  **Spec 29 原文记的正是这个错模型。**
+- 修法：有效窗口改为 **`[s_k, s_{k+1})`**（`effective_windows`），窗口内按**字符
+  长度比例**线性插值（`char_times`）—— 落实 ADR-042 D2 的「成比例」。
+- 附带修正：无标点兜底的 `dur > max_dur` 原本是**不可达死代码**（循环条件只由字符
+  驱动），改为**字符与时长双上限取先到者**；并补回「未超限 → 整段保留」分支 ——
+  改窗口模型时漏掉它，一度把所有正常段静默丢弃、只剩 1 段（同样由实测发现）。
+
+- 实测结果（24s Shorts，auto 轨）：18 条原始片段 → 14 段句子化 → 合并后 13 条 cue；
+  零微段、零重叠，时间戳与真实换行点对齐（`2.56` / `3.36` 等）。
+- **已知遗留（非本层缺陷）**：`merge.split_long_cues` 是**词级**切分器，接口型 ASR 的段
+  没有 `words[]` 故切不动；而合并又会把本层的**句内**兜底切合回去
+  （`respect_sentence_end`），于是偶有 >42 字符的长 cue 进入最终字幕。属共享合并层的
+  能力缺口，本次未修。
+- 文档：Spec 29 步骤 3 改为有效窗口模型（原文为错模型）并说明反面教训；TDD 清单补
+  两条回归守卫。
+- 测试：`tests/test_ytcaptions.py`（`_pick_transcript` 四分支 + `effective_windows`
+  两分支 + 同片段多句不挤成微段 + 比例性）。
+- 关联：[ADR-042](adr/042-youtube-captions-as-asr-source.md) / [Spec 29](specs/29-interface-asr-captions.md)。
+
+### V17 — 测试入口漂移守卫：补齐 ADR-029 的覆盖（Spec 23 §2.1）
+
+一项**环境契约**修复（2026-09-17），由实测问题驱动：
+
+- 问题：`uv run pytest` **静默跑到系统 Python 上**。ADR-029 的不变量是「运行环境恒为
+  `<repo>/.venv`」，但实测测试进程 `sys.executable == F:\Python311\python.exe` ——
+  **正是 ADR-029 / Spec 23 逐字点名要杜绝的那个解释器**。
+- 根因（两步叠加，缺一不可）：
+  1. `uv run <cmd>` **只对该命令已在 `.venv` 内时**才保证项目环境；找不到就**静默回退
+     PATH**（不报错、不警告）。而 `pytest` 属 `[project.optional-dependencies].dev`，
+     plain `uv sync`（**不带 `--extra dev`**）会把它从 `.venv` 剪掉 —— 偏偏 R3/E1 把
+     plain `uv sync` 定为依赖变更后的**常规操作**，所以这不是偶发，是**必然复发**。
+  2. ADR-029 决策 2 的自检（`resolve_command_entry`）只挂在 **CLI 入口**（`doctor`）；
+     Spec 23 §1 表格里的**测试**那一行从来没人守。
+- 后果：测试跑在**没有项目依赖**的解释器上，却照常报绿/报红。实测同一批用例：
+  venv 里过、系统 Python 里 `ModuleNotFoundError`（缺新加依赖），而**两次都"跑完了"**
+  —— 结论相反且无人察觉。附带症状：全量耗时从 7.4s 涨到 50s+。
+- 修法：
+  - `toolchain.require_project_venv(action=...)`：判定为 `bare` 即抛 `EntryDriftError`，
+    消息必须含漂移解释器 + 项目 venv + 可执行修复命令（`uv sync --extra dev`）；
+    判定复用 `resolve_command_entry()`，不引入第二套逻辑。
+  - `tests/conftest.py::pytest_configure` 调用它并转成 `pytest.UsageError` ——
+    **测试会话直接不启动**。CLI 侧仍保持 Spec 23 §2 的非致命 `[WARN]`（用户可见即可）；
+    **测试侧从严**，因为错误环境下的测试结果没有意义。
+- 文档同步：Spec 23 §1 修正「`uv run` 无视 PATH 旧环境」这一**过强表述**
+  （仅对已装进 `.venv` 的命令成立），新增 §2.1 契约 + TDD 清单；
+  TOOLCHAIN.md §1.3 增补「`uv run` 的前提」与 `uv sync --extra dev`。
+- 验证：系统 `pytest.exe` 直跑 → 会话被拦下并打印修复指引；`uv run pytest` → 783 passed。
+- 测试：`tests/test_environment_entry.py`（`require_project_venv` 三分支 + 当前进程自身
+  必须在项目 venv 内）。
+- 关联：[ADR-029](adr/029-command-entry-uv-run.md) / [Spec 23](specs/23-environment-location.md)
+  / TOOLCHAIN.md §1.3。
