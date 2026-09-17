@@ -8,8 +8,13 @@ from __future__ import annotations
 import pytest
 
 from video_translate.ytcaptions import (
+    INPUT_PATH,
+    INPUT_URL_UNSUPPORTED,
+    INPUT_YOUTUBE,
     accumulate,
+    classify_input,
     effective_windows,
+    looks_like_url,
     parse_video_id,
     snippets_to_segments,
     split_points,
@@ -280,3 +285,69 @@ def test_pick_transcript_language_priority():
     picked = _pick_transcript(_FakeTranscriptList(manual=("ja", "en")),
                               ["en", "ja"], allow_auto=True)
     assert picked["lang"] == "en"
+
+
+# --------------------------------------------------------------------------- #
+# 输入形态判定（ADR-043 D2）—— 全项目唯一的判定来源
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("raw", [
+    "https://www.youtube.com/watch?v=GxggU7XoCLg",
+    "http://youtube.com/watch?v=GxggU7XoCLg&t=30",
+    "https://youtu.be/GxggU7XoCLg?t=30",
+    "https://m.youtube.com/watch?v=GxggU7XoCLg",
+    "https://music.youtube.com/watch?v=GxggU7XoCLg",
+    "https://www.youtube.com/shorts/GxggU7XoCLg",
+    "https://www.youtube.com/embed/GxggU7XoCLg",
+    "https://www.youtube-nocookie.com/embed/GxggU7XoCLg",
+    "HTTPS://WWW.YOUTUBE.COM/watch?v=GxggU7XoCLg",   # scheme/host 大小写无关
+])
+def test_classify_input_youtube(raw):
+    assert classify_input(raw) == INPUT_YOUTUBE
+
+
+@pytest.mark.parametrize("raw", [
+    "https://www.bilibili.com/video/BV1xx411c7mD",
+    "https://vimeo.com/123456789",
+    "https://example.com/abcdefghijk",    # 末段恰 11 字符：host 判定必须挡住
+    "https://www.youtube.com/",           # 油管域名但没有视频 id
+    "https://notyoutube.com/watch?v=GxggU7XoCLg",   # 域名后缀伪装
+])
+def test_classify_input_url_unsupported(raw):
+    assert classify_input(raw) == INPUT_URL_UNSUPPORTED
+
+
+@pytest.mark.parametrize("raw", [
+    "videos/a.mp4",
+    "C:/videos/a.mp4",
+    r"C:\videos\a.mp4",
+    r"C://videos/a.mp4",                  # 手滑双斜杠：scheme ≥2 字符收紧挡住
+    r"\\server\share\a.mp4",
+    "youtube.com/watch?v=GxggU7XoCLg",    # 无 scheme → 按路径（ADR-043 D2 显式边界）
+    "GxggU7XoCLg",                        # 裸 id（parse_video_id 能解，但形态是路径）
+    "",
+    None,
+])
+def test_classify_input_path(raw):
+    assert classify_input(raw) == INPUT_PATH
+
+
+def test_looks_like_url_requires_scheme():
+    """URL 谓词只看语法（带 scheme）—— 供路径卫生校验的 URL 豁免复用（ADR-043 D8）。"""
+    assert looks_like_url("https://a/b")
+    assert looks_like_url("http://a/b")
+    assert looks_like_url("HTTPS://a/b")
+    assert not looks_like_url("C:/videos/a.mp4")
+    assert not looks_like_url(r"C:\videos\a.mp4")
+    assert not looks_like_url(r"C://videos/a.mp4")
+    assert not looks_like_url(r"\\server\share\a.mp4")
+    assert not looks_like_url("youtube.com/watch?v=x")
+    assert not looks_like_url("")
+    assert not looks_like_url(None)
+
+
+def test_classify_input_is_total():
+    """判定对任何输入都必须给出三态之一（分发层据此互斥分支，不得抛异常）。"""
+    for raw in ("", None, "   ", "?", "://", "http://", "https://例え.bd/x"):
+        assert classify_input(raw) in (INPUT_YOUTUBE, INPUT_URL_UNSUPPORTED,
+                                       INPUT_PATH)

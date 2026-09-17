@@ -4,9 +4,10 @@
   proxy and actually checks the Google Translate endpoint. By default it still
   exits 0 and only prints `[MISS]` if unreachable — so a 7-minute transcribe
   won't fail first. Add `--strict` to make unreachable return exit 7.
-- **Word-level timestamps (V3, Spec 12):** transcribe now uses `stable_whisper`
-  with `word_timestamps=True`. `chunk_N.json` and `segments_en.json` carry a
-  `words` list per segment. These power split + silence preservation.
+- **Word-level timestamps (V3, Spec 12):** transcribe now uses **faster-whisper
+  原生 `word_timestamps=True`**（路线 A —— `stable_whisper` 曾被评估，但由
+  [ADR-008](adr/008-stable-ts-spike-rejected.md) **拒收**）。`chunk_N.json` 与
+  `segments_en.json` 每段携带 `words` 列表，供切分与静音保留使用。
 - **Splitting (V3, Spec 13):** after merge, long cues are split at **word
   boundaries** to ~42 chars (`--merge-max-chars`). Default ON; `--no-split`
   restores V2 behavior. Because split changes the cue count, a V3 `zh` must be
@@ -375,3 +376,42 @@ wrong. v4 reused v3's mis-aligned translations via `(start,text)` key → inheri
   必须在项目 venv 内）。
 - 关联：[ADR-029](adr/029-command-entry-uv-run.md) / [Spec 23](specs/23-environment-location.md)
   / TOOLCHAIN.md §1.3。
+
+### V18 — 输入形态自动判定：`pipeline` 按输入选 ASR 方案（ADR-043）
+
+一项**入口契约**变更（2026-09-17），由需求方提问驱动（「加了接口型 ASR 以后我到底该怎么用？」）。
+
+- 问题：ADR-042 引入 `captions` 后留下**入口断层** —— 它是独立子命令，而唯一入口是
+  `pipeline`。实测把 URL 交给 `pipeline` 会发生什么：
+  - `_default_base(<url>)` = `Path(url).stem` = 视频 id（侥幸正确）；
+  - `_default_outdir(<url>)` = `Path(url).parent` = **`https:/www.youtube.com/shorts`（垃圾路径）**；
+  - `next_action` → `transcribe` → **`cmd_run`：拿本地 Whisper 去跑一个 URL**。
+
+  **这正是 ADR-042 D1 明确反对的「把 URL 塞进 run」。**
+- 修法（[ADR-043](adr/043-input-form-auto-routing.md)），判定归**控制平面**（不放 Agent 层：
+  属「流程推进」，放 Agent 层会与 ADR-030/033 的既定架构自相矛盾且各 Agent 实现漂移）：
+  - `ytcaptions.classify_input` 三态（`youtube` / `url-unsupported` / `path`）+ `looks_like_url`
+    语法谓词 —— **全项目一份定义**，`cli` 与边界校验共用；
+  - URL → **接口型 ASR 通路**（复用 `cmd_captions` 完整通路）；非油管 URL → `exit 2` + 指引；
+    本地路径 → `cmd_run`（**行为逐字节不变**）；
+  - URL 缺省落点 = `videos/<video_id>`（与 `captions` 逐字一致，否则缓存复用与幂等不成立）；
+  - URL 的决策点**跳过音频画像**（无本地音频）但**保留风格选择**；`verify` **不传 `--video`**
+    让 ADR-042 D7 的 `acoustic-unavailable` 正常生效；URL 传 `--vad`/`--separate-vocals` 等
+    音频类参数 → `exit 2`（**显式意图不得静默降级**，ADR-038 裁决一）；
+  - 新增 `_url_engine_tail`：`captions` 只等价 transcribe 段，故补上 `run` 的尾段
+    （agent → 落 task 并 exit 6；google → 无头翻译 + generate），使两条输入形态在同一 flag 下
+    停在同一处。**URL 绝不进入 `cmd_run` 或任何音频工具** —— `cmd_run` 开头无条件
+    `analyze_audio(input)`，即拿 ffprobe 打开 URL。
+- **附带修复既有缺陷（Spec 25）**：`_path_hygiene_error` 取 basename 查非法字符，而
+  `watch?v=<id>` 的 basename 含 `?`，命中 Windows 非法集 → **入口直接 exit 2**，
+  于是输入形态判定**根本无从执行**（写得再对也到不了）。修：带 scheme 的 URL 值豁免文件名校验；
+  真实文件名仍受全量保护（`?` 确是 Windows 非法字符与编码事故指纹，**不放宽整类**）。
+- 反例固化（`tests/test_pipeline_input_routing.py`）：URL 分发到 captions、
+  **`cmd_run` 与 `analyze_audio` 一次都不许被调**、非油管 `exit 2` 且**零产物**、
+  本地路径分发与 `--video` 传递**不变**。
+- 文档：README（入口说明 / 核心特性 / 架构图 / QuickStart / CLI 速查）、AGENTS.md（开篇 /
+  §0 入口寻源 / §3 状态机 / §3.4 / §4.5 / §4.6 / §1 红线）、Spec 24 §6、Spec 25、
+  Spec 29 两入口、Spec 00 最近变更汇总、docs/index.md。
+- 关联：[ADR-043](adr/043-input-form-auto-routing.md) / [ADR-042](adr/042-youtube-captions-as-asr-source.md) /
+  [Spec 24](specs/24-pipeline-behavior.md) / [Spec 25](specs/25-cli-path-hygiene.md) /
+  [Spec 29](specs/29-interface-asr-captions.md)。

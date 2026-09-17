@@ -14,11 +14,18 @@
 4. **[`docs/index.md`](docs/index.md)** — 文档库总索引（按角色导航 + ADR/Spec 全量清单 + 单一维护源约定）。
 5. **[`docs/specs/00-overview.md`](docs/specs/00-overview.md)** — 行为总览；**[`docs/adr/`](docs/adr)** — 架构决策理由速查。
 
-> **入口唯一 = `pipeline`**：所有流程推进都用 `uv run video-translate pipeline "<视频>"`
-> （幂等推进器，每次调用自动定位进度并推进到下一个停点，[ADR-033](docs/adr/033-control-plane-pipeline-entry.md)
-> / [Spec 24](docs/specs/24-pipeline-behavior.md)）。**不要自行编排 `run` → `generate` → `verify`**
-> ——「该跑哪一步」由状态机决定，Agent 只在两个停点接手（**决策点问风格** / **翻译 + 语义回读**）；
-> `run` / `generate` / `verify` 退为底层原语，仅供脚本与回归使用。
+> **入口唯一 = `pipeline`，两种输入形态都直接丢给它**：
+> `uv run video-translate pipeline "<视频路径>"` **或** `uv run video-translate pipeline "<YouTube 链接>"`。
+> 入口按输入形态**自动判定** —— URL 走**接口型 ASR**（取平台现成字幕，零算力），
+> 本地路径走**本地 Whisper**（[ADR-043](docs/adr/043-input-form-auto-routing.md) /
+> [Spec 24](docs/specs/24-pipeline-behavior.md) §6）。
+> **Agent 不需要判断输入是什么、也不需要挑选子命令。**
+>
+> 它同时是**幂等推进器**：每次调用自动定位进度并推进到下一个停点
+> （[ADR-033](docs/adr/033-control-plane-pipeline-entry.md)）。**不要自行编排
+> `run` → `generate` → `verify`** ——「该跑哪一步」由状态机决定，Agent 只在两个停点
+> 接手（**决策点问风格** / **翻译 + 语义回读**）；`run` / `generate` / `verify` 退为
+> 底层原语，仅供脚本与回归使用（`captions` 亦为显式直达入口，见下）。
 
 **环境一律走 `uv run video-translate setup && uv run video-translate doctor`（命令统一 `uv run` 前缀，恒定位项目 `.venv`，见 [Spec 23](docs/specs/23-environment-location.md)），不要手动散落工具链、不要裸 `pip install torch`、不要改声学时间轴。** 任何依赖变更必须 `uv lock` 与 `pyproject.toml` 同 commit 提交。
 
@@ -31,6 +38,7 @@
 - **🎙️ 声学绝对对齐 (Acoustic-Accurate Alignment)**：严格保留 whisper 转写产生的底层时间戳，下游断句与翻译**只改文本、绝不重算时间轴**，彻底杜绝字幕音画漂移（[ADR-012](docs/adr/012-acoustic-timestamp-truth.md)）。
 - **🔧 强制声学对齐 (Forced Alignment, T4)**：**默认 `--align auto`** —— CUDA + whisperx 可用时自动用 WhisperX 的 wav2vec2 把每个词的时间戳校准到真实发音，消除快语速 / 长台词的字幕抢跑滞后；Mac / 未安装自动优雅降级 `none`（行为零变化），显式 `--align none` 可关闭（[ADR-028](docs/adr/028-whisperx-alignment-pass.md) / [Spec 22](docs/specs/22-whisperx-alignment.md)）。
 - **🎵 人声/伴奏分离预处理 (Vocal Separation, T2)**：可选 `--separate-vocals` 用 Demucs 从原音轨剥离纯人声喂给 Whisper / `fill_gaps`，抑制强 BGM、哄笑、环境噪导致的幻觉词与吞字；**仅换输入源、不改时间轴运算**，未装库自动回退原音频（[ADR-017](docs/adr/017-vocal-separation.md) / [Spec 19](docs/specs/19-vocal-separation.md)）。
+- **🌐 接口型 ASR（零算力取现成字幕）**：对**已在 YouTube 发布**的视频可直接 `pipeline "<YouTube 链接>"` —— 取平台现成字幕轨（人工 CC 优先于自动 ASR）当 ASR 结果，**不下载音视频、不跑 GPU 转写**，产物与本地转写**同契约**、直接接翻译。代价**明确标注、不粉饰**：无词级时间戳、无置信度字段、声学 lane 不可用（`verify` 产出 `acoustic-unavailable` 红灯）；无字幕即报错，**绝不静默回退本地转写**（[ADR-042](docs/adr/042-youtube-captions-as-asr-source.md) / [Spec 29](docs/specs/29-interface-asr-captions.md)）。
 - **🤖 Agent 即引擎 (Agent-as-Engine)**：CLI 专注于声学重计算与切分，将翻译任务以结构化 JSON 抛给宿主 AI Agent（Claude / Cursor / VS Code Copilot 等）完成高质量上下文翻译，本地无需配置庞大 LLM 运行时；同时提供 `--engine google` 作为全自动无头兜底（[ADR-005](docs/adr/005-agent-as-engine.md)）。
 - **⚡ 硬件自适应与工具链隔离**：支持 NVIDIA CUDA 自动加速与 CPU/int8 平滑降级；通过 `.env` / `.env.<platform>` 自动加载 FFmpeg 与 CUDA 库，彻底解耦宿主环境与业务代码（[TOOLCHAIN.md](TOOLCHAIN.md)）。
 - **🛡️ 三维质量护栏 (Three-Lane Guardrails)**：
@@ -45,20 +53,24 @@
 
 ```mermaid
 flowchart TD
-    Video[输入视频或音频] --> Setup[setup + doctor 环境自检]
-    Setup --> PL[pipeline 单一入口 · 幂等推进器 · ADR-033]
+    Setup[setup + doctor 环境自检] --> DP{"停点 1 · 决策点<br/>选择翻译风格<br/>exit 6"}
+    DP -->|"重跑 pipeline --style"| In{"输入形态自动判定<br/>ADR-043"}
 
-    PL --> DP{"停点 1 · 决策点<br/>选择翻译风格<br/>exit 6"}
-    DP -->|"重跑 pipeline --style"| Transcribe
+    In -->|"YouTube 链接"| Captions
+    In -->|"本地路径"| Transcribe
+    In -->|"其他 URL"| Reject["exit 2 + 指引<br/>接口型 ASR 仅支持 YouTube"]
 
-    subgraph Local1 [声学阶段 · 本地 CLI]
+    subgraph Source [ASR 方案层 · 二选一 · 引擎可替换 ADR-038]
         Transcribe[faster-whisper 转写 · 分块可续跑] --> WhisperX[WhisperX 词级对齐 · 默认 auto]
         WhisperX --> Merge[断句合并 · 幻觉过滤 · 智能切点回退]
         Merge --> FillGaps[fill_gaps 漏音补洞自检]
-        FillGaps --> TaskOut[输出 translate_task.json]
+        Captions["取平台现成字幕<br/>人工 CC 优先 · 句子化 + 时间戳插值"]
     end
 
-    TaskOut --> TP{"停点 2 · 翻译<br/>Agent 产出 zh_segments.json<br/>exit 6"}
+    FillGaps --> Segs["segments_en.json · 唯一契约切点 ADR-035"]
+    Captions --> Segs
+
+    Segs --> TP{"停点 2 · 翻译<br/>Agent 产出 zh_segments.json<br/>exit 6"}
 
     subgraph AgentBrain [内容阶段 · Agent 或人]
         TP --> AgentWork[翻译 + 语义回读]
@@ -71,6 +83,12 @@ flowchart TD
 
     Verify --> Done[交付 bilingual.srt]
 ```
+
+> **两条 ASR 通路的分工**（[ADR-042](docs/adr/042-youtube-captions-as-asr-source.md)）：
+> **URL → 接口型**（零算力、**无词级**；声学 lane 不可用）；**本地路径 → Whisper**
+> （有词级 / 置信度；声学 lane 可用）。两条在 `segments_en.json` 处汇合，**此后完全同路**。
+> URL 输入的决策点仍会问翻译风格，但**跳过音频画像**（无本地音频）；`verify` 因缺音频参照
+> 产出 `acoustic-unavailable` 红灯（strict 下 exit 8，`--no-strict` 显式弃权）。
 
 ---
 
@@ -117,6 +135,16 @@ uv run video-translate doctor
 
 ### 4. 运行完整管线
 
+> **输入可以是本地视频，也可以直接是 YouTube 链接** —— 入口自动判定，用法完全一样
+> （[ADR-043](docs/adr/043-input-form-auto-routing.md) / [Spec 24 §6](docs/specs/24-pipeline-behavior.md)）：
+>
+> - `pipeline "videos/example.mp4"` → **本地 Whisper** 转写（有词级 / 置信度；声学 lane 可用）
+> - `pipeline "https://www.youtube.com/watch?v=..."` → **接口型 ASR**，取平台现成字幕
+>   （零算力、无词级；产物落在 `videos/<video_id>/`）
+>
+> 非 YouTube 的 URL（B站 / 直链等）会**明确报错**（exit 2）并给指引 —— 目前仅支持 YouTube，
+> 本地文件请直接传路径。**不要自己判断该用哪个命令，丢给 `pipeline` 就行。**
+
 #### 模式 A：Agent 引擎模式（推荐，默认）
 
 > 用 **`pipeline` 单一入口**：每次调用自动推进到下一个停点，**重复调用永远安全**（断点续跑）。
@@ -155,6 +183,11 @@ uv run video-translate verify --segments "videos/example/example.segments_en.jso
 uv run video-translate run "videos/example.mp4" --engine google
 ```
 
+链接来源同样可全自动（**零算力取字幕 + 无头翻译 + 一路出 SRT**，无需 GPU、无需 Agent）：
+```bash
+uv run video-translate pipeline "<YouTube 链接>" --engine google --prompt never
+```
+
 ---
 
 ## 🛠️ CLI 命令与参数速查 (CLI Reference)
@@ -163,7 +196,8 @@ uv run video-translate run "videos/example.mp4" --engine google
 
 | 命令 (Subcommand) | 作用 | 核心参数示例 |
 |---|---|---|
-| **`pipeline`** | **单一入口幂等推进器（推荐）**：自动定位进度，执行下一步并推进到下一个停点，重复调用永远安全 | `uv run video-translate pipeline "videos/sample.mp4" [--style film\|literal\|bilingual_study] [--prompt always\|never\|require-profile] [--vad] [--separate-vocals]` |
+| **`pipeline`** | **单一入口幂等推进器（推荐）**：自动定位进度，执行下一步并推进到下一个停点，重复调用永远安全。**输入按形态自动判定**（本地路径 → 本地 Whisper；YouTube 链接 → 接口型 ASR；其他 URL → exit 2 并指引），Agent 无需挑选入口（[ADR-043](docs/adr/043-input-form-auto-routing.md)） | `uv run video-translate pipeline "videos/sample.mp4" [--style film\|literal\|bilingual_study] [--prompt always\|never\|require-profile] [--vad] [--separate-vocals]`<br>**或** `uv run video-translate pipeline "<YouTube 链接>" [--style ...] [--engine google] [--prompt never]` |
+| `captions` | **接口型 ASR 直达入口**（详见 [ADR-042](docs/adr/042-youtube-captions-as-asr-source.md) / [Spec 29](docs/specs/29-interface-asr-captions.md)）：取平台现成字幕当 ASR 结果，与 `pipeline "<链接>"` **同产物、同目录**。用于探轨道 / 强制重取 / 直连排查通路（`pipeline` 不提供这些开关） | `uv run video-translate captions "<YouTube 链接>" [--list] [--lang en] [--no-auto] [--refresh] [--outdir videos] [--base <id>]` |
 | `doctor` | 检查命令入口、环境依赖、GPU/whisperx/demucs 状态，分析视频音频画像推荐 VAD | `uv run video-translate doctor --video "videos/sample.mp4"` |
 | `run` | 一站式执行流水线（转写 $\rightarrow$ 任务生成 $\rightarrow$ 生成字幕） | `uv run video-translate run "videos/sample.mp4" [--vad] [--adaptive-vad] [--style film\|literal\|bilingual_study] [--separate-vocals] [--align auto\|none\|whisperx]`（`--align` 默认 `auto`：GPU 走 whisperx） |
 | `transcribe` | 仅执行音频抽取、Whisper 转写、WhisperX 对齐、合并断句与漏音补洞 | `uv run video-translate transcribe "videos/sample.mp4" [--separate-vocals] [--align auto\|none\|whisperx]` |
@@ -226,12 +260,12 @@ CLI 参数 > 系统环境变量 / .env.local > .env.<platform> > .env > .video-t
 | 📚 **[docs/index.md](docs/index.md)** | 文档库总索引：目录结构、ADR/Spec 全量清单、维护约定 |
 | 🛠️ **[TOOLCHAIN.md](TOOLCHAIN.md)** | 环境搭建操作手册：CUDA 配置、模型下载、依赖隔离 |
 | 📦 **[docs/TOOLING.md](docs/TOOLING.md)** | 工具与依赖管理（操作手册）：E1–E4 操作速查、新增工具标准套路 |
-| 🗺️ **[MAJOR_VERSION_PLAN.md](MAJOR_VERSION_PLAN.md)** | V5 任务路线图（E 系列 + T 系列），含 §3.2 依赖与外部工具规则 R1–R7 |
-| 📜 **[docs/HISTORY.md](docs/HISTORY.md)** | 版本演进史、实战案例与踩坑复盘（V3–V14） |
+| 🗺️ **[MAJOR_VERSION_PLAN.md](MAJOR_VERSION_PLAN.md)** | 任务路线图（E 系列 + T 系列 + §2B 接口型 ASR），含 §3.2 依赖与外部工具规则 R1–R7；图后附**进度快照** |
+| 📜 **[docs/HISTORY.md](docs/HISTORY.md)** | 版本演进史、实战案例与踩坑复盘（V3–V18） |
 | 🔍 **[docs/RESEARCH-voice-pro.md](docs/RESEARCH-voice-pro.md)** | Voice-Pro 对标研究（E 系列与依赖规则的论证来源；四项借鉴已全部落地） |
 | 💀 **[docs/POSTMORTEM-JamieFoxx.md](docs/POSTMORTEM-JamieFoxx.md)** | Jamie Foxx 混剪事故复盘（V8–V13 护栏体系的由来） |
-| 📐 **[docs/specs/](docs/specs/)** | 行为规格契约 SDD（00–24） |
-| 🏛️ **[docs/adr/](docs/adr/)** | 架构决策记录 ADR（001–036，不可变历史） |
+| 📐 **[docs/specs/](docs/specs/)** | 行为规格契约 SDD（00–29） |
+| 🏛️ **[docs/adr/](docs/adr/)** | 架构决策记录 ADR（001–043，不可变历史） |
 | 🗄️ **[docs/archive/](docs/archive/)** | 已归档（历史 / 废弃，不参与日常查阅，**勿照做**） |
 
 ---

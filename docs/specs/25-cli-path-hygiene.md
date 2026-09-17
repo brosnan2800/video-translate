@@ -2,7 +2,7 @@
 
 - 状态: 批准（实现）
 - 日期: 2026-09-04
-- 关联: ADR-035（数据契约总线 D4 边界校验）、Spec 11（CLI v2）、Spec 23（环境定位）
+- 关联: ADR-035（数据契约总线 D4 边界校验）、[ADR-043](../adr/043-input-form-auto-routing.md)（输入形态自动判定 / URL 豁免）、Spec 11（CLI v2）、Spec 23（环境定位）、Spec 24（pipeline 入口）
 - 修复对象: 「中文文件名在 Windows PowerShell 5.1 下变成不可诊断的深栈崩溃」——
   事故数据见 §根因回顾，现象是 `io_utils.save_json` 抛
   `OSError: [WinError 123] 文件名、目录名或卷标语法不正确`
@@ -102,6 +102,15 @@ base 派生沿用 `_default_base()`（Spec 11 既有语义，不改）；校验�
   不含层 1 任何码位，必须放行。
 - **不**修改 `_default_base` / `_default_outdir` 的既有语义。
 - **不**触碰任何转写 / 翻译 / 生成业务逻辑。
+- **不**把 **URL** 当文件名校验（ADR-043 D8）：URL 的 `?` / `:` / `/` 是**语法的一部分**，
+  不是文件名污染。`_path_hygiene_error` 对**带 scheme 的 URL 值**（复用
+  `ytcaptions.looks_like_url`，ADR-043 D2）跳过层 2 的平台非法字符检查。
+  - **事故来源（2026-09-17）**：`pipeline "https://www.youtube.com/watch?v=<id>"` 的
+    basename 是 `watch?v=<id>`，`?` 命中 Windows 非法集 → 入口直接 `exit 2`，
+    于是 `pipeline <url>` 的输入形态自动判定（[Spec 24](24-pipeline-behavior.md) §6）
+    **根本无从执行** —— 判定写得再对也到不了。
+  - **豁免只针对 URL 形态**：真实文件名仍受全量保护。`?` 在 Windows 文件名里确实非法、
+    且是编码事故的指纹之一（§根因回顾第 2 条），**不得放宽整类**。
 
 ### 5. 报错格式（可观测性：可操作，而非仅可诊断）
 
@@ -148,3 +157,10 @@ base 派生沿用 `_default_base()`（Spec 11 既有语义，不改）；校验�
       `uv run video-translate pipeline "videos/角斗士采访.mp4"` 由
       `OSError WinError 123` 变为 `[args] …U+E0A6 (私用区)…` + 三条修法，
       exit code 2，且**不写任何产物文件**。
+- [x] URL 豁免（ADR-043 D8）：`_path_hygiene_error` 对带 scheme 的 URL
+      （`.../watch?v=<id>`、`.../youtu.be/<id>?t=30`）返回 `None`，且**不由 URL
+      派生 base**（`watch?v=` 会派生出含 `?` 的 base）；**同时** `videos/a?b.mp4`
+      这类真实含 `?` 的 Windows 文件名**仍被拒** —— 证明豁免只放宽 URL 形态，
+      Spec 25 的保护不回退。
+      （`tests/test_pipeline_input_routing.py`；后一条按 `os.name != "nt"` 跳过，
+      因为 `?` 只在 Windows 文件名里非法。）

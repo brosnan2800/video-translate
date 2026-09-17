@@ -107,7 +107,7 @@ flowchart TD
 > **共同约束**：每个任务落地时必须遵守 §3.2 依赖规则与 AGENTS.md §1 红线；先写测试（TDD）；文档随代码同步更新。**每项 E/T 均须落 ADR（架构决策）+ Spec（对外行为），不得只改代码**——E1-E4 落地记录：ADR-023/024/025/026 + Spec 20。
 
 ### E1 — uv.lock 可复现安装【P0】
-> **问题**：`pyproject.toml` 已配 `[tool.uv.index]`（清华 cu124 镜像）与 `[tool.uv.sources]`（按平台选 wheel），但仓库**无 lockfile**——换机安装存在版本飘移风险，"依赖装错环境/装成 CPU 版"两类红线事故无法根治。
+> **问题**：`pyproject.toml` 已配 `[tool.uv.index]`（清华 cu128 镜像）与 `[tool.uv.sources]`（按平台选 wheel），但仓库**无 lockfile**——换机安装存在版本飘移风险，"依赖装错环境/装成 CPU 版"两类红线事故无法根治。
 **动作清单**：
 1. 在仓库根执行 `uv lock` 生成 `uv.lock` 并提交（确认 `.gitignore` 未排除它）。
 2. `Makefile` 的 `setup` 目标改为 `uv sync` 优先（检测 `uv` 不存在时打印一条安装指引并回退 `pip install -e .`）。
@@ -115,7 +115,7 @@ flowchart TD
 **涉及文件**：`uv.lock`（新增）、`Makefile`、`TOOLCHAIN.md`、`README.md`
 **验收标准**：
 - 新 clone 目录下 `uv run video-translate setup` 一次成功（uv 路径），`uv lock --check` 通过；
-- Windows/Linux 装出 `+cu124` torch，macOS 装出 CPU torch（复用既有 marker 验证）；
+- Windows/Linux 装出 `+cu128` torch，macOS 装出 CPU torch（复用既有 marker 验证）；
 - 全量 `pytest` 绿。
 
 ### E2 — ffmpeg 自动下载便携版（消灭「全盘搜」）【P0】
@@ -522,7 +522,7 @@ T10 落地后：声学数据（silence_intervals/duration）读 state 契约不�
 
 - **T1**：Mac 本地回归通过（`device=auto` 等价原 `cpu/int8`，产物与历史一致）；Windows `nvidia-smi` 下 `device=cuda` 生效、速度提升；cpu/int8 产物与历史一致。【已通过】
 - **T2**：`--separate-vocals` 成功分离出 `vocals.wav` 喂给 Whisper，强 BGM 场景无多余幻觉，时间戳保持 100% 原始对齐。【已通过，13 条单测全绿】
-- **E1**：新 clone 环境 `uv run video-translate setup`（uv 路径）一次成功；`uv lock --check` 通过；平台 marker 验证（Win/Linux → cu124，macOS → cpu）。
+- **E1**：新 clone 环境 `uv run video-translate setup`（uv 路径）一次成功；`uv lock --check` 通过；平台 marker 验证（Win/Linux → cu128，macOS → cpu）。
 - **E2**：无 ffmpeg PATH 的环境 `video-translate setup --ffmpeg` 后 `doctor` 全绿；下载/解压/登记全流程单测（mock 网络）覆盖。
 - **E3**：残缺缓存（<2GB 假 model.bin）被检出并自愈重下；`run` 阶段模型加载失败输出含修复命令的指引。
 - **E4**：不配 `VT_CUDA_DIR` 时 GPU 机器自动用 venv torch/lib 命中 CUDA；显式 `VT_CUDA_DIR` 仍优先；无 GPU 静默降级 CPU；`doctor` 标注 CUDA 来源。

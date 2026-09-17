@@ -14,6 +14,8 @@ Each stage:
                "zh" = <base>.zh_segments.json)
   caps        **通用** capability ids (capabilities.CAPS `common=True`) that must
               be available — 引擎特定前置由 Provider 自报注入 ctx（ADR-038 D7）
+  cli_by_source  可选：按 ctx["_source"] 覆盖 `cli` 串（ADR-043 D2 —— 同一阶段
+              在不同输入形态下命令不同，但产出与阶段语义不变）
   gate        optional registered check id (pipeline.GATES) evaluated before
               entering the stage; failing problems block with guidance
   produces    ctx key of the artifact this stage writes ("" for none)
@@ -47,7 +49,13 @@ STAGES: tuple[dict[str, Any], ...] = (
         "caps": ["ffmpeg", "ffprobe"],
         "gate": None,
         "produces": "segments",
+        # ADR-043 D2：本阶段有**两种输入形态**，产出同为一个 `segments`（契约切点
+        # 不变），只是取法不同。表仍是纯数据 —— 按 ctx["_source"] 选串由
+        # `pipeline.stage_cli` 完成，执行分支在 `cli.cmd_pipeline`。
         "cli": "uv run video-translate run <video>",
+        "cli_by_source": {
+            "url": "uv run video-translate captions <url>",
+        },
         "stop_point": False,
     },
     {

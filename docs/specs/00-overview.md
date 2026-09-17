@@ -80,3 +80,18 @@ could not translate, for agent backfill).
 > **完整索引见 [`docs/index.md`](../index.md)**。Spec 05 已删除（说明见 `11-cli-v2.md`）。
 > Spec 00–21 为行为契约、随代码演进，不设 Accepted/Superseded 状态；Spec 22 起因对应
 > 明确里程碑而带状态字段。
+
+## 最近变更（2026-09 汇总）
+
+> 便于回看「最近这波改了什么」。逐条完整叙述见 [`HISTORY.md`](../HISTORY.md)（V15–V18）；
+> 每条都给出它的**决策记录 / 实现契约**，改动细节请查那里，本表不复述。
+
+| 日期 | 变更 | 决策 / 契约 | 影响面 |
+|---|---|---|---|
+| 09-17 | **入口按输入形态自动判定**：`pipeline "<YouTube 链接>"` 自动走接口型 ASR；非油管 URL → `exit 2` + 指引 | [ADR-043](../adr/043-input-form-auto-routing.md) · [Spec 24 §6](24-pipeline-behavior.md) | 分发层（`cmd_pipeline`）+ `ytcaptions` 判定 + ctx 来源注入；**本地路径行为不变**；附带修 Spec 25 的 URL 卫生豁免 |
+| 09-17 | 接口型 ASR **首轮真实数据实测**修掉两处：库的 `find_*` **抛异常**语义（`--list` 有轨、`fetch` 说无字幕）、滚动片的**时间侧**（`duration` 是显示时长 → 同片段第二句被挤成 0.01s 微段） | [Spec 29](29-interface-asr-captions.md) | `ytcaptions` 内部算法；**产物契约不变** |
+| 09-17 | `merge.split_long_cues` 补**无词段**文本级切分 —— Spec 13 原写「无 `words` 理论上不会发生」，该前提被 ADR-042 推翻 | [Spec 13](13-cue-splitting.md) | 合并层；Whisper 路径零影响（两条转写路径均写死 `word_timestamps=True`）；超限 cue 由 4 条降到 1 条 |
+| 09-17 | **测试入口漂移守卫**：`uv run pytest` 曾在系统 Python 上跑（plain `uv sync` 剪掉 dev extra → `uv run` **静默回退 PATH**），测试结论来自错误环境 | [Spec 23 §2.1](23-environment-location.md) · [ADR-029](../adr/029-command-entry-uv-run.md) | `toolchain.require_project_venv` + `tests/conftest.py` 硬拦（**非项目 venv 拒绝启动会话**） |
+| 09-17 | 转写文本：Whisper **全大写伪影**规范化，落在**转写阶段最末**（`asr.run_asr`，覆盖 `apply_merge` / `fill_gaps` / `resegment` 的重写路径） | [Spec 01](01-segment-schema.md) | 文本层；**不碰时间戳**（ADR-012） |
+| 09-16 | 字幕文本**单行不变量** + `verify` 与 ASR **自证解耦**（低置信道整体移除） | [ADR-040](../adr/040-single-line-subtitle-text.md) · [ADR-041](../adr/041-verify-decoupled-from-asr-self-report.md) · [Spec 01](01-segment-schema.md) / [Spec 04](04-generate-srt.md) / [Spec 18](18-verify.md) | 内容层文本 / verify lane 构成 |
+| 09-11 ~ 09-17 | **ASR 层抽离两步落地**：`ASRProvider` 接口 → `run_asr` 门面 + **Provider 自报就绪**接线到 doctor / 闸门；「第二个 Provider」由接口型 ASR 验证 | [ADR-038](../adr/038-asr-layer-extraction.md) · [Spec 27](27-asr-provider.md) · [Spec 28](28-asr-facade-and-readiness.md) | ① 层可插拔；产物契约不变（[ADR-035](../adr/035-pipeline-data-contract.md) 仍唯一事实来源） |

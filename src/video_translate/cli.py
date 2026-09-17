@@ -53,6 +53,15 @@ from .model_cache import (
     model_cached,
     resolve_model_path,
 )
+# ADR-043：输入形态判定的**唯一来源**（`classify_input` 三态 / `looks_like_url`
+# 语法谓词）。判定放控制平面、由本模块消费 —— Agent 侧不再需要挑入口。
+from .ytcaptions import (
+    INPUT_URL_UNSUPPORTED,
+    INPUT_YOUTUBE,
+    classify_input,
+    looks_like_url,
+    parse_video_id,
+)
 
 EXIT_OK = 0
 EXIT_RUNTIME = 1
@@ -214,12 +223,24 @@ def _path_hygiene_error(args: argparse.Namespace) -> str | None:
     # of _default_base() are unchanged — we validate its RESULT).
     base = getattr(args, "base", None)
     input_path = getattr(args, "input", None)
-    if not base and isinstance(input_path, str) and input_path:
+    # ADR-043 D8: URL 输入既没有"文件名"可校验，也不该由它派生 base —— URL 的 base
+    # 是视频 id，由 cmd_pipeline 按来源计算。若不跳过，`watch?v=<id>` 会被
+    # `_default_base` 派生出含 `?` 的 base 而在此误报。
+    url_input = isinstance(input_path, str) and looks_like_url(input_path)
+    if (not base and isinstance(input_path, str) and input_path
+            and not url_input):
         base = _default_base(input_path)
     if isinstance(base, str) and base:
         targets.append(("--base", base))
 
     for label, value in targets:
+        # ADR-043 D8: **URL 不是文件名** —— `?` / `:` / `/` 是 URL 的合法语法，却
+        # 命中 Windows 非法字符集。不豁免则最常见的 `watch?v=<id>` 会在入口直接
+        # exit 2，`pipeline <url>` 的输入形态判定（Spec 24 §6）根本无从执行。
+        # 豁免只针对 URL 形态；真实文件名仍受全量保护（`?` 确实是 Windows 非法字符，
+        # 也是编码事故指纹，不得放宽整类）。
+        if isinstance(value, str) and looks_like_url(value):
+            continue
         # Only the basename is a filename; ':' in 'C:\' or '/' in a directory
         # path are separators, not illegal characters.
         name = os.path.basename(value.rstrip("/\\") or value)
@@ -1389,6 +1410,70 @@ def _pipeline_run_ns(args: argparse.Namespace, outdir: str, base: str,
     return build_parser().parse_args(argv)
 
 
+# ADR-043 D3：输入是 URL 但不是 YouTube —— 明确报错。**不**当成本地路径去跑
+# Whisper，也**不**静默回退本地转写（ADR-042 D2 明令禁止后者的理由：那会让
+# 「我明明没让它转写」变成隐性长任务）。
+_UNSUPPORTED_URL_MESSAGE = """[pipeline] 该输入是 URL，但无法作为 YouTube 视频链接使用：
+           {url}
+           （域名不是 YouTube，或 URL 里没有可解析的视频 id）
+
+  接口型 ASR 目前仅支持 YouTube 视频链接（watch?v= / youtu.be / shorts / embed）。
+  本地文件请直接传路径（不要带 file:// 前缀）：
+    uv run video-translate pipeline "videos/<name>.mp4"
+
+  详见 ADR-043 / Spec 24 §6。"""
+
+# ADR-043 D6：接口型 ASR 无本地音频，以下参数**无法兑现**。按 ADR-038 裁决一
+# （explicit must be honored, auto may degrade）—— 报错，绝不静默忽略。
+_URL_INCOMPATIBLE_FLAGS = (
+    ("--vad", "vad"),
+    ("--adaptive-vad", "adaptive_vad"),
+    ("--separate-vocals", "separate_vocals"),
+    ("--vad-threshold", "vad_threshold"),
+    ("--demucs-model", "demucs_model"),
+)
+
+
+def _url_incompatible_flags(args: argparse.Namespace) -> list[str]:
+    """URL 输入下被**显式指定**、但无法兑现的音频类参数（ADR-043 D6）。"""
+    out: list[str] = []
+    for flag, attr in _URL_INCOMPATIBLE_FLAGS:
+        val = getattr(args, attr, None)
+        if val is None or val is False:
+            continue
+        out.append(flag)
+    return out
+
+
+def _url_engine_tail(args: argparse.Namespace, outdir: str, base: str,
+                     ctx: dict[str, Any], cfg: Any) -> int:
+    """URL 输入取完字幕后的**编排尾段**（对齐 `cmd_run` 的语义）。
+
+    `captions` 只等价于 `run` 的 transcribe 段，故这里补上 `run` 的尾段：
+    ``agent``（默认）→ 落 `translate_task.json` 即挂起（**exit 6**，与本地路径
+    同一个翻译停点语义）；``google`` → 无头翻译 + generate，一路到 SRT。
+
+    **为什么不复用 `cmd_run`（哪怕 `--skip transcribe`）**：`cmd_run` 开头无条件调
+    `_resolve_routing` → `_ensure_audio_profile` → `analyze_audio(input_path)`，即
+    **拿 ffprobe 去打开一个 URL**（可能真的发起网络请求）。落 task 与无头翻译都不
+    需要音频，所以这里只走 `cmd_translate`，URL 绝不进入任何音频工具。
+    """
+    segments, zh = ctx["segments"], ctx["zh"]
+    argv = ["translate", "--segments", segments, "--out", zh]
+    style = getattr(args, "style", None) or getattr(cfg, "style", None)
+    if style and "," not in style:      # pipeline 的 --style 已是单值 choice
+        argv += ["--style", style]
+    if getattr(cfg, "engine", None) == "google":   # 已解析引擎（可来自 env/toml）
+        rc = cmd_translate(build_parser().parse_args(argv + ["--engine", "google"]))
+        if rc != EXIT_OK:
+            return rc
+        return cmd_generate(build_parser().parse_args([
+            "generate", "--segments", segments, "--zh", zh,
+            "--outdir", outdir, "--base", base]))
+    # agent（默认）：cmd_translate 落 task + 打印接手指引 → EXIT_AWAITING_AGENT
+    return cmd_translate(build_parser().parse_args(argv))
+
+
 def cmd_pipeline(args: argparse.Namespace) -> int:
     """T8 / ADR-033 / Spec 24: idempotent single-entry advancer.
 
@@ -1397,13 +1482,40 @@ def cmd_pipeline(args: argparse.Namespace) -> int:
     chunk caches and state fingerprints make every step resumable. The
     underlying run/generate/verify primitives keep their own gates and exit
     codes (this executor only dispatches and propagates).
+
+    ADR-043：入口按**输入形态**自动判定 —— YouTube URL 走接口型 ASR
+    （`captions` 通路），本地路径走 `run`（本地 Whisper）。判定归控制平面，
+    Agent 侧无需挑选入口（Spec 24 §6）。
     """
     from . import state as vt_state
     from .pipeline import build_ctx, next_action, resolve_position
 
     input_path = args.input
-    outdir = args.outdir or _default_outdir(input_path)
-    base = args.base or _default_base(input_path)
+    kind = classify_input(input_path)
+
+    if kind == INPUT_URL_UNSUPPORTED:
+        print(_UNSUPPORTED_URL_MESSAGE.format(url=input_path), file=sys.stderr)
+        return EXIT_ARGS
+
+    if kind == INPUT_YOUTUBE:
+        bad = _url_incompatible_flags(args)
+        if bad:
+            print(f"[pipeline] 该输入是 YouTube 链接，以下参数不适用："
+                  f"{', '.join(bad)}\n"
+                  "           接口型 ASR 直接取平台现成字幕，**不做本地音频处理**"
+                  "（无本地音频，ADR-042 D3 / ADR-043 D6）。\n"
+                  "  请去掉这些参数重跑；若确实要跑本地转写（含这些参数），"
+                  "请先把视频下载到本地再传路径。", file=sys.stderr)
+            return EXIT_ARGS
+        # URL 没有本地文件可推导：落点必须与 `captions` **逐字一致**
+        # （outdir=videos / base=视频 id），否则两条入口会落到不同目录，
+        # 幂等续跑与 captions_cache 复用都不成立（ADR-043 D5）。
+        outdir = args.outdir or "videos"
+        base = args.base or parse_video_id(input_path)
+    else:
+        outdir = args.outdir or _default_outdir(input_path)
+        base = args.base or _default_base(input_path)
+
     cfg = resolve_config({"style": getattr(args, "style", None)},
                          cwd=os.getcwd())
     prompt_mode = getattr(args, "prompt", None) or cfg.prompt
@@ -1433,9 +1545,16 @@ def cmd_pipeline(args: argparse.Namespace) -> int:
     if action == "stop_decision_point":
         # Preflight first (ADR-035 M2: analyze once, persist once) so the
         # rationale is available even if the user never proceeds.
-        prof = _ensure_audio_profile(outdir, base, input_path, cfg)
-        print("[decision point] translation style only (ADR-034: VAD / "
-              "vocal separation are explicit-flag overrides; default bare run)")
+        # ADR-043 D6: URL 输入**没有本地音频** —— 画像不适用，跳过探测，但**保留
+        # 风格选择**（决策点本就只选风格，画像只提供 rationale）。
+        if kind == INPUT_YOUTUBE:
+            prof = {}                       # 无画像，仅用于跳过 rationale
+            print("[decision point] translation style only "
+                  "(接口型 ASR：无本地音频，音频画像不适用 —— ADR-042 D3)")
+        else:
+            prof = _ensure_audio_profile(outdir, base, input_path, cfg)
+            print("[decision point] translation style only (ADR-034: VAD / "
+                  "vocal separation are explicit-flag overrides; default bare run)")
         rationale = prof.get("rationale") if isinstance(prof, dict) else None
         if rationale:
             print(f"  profile: {rationale}")
@@ -1443,13 +1562,39 @@ def cmd_pipeline(args: argparse.Namespace) -> int:
               "bilingual_study (双语精读)")
         print(f"  reply, then run: uv run video-translate pipeline "
               f"\"{input_path}\" --style <picked>")
-        print("  no reply by timeout -> just re-run `pipeline` (auto-route, "
-              "origin=profile)")
+        if kind == INPUT_YOUTUBE:
+            # 画像不存在 ⇒ 没有「按画像自动路由」这条退路，必须显式选风格。
+            print("  接口型 ASR 无音频画像，故不提供按画像自动路由 —— "
+                  "请显式选风格重跑（否则会再次停在此处）")
+        else:
+            print("  no reply by timeout -> just re-run `pipeline` (auto-route, "
+                  "origin=profile)")
         print("[NEXT] stage=preflight  (STOP POINT — decision point: "
               "style only)")
         return EXIT_AWAITING_AGENT
 
     if action == "transcribe":
+        if kind == INPUT_YOUTUBE:
+            # ADR-043 D4: URL 走接口型 ASR 通路（`cmd_captions` 已是完整通路：
+            # 取字幕 → 句子化 → 合并 → 落 `asr_source` → 记 transcribe 阶段）。
+            # **绝不交给 `cmd_run`** —— 那正是 ADR-042 D1 反对的「把 URL 塞进 run」，
+            # 会让「我明明没让它转写」变成隐性长任务。
+            # `--prompt require-profile` 的硬闸是**音频画像**闸，URL 无画像故不适用
+            # （风格决策点仍照常，见上）。
+            #
+            # ADR-031 D8：一次完整跑的起点重置 verify 重试计数（本地路径由
+            # `cmd_run` 做，URL 路径绕过了它，故在此补上）。
+            from .state import reset_verify_attempts
+
+            reset_verify_attempts(outdir, base)
+            rc = cmd_captions(build_parser().parse_args([
+                "captions", input_path, "--outdir", outdir, "--base", base]))
+            if rc != EXIT_OK:
+                return rc
+            # `captions` 只等价于 transcribe 段 —— 补上 `run` 的编排尾段，
+            # 使两条输入形态在同一 flag 下停在同一处（agent → exit 6 翻译停点；
+            # google → 一路到 SRT）。
+            return _url_engine_tail(args, outdir, base, ctx, cfg)
         extra = (["--require-profile"]
                  if prompt_mode == "require-profile" else None)
         return cmd_run(_pipeline_run_ns(args, outdir, base, extra=extra))
@@ -1458,7 +1603,12 @@ def cmd_pipeline(args: argparse.Namespace) -> int:
         task = os.path.join(workdir(outdir, base), f"{base}.translate_task.json")
         if not os.path.isfile(task):
             # Interrupted before task emission: self-heal by re-emitting the
-            # task via `run --skip transcribe` instead of a dangling pointer.
+            # task instead of a dangling pointer.
+            if kind == INPUT_YOUTUBE:
+                # ADR-043 D7: URL 输入**不得**回落 `cmd_run --skip transcribe`
+                # —— 它开头无条件 `analyze_audio(<url>)`（ffprobe 打开 URL）。
+                # 落 task 不需要音频，直接走 `cmd_translate`。
+                return _url_engine_tail(args, outdir, base, ctx, cfg)
             return cmd_run(_pipeline_run_ns(
                 args, outdir, base, extra=["--skip", "transcribe"]))
         print(_RUN_AWAITING_AGENT_INSTRUCTIONS.format(
@@ -1487,10 +1637,14 @@ def cmd_pipeline(args: argparse.Namespace) -> int:
             "--outdir", outdir, "--base", base] + extra))
 
     # action == "verify"
-    return cmd_verify(build_parser().parse_args([
-        "verify", "--segments", ctx["segments"], "--zh", ctx["zh"],
-        "--video", input_path,
-    ]))
+    argv = ["verify", "--segments", ctx["segments"], "--zh", ctx["zh"]]
+    # ADR-043 D7: URL 输入**不传 `--video`** —— `cmd_verify` 只在「`--video` 缺失
+    # **且** `asr_source.has_audio_reference` 为假」时才产出 `acoustic-unavailable`
+    # （ADR-042 D7）。把 URL 当 `--video` 传进去会让该标记保持为空，于是 verify
+    # 真的去探测一个 URL：声学 lane 变红，且病因完全误导。
+    if kind != INPUT_YOUTUBE:
+        argv += ["--video", input_path]
+    return cmd_verify(build_parser().parse_args(argv))
 
 
 def cmd_resegment(args: argparse.Namespace) -> int:

@@ -1,20 +1,39 @@
 # AGENTS.md — AI Agent Execution Protocol
 
-You are an AI agent asked to turn a video into bilingual (zh/en) subtitles using
-this project. Follow this protocol. It is tool-agnostic (WorkBuddy, Claude Code,
-Cursor, Cline, plain shell). **Do not reinvent the pipeline** — the rules below
-encode resume-safety, proxy correctness, the control-plane state machine (flow
-progression lives in code, [ADR-030](docs/adr/030-control-plane.md)), the
-agent-as-engine translation step, and strict three-lane verification. Your role
-is **Agent-as-Translator** (翻译 + 语义回读)，流程推进与闸门由代码状态机负责。
+You are an AI agent asked to turn a **video or a YouTube link** into bilingual
+(zh/en) subtitles using this project. Follow this protocol. It is tool-agnostic
+(WorkBuddy, Claude Code, Cursor, Cline, plain shell). **Do not reinvent the
+pipeline** — the rules below encode resume-safety, proxy correctness, the
+control-plane state machine (flow progression lives in code,
+[ADR-030](docs/adr/030-control-plane.md)), the agent-as-engine translation step,
+and strict three-lane verification. Your role is **Agent-as-Translator**
+(翻译 + 语义回读)，流程推进与闸门由代码状态机负责。
 
 **两种使用方式**（系统架构定位，[ADR-035](docs/adr/035-pipeline-data-contract.md) §8）：
-① **有翻译 agent**：用户说「我要翻译这个视频」→ 本 agent 调 `pipeline` 走流程，只负责
+① **有翻译 agent**：用户说「我要翻译这个视频 / 这个链接」→ 本 agent 调 `pipeline` 走流程，只负责
 翻译 + 语义回读 + 指向入口；② **无 agent**：用户/LLM 直接调 `pipeline`。程序唯一入口
-是 `pipeline`（`run` / `generate` / `verify` 为原语）。本文件是**翻译流程的唯一事实来源**；
+是 `pipeline`（`run` / `generate` / `verify` / `captions` 为原语）。本文件是**翻译流程的唯一事实来源**；
 编码规范（SDD/TDD + 数据契约总线五条铁律）见 `.codebuddy/rules/` 规则集。
 
+**入口按输入形态自动判定，Agent 不需要挑选子命令**（[ADR-043](docs/adr/043-input-form-auto-routing.md)）：
+本地音视频路径 → **本地 Whisper** 转写；**YouTube 链接 → 接口型 ASR**（取平台现成字幕，零算力）；
+其他 URL → **exit 2 + 指引**。**两种输入都直接 `pipeline "<输入>"`**，不要自己判断该用哪个命令。
+
 ## 0. 视频定位（Agent 入口寻源）
+
+**先看用户给了什么**——两种形态都直接丢给 `pipeline`，**不要自己挑选子命令**
+（[ADR-043](docs/adr/043-input-form-auto-routing.md) / [Spec 24 §6](docs/specs/24-pipeline-behavior.md)）：
+
+| 用户给的 | Agent 动作 |
+|---|---|
+| **YouTube 链接**（完整 URL） | 直接 `uv run video-translate pipeline "<完整的 URL>"` —— 入口自动走接口型 ASR。**不要**改跑本地转写、**不要**改用 `captions`（除非要做 §4.6 的探轨道 / 强制重取） |
+| **本地路径** | 按下面 1–3 步做定位与卫生校验 |
+| **只说「翻译这个视频」没说来源** | 按下面 1–3 步在 `videos/` 里找；找不到就问用户 |
+
+**非 YouTube 的 URL**（B站 / 直链等）**不要自行想办法下载或转写**：入口会明确报错
+（`exit 2` + 指引），把该提示**原样转达**用户即可（接口型 ASR 目前仅支持 YouTube）。
+从浏览器地址栏复制的完整 URL 才带 scheme；`youtube.com/watch?v=...` 这种**无 scheme**
+写法会被当作本地路径 —— 提醒用户用完整 URL。
 
 用户只说「翻译 XXX」「翻译这个视频」而未给路径时，**不要凭空猜测或臆造路径**，
 按以下顺序定位输入视频：
@@ -30,7 +49,8 @@ is **Agent-as-Translator** (翻译 + 语义回读)，流程推进与闸门由代
    `video_translate.cli.main([...])`，不要直接 `uv run ... "<中文路径>"`。
 
 > 输入视频与产物同处 `videos/` 之下；`outdir` / `base` 留空即自动取视频自身目录与
-> 文件名 stem，无需手动拼接。
+> 文件名 stem，无需手动拼接。**URL 输入例外**：缺省落点是 `videos/<video_id>/`
+> （与 `captions` 逐字一致，ADR-043 D5）。
 
 Read order: this file → [`TOOLCHAIN.md`](TOOLCHAIN.md) for environment setup →
 [`docs/TOOLING.md`](docs/TOOLING.md) for tool/dependency management (E1–E4) →
@@ -68,6 +88,7 @@ full architectural rationale.
 | **依赖与外部工具** | 加依赖只改 `pyproject` 不提交 `uv.lock`；手动下载 ffmpeg/模型塞进仓库或散落各盘 | 换机版本飘移、装成 CPU wheel、二进制垃圾散落缓存 | 一切依赖与外部资产按 [MAJOR_VERSION_PLAN.md](MAJOR_VERSION_PLAN.md) §3.2 规则 R1-R7 执行：依赖进顶层 + lockfile 成对提交；ffmpeg 由 `setup --ffmpeg` 自动下载；模型默认落项目根 `models/`（零 C 盘）不进 git。详见 [docs/TOOLING.md](docs/TOOLING.md)。 |
 | **补洞恢复段幻觉** | `fill_gaps` 漏音补洞恢复出的 `_recovered` 段（如 `Don't worry.`/`I'm a clown.`/`Hi, son.`/`Now what?`/`This is bad.`）与邻居段**时间窗口重叠**（骑在已确认音频上）或**语速物理不可能**（3 词塞进 0.16s），却因只过了文本相似度检查而溜进字幕 | 转写层 `drop_hallucination_segments` 只作用于 Whisper 原产段、在 fill_gaps **之前**运行，补洞恢复段完全绕过了它；手工改会破坏断点续跑 | `fill_gaps` 已内置 `_is_recovered_hallucination` 守卫（ADR-020 补遗/ADR-021）：恢复段与现有段重叠 >0.12s、或语速 >8wps、或 `no_speech_prob`>=0.6（Whisper 自判非语音，最强信号，avg_logprob 不设闸）、或 `avg_logprob`<-1.0、或**零时长词 ≥2 个**（DTW 坍缩指纹，如开头非语音能量被硬拼成 `Hubsan x4 H502E...`/`We'll be right back.`/`Thank you.` 全部被拦）即丢弃；collapse 替换路径关闭重叠信号以免误杀真替换。**resegment 拼接产出同过此守卫**（ADR-031 D1，拦截打印可见不静默），保留段打 `origin: "resegment"`（D2，恢复段类别对 verify/回读可见）。已单测固化，**全片重跑自动生效，不要手工改**。 |
 | **断句切点** | 看到句尾词被掐到下一条字幕（`my sister` ‖ `deidre`、`we don't` ‖ `know`）时，手工在剪映里挪词或改文本 | 破坏 index 对齐与声学时间戳；下次重跑复现 | 42 字符剪映上限必须切，但 V8 已让切点**智能回退**（ADR-022）：优先标点边界→次选 >0.3s 词间气口→贪心兜底；句首连接词孤儿（`because`）自动并右。无标点+零间隙的密集语流物理无解，等 whisperX 对齐后气口浮现。重跑自动生效。 |
+| **输入形态判定** | 拿到一段输入后自己判断「该用 `pipeline` 还是 `captions`、要不要转写」；把 YouTube 链接交给 `run` 或自行下载；看到非油管 URL 报 `exit 2` 就自己去找下载/绕过方案 | 入口判定已在控制平面（ADR-043）——Agent 层重复判断会与「流程推进归代码」的架构漂移，且各 Agent 实现不一致；把 URL 交给 `run` 会让「我明明没让它转写」变成隐性长任务（ADR-042 D1 明令禁止）；自行下载等于对用户隐瞒「仅支持 YouTube」这一能力边界 | **两种输入都直接 `uv run video-translate pipeline "<输入>"`** —— URL 自动走接口型 ASR，本地路径走 Whisper。非 YouTube URL 的 `exit 2` 提示**原样转达**用户，不要自行绕过。只有探轨道 / 强制重取 / 排查通路才用显式 `captions`（§4.6）。详见 [ADR-043](docs/adr/043-input-form-auto-routing.md) / [Spec 24 §6](docs/specs/24-pipeline-behavior.md)。 |
 | **取字幕通路** | 看到 `captions` 报「YouTube is unreachable / proxy is not accepting connections」就当成代码 bug，或想着"没代理就让它改跑本地转写" | 该命令的**唯一**功能就是取字幕 —— 通路不通即功能不可执行。静默改跑本地 Whisper 会让「我没让它转写」变成隐性长任务（ADR-042 D2 明令禁止）；而**代理端口写死**会让自动探测在别的机器上恒定失败并**静默退化为直连**（报出来的错和病因无关，最难诊断） | 通路不通 = **gate**：`GateFail` → **exit 8**，要放行只能显式修通路（`--proxy` / `VT_PROXY`），不能绕过。代理监听端口**不是默认 7899** 时**必须**设 `VT_PROXY_PORT`；`captions --list` 可先探轨道。详见 [ADR-042](docs/adr/042-youtube-captions-as-asr-source.md) / [Spec 29](docs/specs/29-interface-asr-captions.md)。 |
 | **中文路径参数** | 在 Windows PowerShell 5.1 下直接传中文视频路径（如 `pipeline "videos/角斗士采访.mp4"`），或看到 `OSError [WinError 123]` 后反复重试 | 参数被按 GBK(ACP 936) 解码成 mojibake（`角斗士采访`→`瑙掓枟澹\ue0a6噰璁?mp4`，含私用区字符与 `?`），`Path.stem` 吞掉扩展名，坏串一路流到 `io_utils.save_json` 抛 `WinError 123`，堆栈与病因无关、无法诊断；`0x92` 还会被解成右单引号，破坏 PowerShell 引号配对，命令连解析都过不去 | CLI 已在入口拦截（Spec 25）：报 `[args]` + 三条修法，exit 2，且不写任何产物。按指引选 ① 视频改用 ASCII 文件名；② 换 PowerShell 7（无 BOM 脚本按 UTF-8 读）；③ 显式传 `--base <ascii-name>`（中文文件名下只有 ①② 真正可用）。**不要**手工改 `sys.argv` 或绕过报错。详见 [Spec 25](docs/specs/25-cli-path-hygiene.md)。 |
 
@@ -79,7 +100,7 @@ full architectural rationale.
 
 | 维度 | 决策点 | 核心规则 | 依据 |
 |---|---|---|---|
-| **声学层**（时间轴压在真语音） | VAD 路由 | 依据 `doctor --video` 音频画像**自动路由**，禁止盲猜 | ADR-011 / ADR-012 |
+| **声学层**（时间轴压在真语音） | VAD 路由 | **默认裸跑**（ADR-034：音频画像**仅为参考、不驱动路由**）；确有需要时由用户显式传 `--vad` / `--separate-vocals`，禁止盲猜 | ADR-011 / ADR-012 / ADR-034 |
 | **声学层** | 漂移与漏检 | 对照 `silencedetect` 独立参照，探测静音跨越与 `uncovered-audio` (≥2s 无 cue 语音窗) | ADR-012 / ADR-016 |
 | **声学层** | 幻觉拦截 | 转写层 `drop_hallucination_segments` 五信号：word 塌缩≥50%+邻居3-gram 重复 / 整段落静音窗 / **尾部回音（窗口被邻居时间窗包含且含零时长词，确定性）/ Whisper 低 `avg_logprob`**；**补洞恢复段**另有 `_is_recovered_hallucination` 守卫（重叠>0.12s / 语速>8wps / 低置信度）兜住绕回 fill_gaps 的回音；**resegment 拼接产出同过此守卫**（拦截打印可见）；verify 声学 lane 巡检**相邻段重叠/词碰撞**（恢复段首词骑邻居词 = 幻觉前缀指纹，只报告不修剪）—— **只用 FFmpeg 独立参照与客观几何，不读 ASR 自评字段**（低置信道已由 ADR-041 移除） | ADR-012 / ADR-020 / ADR-021 / ADR-031 / ADR-041 |
 | **内容层**（zh 忠实于 en） | 覆盖与对齐 | `validate_zh`（覆盖率）→ `verify_align`（Pearson 索引对齐）→ 中英混杂词检测 → **语义回读（默认开启）** | Spec 17 / Spec 18 |
@@ -102,10 +123,11 @@ full architectural rationale.
 > 状态机决定，Agent 只做机器做不了的两件事——**决策点问人**与**翻译/语义回读**。
 > 不知道该干什么时，问状态机，不要凭记忆编排：
 > ```bash
-> uv run video-translate pipeline "<video>"  # 幂等推进器：每次推进到下一停点
+> uv run video-translate pipeline "<输入>"  # 本地路径 或 YouTube 链接 —— 入口自动判定
 > uv run video-translate status --json       # 你在哪 / 缺什么 / 下一步（agent 读这个）
 > ```
-> `run` / `generate` / `verify` 保留为底层原语（脚本 / golden 回归用），Agent 无需记忆。
+> `run` / `generate` / `verify` / `captions` 保留为底层原语（脚本 / golden 回归用），
+> Agent 无需记忆；`pipeline` 会按输入形态自动选 ASR 方案（[ADR-043](docs/adr/043-input-form-auto-routing.md)）。
 
 ### 3.1 幂等推进协议
 
@@ -125,6 +147,12 @@ full architectural rationale.
 `require-profile` 硬闸（无 explicit routing 即 exit 8）。`pipeline` 接受
 `--style / --vad / --adaptive-vad / --separate-vocals / --engine google` 等显式
 flag（原样转发底层 run；显式 flag 即视为决策完成，origin=explicit 落盘）。
+
+> **URL 输入的差异**（[ADR-043](docs/adr/043-input-form-auto-routing.md) D6）：决策点仍会问
+> 翻译风格，但**跳过音频画像**（无本地音频，画像不适用）—— 所以**没有「按画像自动路由」
+> 这条退路**，必须显式带 `--style` 重跑，否则会再次停在此处。URL 输入也不接受
+> `--vad` / `--adaptive-vad` / `--separate-vocals` / `--vad-threshold` / `--demucs-model`：
+> 显式请求无法兑现时报 `exit 2` 并说明原因，**绝不静默忽略**（ADR-038 裁决一）。
 
 ### 3.2 Agent 翻译协议（翻译停点职责）
 作为翻译引擎，Agent 执行以下步骤：
@@ -173,7 +201,7 @@ Agent **不需要记忆命令拼装**。两条 Agent 必须知道的契约：
 |---|---|---|---|
 | 0 | `EXIT_OK` | 成功 | 按 [NEXT] 块走下一步 |
 | 1 | `EXIT_RUNTIME` | 运行时错误 | 读 stderr；用 `status` 查进度；**勿删缓存** |
-| 2 | `EXIT_ARGS` | 参数错误（如 verify 缺 `--zh`/`--video`） | 补齐参数重跑 |
+| 2 | `EXIT_ARGS` | 参数错误（verify 缺 `--zh`/`--video`；**URL 非 YouTube**；URL 传了音频类参数） | 按 stderr 指引补齐 / 去掉参数重跑 |
 | 3 | `EXIT_MISSING_DEP` | 依赖缺失（模型残缺等） | 跟指引 `uv run video-translate setup` |
 | 4 | `EXIT_PROXY` | 代理不可用 | 查代理配置（[TOOLCHAIN.md](TOOLCHAIN.md)） |
 | 5 | `EXIT_KILLED` | 进程被杀（OOM/手动终止） | 断点缓存仍在，直接重跑 |
@@ -287,6 +315,8 @@ BGM 场景 `--separate-vocals`、干净录音 `--vad`。
 3. 用户回复 → `uv run video-translate pipeline "<video>" --style <picked>`
    （origin=explicit 落盘）；超时未回复 → 不带 flag 重跑 `pipeline`（按画像自动
    路由，origin=profile）。
+   > **URL 输入没有「超时自动路由」这一档**（无画像，ADR-043 D6）：必须拿到用户的
+   > 风格选择、带 `--style` 重跑；不带 flag 重跑会再次停在同一决策点。
 4. 重跑 `pipeline` 见 routing 已存在 → 续 transcribe，直至下一停点（翻译）。
 
 > **兜底**：即便 Agent 失守直接 `run`，`cmd_run` 也会自动画像 + 自动路由
@@ -298,6 +328,28 @@ BGM 场景 `--separate-vocals`、干净录音 `--vad`。
 - 决策点模式：`VT_PROMPT`（默认 `always`）→ 同上 `prompt`（[pipeline] 节）
 - 默认风格 / VAD 阈值等：对应 `VT_STYLE` / `VT_VAD_THRESHOLD`（默认 0.35）等，见
   [config.py](src/video_translate/config.py) 与 `.env.example`
+
+---
+
+### 4.6 接口型 ASR 直达入口 (`captions`)
+
+`pipeline "<YouTube 链接>"` 已自动走这条路 —— **日常不需要手写 `captions`**。
+它保留为**显式直达入口**，用于三件 `pipeline` 不提供的事
+（[ADR-042](docs/adr/042-youtube-captions-as-asr-source.md) / [Spec 29](docs/specs/29-interface-asr-captions.md)）：
+
+| 场景 | 命令 |
+|---|---|
+| 先探这条视频有哪些字幕轨（人工 CC / 自动 / 语言） | `uv run video-translate captions "<链接>" --list` |
+| 缓存过时 / 想强制重取 | `uv run video-translate captions "<链接>" --refresh` |
+| 只取人工 CC、拒绝自动 ASR | `uv run video-translate captions "<链接>" --no-auto` |
+
+- 产物与 `pipeline "<链接>"` **同契约、同目录**（`videos/<video_id>/`），可互相接续。
+- 与 `pipeline` 的差异：**不经决策点**（不选翻译风格，直接到翻译停点）。
+- **通路不通 = gate（exit 8）**：该命令的唯一功能就是取字幕，通路不通即功能不可执行。
+  **不要**想着「没代理就让它改跑本地转写」—— 静默回退被明确禁止（ADR-042 D2）。
+  代理监听端口不是默认 7899 时**必须**设 `VT_PROXY_PORT`（否则自动探测恒定失败、
+  且会静默退化为直连，报出的错与病因无关）。
+- **无字幕轨即报错**（exit 1），绝不静默回退本地 Whisper。
 
 ---
 

@@ -124,14 +124,45 @@ def _engine_cap_names(provider: Any | None = None) -> tuple[str, ...]:
     return tuple(out)
 
 
+def _source_of(video: str | None) -> str:
+    """输入来源：``"url"`` / ``"file"``（ADR-043 D2）。
+
+    判定复用 ``ytcaptions.classify_input``（全项目唯一定义），本函数只做「YouTube
+    → url，其余 → file」的投影 —— 这里关心的是**取法**，不是平台。
+    任何异常一律回 ``"file"``：判定失败按本地处理，维持改动前的行为。
+    """
+    try:
+        from .ytcaptions import INPUT_YOUTUBE, classify_input
+
+        return "url" if classify_input(video) == INPUT_YOUTUBE else "file"
+    except Exception:  # noqa: BLE001 - 判定不应让位置解析崩掉
+        return "file"
+
+
+def stage_cli(spec: dict[str, Any], ctx: dict[str, Any]) -> str:
+    """某个阶段在**当前来源**下该打印的执行命令（ADR-043 D2）。
+
+    ``STAGES`` 仍是纯数据：``cli`` 是默认串（本地路径），``cli_by_source`` 按
+    ``ctx["_source"]`` 覆盖。**只影响渲染**（NEXT 块 / `status --json`），不影响
+    执行 —— 真正的分支在 ``cli.cmd_pipeline``。
+    """
+    by_source = spec.get("cli_by_source") or {}
+    return by_source.get(ctx.get("_source"), spec["cli"])
+
+
 def build_ctx(outdir: str | Path, base: str,
               video: str | None = None, *,
-              provider: Any | None = None) -> dict[str, Any]:
+              provider: Any | None = None,
+              source: str | None = None) -> dict[str, Any]:
     """Collect the per-base artifact paths into a context dict for the table.
 
     ADR-038 D7: 引擎特定前置由 Provider **自报**注入（``_engine_caps``），使
     ``STAGES`` 只声明通用前置 —— 换 ASR 引擎不必改阶段表。``provider`` 仅供测试
     替换默认引擎。
+
+    ADR-043 D2: 输入来源（``_source``）同样注入 —— 渲染层据此在 ``cli`` /
+    ``cli_by_source`` 之间选串。``source`` 缺省时由 ``video`` 推出（调用方已知来源
+    时应显式传入，避免重复判定）。
     """
     root = Path(outdir)
     return {
@@ -144,6 +175,8 @@ def build_ctx(outdir: str | Path, base: str,
         "srt": _find_srt(outdir, base),
         # ADR-038 D7: 引擎特定就绪要求（Provider 自报；不参与 _CTX_REQUIREMENTS）
         "_engine_caps": _engine_cap_names(provider),
+        # ADR-043 D2: 输入来源（"url" / "file"；同上，不参与 _CTX_REQUIREMENTS）
+        "_source": source or _source_of(video),
     }
 
 
@@ -227,7 +260,8 @@ def resolve_position(ctx: dict[str, Any],
     nxt = None if done else {
         "stage": current,
         "title": stage(current)["title"],
-        "cli": stage(current)["cli"],
+        # ADR-043 D2: 按输入来源选执行命令（URL → captions / 本地 → run）
+        "cli": stage_cli(stage(current), ctx),
         "stop_point": stage(current)["stop_point"],
         "why": ("agent translation pending (stop point A)"
                 if current == "translate" else

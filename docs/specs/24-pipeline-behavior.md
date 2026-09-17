@@ -2,7 +2,7 @@
 
 - 状态: 批准（实现）
 - 日期: 2026-09-03
-- 关联: ADR-033（决策）、ADR-030（控制平面）、ADR-032（决策点协议）、ADR-034（默认裸跑）、MAJOR_VERSION_PLAN §T8
+- 关联: ADR-033（决策）、ADR-030（控制平面）、ADR-032（决策点协议）、ADR-034（默认裸跑）、[ADR-043](../adr/043-input-form-auto-routing.md)（输入形态自动判定）、[ADR-042](../adr/042-youtube-captions-as-asr-source.md)（接口型 ASR）、MAJOR_VERSION_PLAN §T8
 
 ## 目标
 
@@ -12,9 +12,12 @@
 ## 范围
 
 - **IN（本 Spec）**：`pipeline` 子命令与 `--prompt` 三档；`next_action` 纯决策
-  函数；决策点收窄为 style 单项（ADR-034 调和）；NEXT 块与退出码契约。
+  函数；决策点收窄为 style 单项（ADR-034 调和）；NEXT 块与退出码契约；
+  **输入形态自动判定**（§6，ADR-043）。
 - **OUT**：不新增状态机阶段、不新增退出码、不改 `run`/`generate`/`verify`
   三个原语的行为与参数（golden 保护）；不新增产物文件或缓存指纹维度。
+  §6 的输入形态判定**不违反本条** —— 它只在分发层按来源选择执行器，
+  三个原语的自有闸门与退出码原样透传。
 
 ## 配置（三级覆盖）
 
@@ -82,3 +85,52 @@ origin=explicit。决策点问出的 style 由 Agent 以重跑
 - `cmd_pipeline` 分派：mock 执行器断言调用了正确的原语并透传退出码；
 - 停点 NEXT 文本含 `STOP POINT` 与 `decision point` / 翻译职责标注；
 - 底层原语回归：`run`/`generate`/`verify` 既有测试零改动全绿。
+
+## 6. 输入形态自动判定（ADR-043）
+
+`pipeline <输入>` 接受**两种输入形态**，由控制平面在分发前判定；**Agent 侧无需判断**
+（[ADR-043](../adr/043-input-form-auto-routing.md) D1：入口判定属流程推进，归代码）。
+
+### 6.1 三态判定（唯一纯函数）
+
+判定实现在 `ytcaptions.classify_input`（[ADR-043](../adr/043-input-form-auto-routing.md) D2），
+`cli` 消费其结果，**不另写正则**：
+
+| 状态 | 判据 | 分发 |
+|---|---|---|
+| `youtube` | **带 scheme** 的 URL 且能解出 11 位视频 id | `transcribe` 动作 → **接口型 ASR 通路**（`cmd_captions`，[Spec 29](29-interface-asr-captions.md)） |
+| `url-unsupported` | 带 scheme 的 URL 但非 YouTube | **`exit 2`** + 指引，**不落任何产物**（ADR-043 D3） |
+| `path` | 其余一切 | `transcribe` 动作 → `cmd_run`（本地 Whisper），**行为逐字节不变** |
+
+- 只认**带 scheme** 的 URL（`scheme://`）：`C:\` / `C:/` 盘符（单斜杠）与 UNC 路径不匹配 → `path`。
+- **边界（显式记录）**：无 scheme 的 `youtube.com/watch?v=x` 按 `path` 处理（ADR-043 D2）。
+
+### 6.2 URL 输入的落点与差异
+
+| 项 | 本地路径 | **URL 输入** |
+|---|---|---|
+| `outdir` 缺省 | 输入自身目录（Spec 11） | **`videos`**（与 `captions` 一致） |
+| `base` 缺省 | 文件名 stem（Spec 11） | **解析出的 video id** |
+| 决策点 | 画像 + 风格 | **仅风格** —— 无本地音频，跳过画像（ADR-043 D6） |
+| verify 的 `--video` | 照传 | **不传** → [Spec 29](29-interface-asr-captions.md) 的 `acoustic-unavailable` 生效（ADR-043 D7） |
+| `--refresh` | 不涉及 | `pipeline` **不提供**；强制重取用显式 `captions --refresh`（ADR-043 D9） |
+
+`run` / `generate` / `verify` 三个原语的**行为与参数零改动**；URL 的差异全部在分发层
+用来源条件包住（ADR-043「本地路径分支零变化」）。
+
+### 6.3 入口边界：URL 豁免路径卫生校验
+
+Spec 25 的 `_path_hygiene_error` 对**带 scheme 的 URL 值跳过文件名校验** —— URL 不是文件名，
+`?` / `:` 在 URL 里合法，但命中 Windows 非法字符集。**不豁免则最常见的 `watch?v=` 形式会在
+入口被 `exit 2` 拦下**，本节规则根本无从执行（ADR-043 D8，实测缺陷）。
+豁免只针对**URL 形态**，真实文件名仍受 Spec 25 全量保护。
+
+### 6.4 TDD 清单（本节新增）
+
+- 三态判定纯函数：`youtube` / `url-unsupported` / `path`；边界含 Windows 盘符（`C:\`、`C:/`）、
+  UNC、相对路径、无 scheme 域名、裸 id、带查询串的 `watch?v=` / `youtu.be/...?t=`；
+- `pipeline <youtube url>` → 分发到接口型 ASR 通路（mock），落点 `videos/<id>/`；
+- `pipeline <非油管 url>` → `exit 2` + 指引，且**不落任何产物**；
+- `pipeline <本地路径>` → 分发与行为**与改动前一致**（回归保护）；
+- URL 输入下 verify **不传 `--video`**；
+- 卫生校验：`watch?v=` 形式**放行**；真实含 `?` 的 Windows 文件名**仍拒绝**（Spec 25 保护不回退）。

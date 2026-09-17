@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 from .merge import DEFAULT_MAX_CHARS, DEFAULT_MAX_DUR
 from .text_utils import to_single_line
@@ -66,6 +67,77 @@ def parse_video_id(url_or_id: str) -> str:
         if _VIDEO_ID_RE.match(seg):
             return seg
     raise ValueError(f"cannot parse a YouTube video id from {url_or_id!r}")
+
+
+# --------------------------------------------------------------------------- #
+# 输入形态判定（纯函数；ADR-043 D2 —— 全项目唯一判定来源）
+# --------------------------------------------------------------------------- #
+# 带 scheme 的 URL（`scheme://`）。两条刻意的收紧，都是为了让**本地路径**不命中：
+#   1. 要求 `://`（双斜杠）—— 盘符 `C:\` / `C:/` 是单斜杠，不匹配；
+#   2. scheme 至少 2 个字符（`+` 而非 `*`）—— 挡住手滑写成 `C://videos/a.mp4` 的
+#      盘符（单字母 scheme 在现实中不存在，但会把路径误判成 URL）。
+# UNC 路径（`\\server\share`）本就无 scheme，自然不匹配。
+_URL_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]+://")
+
+# YouTube 域的根域名（含子域）。host 判定是必要的：只看"能否解析出 11 位 id"
+# 会把 `https://example.com/abcdefghijk` 这类末段恰好 11 字符的 URL 误判为油管。
+_YOUTUBE_HOSTS = ("youtube.com", "youtu.be", "youtube-nocookie.com")
+
+# classify_input 的三态（ADR-043 D2）
+INPUT_YOUTUBE = "youtube"
+INPUT_URL_UNSUPPORTED = "url-unsupported"
+INPUT_PATH = "path"
+
+
+def looks_like_url(s: str | None) -> bool:
+    """``s`` 是否是**带 scheme 的 URL**（``scheme://...``）。
+
+    只认带 scheme 的形态是刻意的：盘符（``C:\\videos\\a.mp4``、``C:/a.mp4``）与
+    UNC 路径（``\\\\server\\share\\x.mp4``）都不匹配 —— 误判成 URL 会让本地文件
+    走错通路。**无 scheme** 的 ``youtube.com/watch?v=x`` 同样按路径处理
+    （ADR-043 D2 显式边界）。
+
+    复用方：``cli._path_hygiene_error`` 的 URL 豁免（ADR-043 D8）—— 保证"什么算 URL"
+    全项目只有一份定义。
+    """
+    return bool(_URL_SCHEME_RE.match((s or "").strip()))
+
+
+def _is_youtube_host(host: str) -> bool:
+    h = (host or "").lower().strip(".")
+    return any(h == d or h.endswith("." + d) for d in _YOUTUBE_HOSTS)
+
+
+def classify_input(s: str | None) -> str:
+    """判定输入形态：``youtube`` / ``url-unsupported`` / ``path``（ADR-043 D2）。
+
+    判定**只回答「原始段从哪里来」**，不回答「取不取得到」—— 通路可达性归
+    :func:`preflight_network`（``GateFail`` → exit 8），视频有无字幕归
+    :func:`fetch_transcript`。
+
+    ``url-unsupported`` 覆盖两种情形（同一条指引文案都成立）：host 不是 YouTube，
+    或 host 是 YouTube 但 URL 里没有可解析的视频 id。**host 判定是必要的** —— 只看
+    "能否解析出 11 位 id" 会把 ``https://example.com/abcdefghijk``（末段恰好 11 字符）
+    误判为 YouTube，于是失败信息会指向完全错误的病因。
+
+    边界（显式记录，避免被误读为 bug）：无 scheme 的 ``youtube.com/watch?v=x``
+    按 ``path`` 处理 —— 从浏览器地址栏复制的完整 URL 必然带 scheme，而放宽无 scheme
+    形态会让「本地真有个叫 ``youtube.com`` 的目录」产生新歧义。
+    """
+    text = (s or "").strip()
+    if not looks_like_url(text):
+        return INPUT_PATH
+    try:
+        host = urlsplit(text).hostname or ""
+    except ValueError:          # 畸形 URL（如非法 IPv6 字面量）
+        return INPUT_URL_UNSUPPORTED
+    if not _is_youtube_host(host):
+        return INPUT_URL_UNSUPPORTED
+    try:
+        parse_video_id(text)
+    except ValueError:
+        return INPUT_URL_UNSUPPORTED
+    return INPUT_YOUTUBE
 
 
 # --------------------------------------------------------------------------- #

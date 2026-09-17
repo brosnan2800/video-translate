@@ -7,7 +7,7 @@
 | **AI Agent**（被召唤来翻译视频） | [`AGENTS.md`](../AGENTS.md)（必读：执行协议 + 避坑红线）→ 用 `pipeline` 单一入口推进 |
 | **新贡献者**（搭环境跑通） | [`TOOLCHAIN.md`](../TOOLCHAIN.md) → [`TOOLING.md`](TOOLING.md) |
 | **想了解全局规划** | [`MAJOR_VERSION_PLAN.md`](../MAJOR_VERSION_PLAN.md) |
-| **想查「为什么这么设计」** | [`adr/`](adr)（架构决策记录，40 篇，编号 001–042） |
+| **想查「为什么这么设计」** | [`adr/`](adr)（架构决策记录，41 篇，编号 001–043） |
 | **想查「行为契约是什么」** | [`specs/`](specs)（行为规格，29 篇，编号 00–29） |
 | **想查历史 / 事故复盘** | [`HISTORY.md`](HISTORY.md) · [`POSTMORTEM-JamieFoxx.md`](POSTMORTEM-JamieFoxx.md) |
 
@@ -19,10 +19,10 @@
 docs/
 ├── index.md                  本文件：文档库总索引
 ├── TOOLING.md                工具与依赖管理（操作手册）
-├── HISTORY.md                版本演进史（V3–V15）与实战案例
+├── HISTORY.md                版本演进史（V3–V18）与实战案例
 ├── POSTMORTEM-JamieFoxx.md   Jamie Foxx 混剪事故复盘（V8–V13）
 ├── RESEARCH-voice-pro.md     Voice-Pro 对标研究（E1–E4 论证来源）
-├── adr/                      架构决策记录（不可变历史，001–042）
+├── adr/                      架构决策记录（不可变历史，001–043）
 ├── specs/                    行为规格契约（00–29）
 ├── drafts/                   设计草稿（进行中，不保证与代码同步）
 └── archive/                  已归档（历史/废弃，不参与日常查阅）
@@ -114,6 +114,7 @@ docs/
 | [032](adr/032-translation-workflow.md) | 翻译工作流与决策点协议（P0→P1） | 接受 |
 | [033](adr/033-control-plane-pipeline-entry.md) | `pipeline` 单一入口幂等推进器（T8） | Accepted（已落地） |
 | [035](adr/035-pipeline-data-contract.md) | 阶段间数据契约总线 | Accepted |
+| [043](adr/043-input-form-auto-routing.md) | **输入形态自动判定**（URL → 接口型 ASR / 本地路径 → Whisper；判定归控制平面） | Accepted（已实现） |
 
 ### 架构分层与目录
 | ADR | 主题 | 状态 |
@@ -156,7 +157,7 @@ docs/
 | 架构分层 | [27 ASRProvider 接口](specs/27-asr-provider.md) · [28 ASR 门面 + 就绪接线](specs/28-asr-facade-and-readiness.md) · [29 接口型 ASR（`captions`）](specs/29-interface-asr-captions.md) |
 
 > Spec 编号 **缺 05**：已删除（说明见 `11-cli-v2.md`）。
-> Spec 00–21 为行为契约、随代码演进，不设 Accepted/Superseded 状态；22–27 带状态字段。
+> Spec 00–21 为行为契约、随代码演进，不设 Accepted/Superseded 状态；22–29 带状态字段。
 
 ---
 
@@ -177,7 +178,7 @@ docs/
 
 | 文件 | 归档原因 |
 |---|---|
-| [`archive/V3-STATUS.md`](archive/V3-STATUS.md) | 自述冻结于 V3（2026-07），当前已至 V14；含指向 README 旧章节的失效链接 |
+| [`archive/V3-STATUS.md`](archive/V3-STATUS.md) | 自述冻结于 V3（2026-07），当前已至 V18；含指向 README 旧章节的失效链接 |
 | [`archive/CONTROL-PLANE-PLAN.md`](archive/CONTROL-PLANE-PLAN.md) | 控制平面改造方案，已全量落地（2026-09-01）；决策结论见 [ADR-030](adr/030-control-plane.md) |
 | [`archive/design/`](archive/design/) | 整目录孤儿（三大入口零引用），内容停在 V3；有效部分已并入 `specs/` |
 | [`archive/issues/001`](archive/issues/001-subtitle-timing-gaps-and-early-cues.md) | 字幕时序 issue，已修复闭环；结论见 [Spec 15](specs/15-timing-silence.md) |
