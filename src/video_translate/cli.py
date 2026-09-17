@@ -876,7 +876,15 @@ def cmd_translate(args: argparse.Namespace) -> int:
                                 glossary=glossary_text, source=cfg.source,
                                 full_transcript=cfg.full_transcript, style=cfg.style)
         base = _derive_base(segments)
-        outdir = str(Path(out).parent)
+        # ADR-037 布局：产物在 `<outdir>/<base>/` 下，而 `--out` 指向其中的
+        # `<base>.zh_segments.json` —— 故 outdir 必须上溯到 `<base>/` 的**父目录**。
+        # 否则下文 `_AGENT_TRANSLATE_INSTRUCTIONS` 里那条
+        # `generate --outdir {outdir} --base {base}` 会让 Agent 多嵌一层路径而失败，
+        # `_print_pipeline_next` 也会因双重嵌套解析不出产物（误报 stage=transcribe）。
+        # 兼容 `--flat`：真给了平铺路径时用其所在目录。
+        seg_dir = os.path.dirname(segments)
+        outdir = (os.path.dirname(seg_dir)
+                  if os.path.basename(seg_dir) == base else seg_dir)
         print(_AGENT_TRANSLATE_INSTRUCTIONS.format(
             task=task_path, segments=segments, out=out, outdir=outdir, base=base))
         _print_pipeline_next(outdir, base)

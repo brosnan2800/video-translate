@@ -168,3 +168,34 @@ def test_translate_engine_agent_returns_awaiting(tmp_path, golden_segments_path,
     assert "[AWAITING_AGENT]" in captured
     task = os.path.join(str(tmp_path), "zh.translate_task.json")
     assert os.path.exists(task)
+
+
+def test_translate_next_block_uses_root_outdir_not_per_base(tmp_path, capsys):
+    """ADR-037 布局下 `translate` 的 NEXT 块与指令必须指向**根 outdir**。
+
+    回归（ADR-043 落地时由 `pipeline <url>` 暴露的既有缺陷）：原实现取
+    `outdir = Path(out).parent`，得到 `<root>/<base>`；而 `artifact_path` 会
+    **再拼一层** `<base>/` ⇒ 位置解析双重嵌套：
+      - `_print_pipeline_next` 解析不出 segments → 误报 `stage=transcribe / 缺 video`；
+      - 指令里那条 `generate --outdir <root>/<base> --base <base>` 让 Agent
+        照做必然失败（generate 会去 `<root>/<base>/<base>/` 找产物）。
+    """
+    import json as _json
+    import re
+
+    wd = tmp_path / "demo"
+    wd.mkdir()
+    (wd / "demo.segments_en.json").write_text(
+        _json.dumps([{"start": 0.0, "end": 1.0, "text": "hi"}]), encoding="utf-8")
+
+    rc = main(["translate", "--segments", str(wd / "demo.segments_en.json"),
+               "--out", str(wd / "demo.zh_segments.json"), "--engine", "agent"])
+
+    assert rc == EXIT_AWAITING_AGENT
+    out = capsys.readouterr().out
+    assert "[NEXT] stage=translate" in out
+    assert "missing video" not in out            # 双重嵌套的症状
+
+    m = re.search(r"--outdir (\S+) --base demo", out)
+    assert m, out
+    assert os.path.normpath(m.group(1)) == os.path.normpath(str(tmp_path))
