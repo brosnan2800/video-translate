@@ -171,6 +171,24 @@ def test_interface_asr_acoustic_unavailable_report_only_under_no_strict(art, cap
     assert "acoustic-unavailable" in capsys.readouterr().out
 
 
+def test_interface_asr_never_probes_audio_profile(art, capsys, monkeypatch):
+    """回归（接口型 ASR verify 路径）：`video` 为 None 时绝不可调
+    `analyze_audio(None)` —— 否则会抛 TypeError 并被误记为无关的 `profile-error`
+    红灯（GxggU7XoCLg YouTube Shorts 实测撞到）。声学 lane 只应标
+    `acoustic-unavailable`（按设计即红），不应再叠一条虚假 profile-error。"""
+    calls = []
+    def _must_not_call(video, noise="-30dB", d=0.3):
+        calls.append(video)
+        raise AssertionError("analyze_audio 绝不应在接口型 ASR（video=None）下被调用")
+    monkeypatch.setattr(cli, "analyze_audio", _must_not_call)
+    _mark_interface_asr(art)
+    assert _run_no_video(art, []) == cli.EXIT_GATE_FAIL
+    assert not calls                       # analyze_audio 一次都没被调
+    out = capsys.readouterr().out
+    assert "acoustic-unavailable" in out
+    assert "profile-error" not in out
+
+
 def test_interface_asr_still_runs_geometry_checks(art, capsys):
     """几何子检查（相邻重叠）**不需要音频** → 即便无音频参照也必须照常执行。"""
     _mark_interface_asr(art)

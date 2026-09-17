@@ -2150,7 +2150,12 @@ def cmd_verify(args: argparse.Namespace) -> int:
             duration=ac.get("duration"), ok=True,
         )
         ac_hit = True
-    if prof is None:
+    # ADR-043 D4 补遗：接口型 ASR（`video` 为 None，已走 `acoustic-unavailable`）
+    # 根本没有本地音频可探测 —— 此时绝不能调 `analyze_audio(None)`，否则会抛
+    # `expected str, bytes or os.PathLike object, not NoneType` 并被误记为一条
+    # 无关的 `profile-error` 红灯，污染本就预期为红（按设计）的声学 lane。
+    # 事故来源：GxggU7XoCLg YouTube Shorts 经 `pipeline <url>` 跑 verify 实测撞到。
+    if prof is None and video is not None:
         try:
             prof = analyze_audio(video, noise=noise, d=d)
         except Exception as exc:  # noqa: BLE001 - profile probe crashed
