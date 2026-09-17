@@ -7,7 +7,7 @@ manual fallback into a one-command flow.
 
 ### Prepare (default)
 ```
-video-translate backfill --pending <base>.agent_pending.json --out <base>.zh_segments.json
+uv run video-translate backfill --pending <base>.agent_pending.json --out <base>.zh_segments.json
 ```
 Reads `agent_pending.json` (`[{index, start, end, text}]`), writes
 `<base>.backfill_task.json` via `prepare_translate_task(..., index_key="index")`
@@ -16,7 +16,7 @@ Returns `EXIT_AWAITING_AGENT` (6) with instructions.
 
 ### Merge (`--agent-zh`)
 ```
-video-translate backfill --pending <base>.agent_pending.json --out <base>.zh_segments.json \
+uv run video-translate backfill --pending <base>.agent_pending.json --out <base>.zh_segments.json \
     --agent-zh <filled.json> --segments <base>.segments_en.json --outdir <dir> --base <base>
 ```
 `merge_agent_zh` merges the agent-filled translations into `zh_segments.json`

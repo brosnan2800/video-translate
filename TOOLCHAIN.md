@@ -48,11 +48,12 @@ gitignore  ：.venv/            ← 环境（可随时删掉重建，uv run vide
 
 ```
 ① 先决条件：Python ≥ 3.10（唯一人工步骤；uv 未装见 https://docs.astral.sh/uv/getting-started/installation/）；
-            ffmpeg 待 E2 落地后可 setup --ffmpeg 自动
-② git clone && uv run video-translate setup      # uv sync 依赖（uv.lock 固化，按平台自动选源）+ 模型（项目根 models/，零 C 盘，E3 后带自愈）
-③ cp .env.<platform>.example .env.<platform>  # 填本机差异项（E4 后 CUDA 通常免填）
-④ uv run video-translate doctor                  # 全绿才算就绪（实际命令：uv run video-translate doctor）
-⑤ Agent 按 AGENTS.md 状态机开工（run → exit 6 → 翻译 → generate → verify）
+            ffmpeg **无需人工安装**：`uv run video-translate setup --ffmpeg` 自动下载便携版（E2 已落地）
+② git clone && uv run video-translate setup      # uv sync 依赖（uv.lock 固化，按平台自动选源）+ 模型（项目根 models/，零 C 盘，带完整性自愈）
+③ cp .env.<platform>.example .env.<platform>  # 填本机差异项（CUDA 通常免填）
+④ uv run video-translate doctor                  # 全绿才算就绪（ffmpeg/ffprobe 缺失即 exit 7）
+⑤ Agent 按 AGENTS.md 状态机开工（**唯一入口 `pipeline`**：丢本地路径或 YouTube 链接，
+   按停点接手；**不要自行编排** `run → generate → verify`）
 故障恢复：删 .venv 重跑 uv run video-translate setup（数据无损）
 ```
 
@@ -282,8 +283,9 @@ uv run video-translate verify --segments videos/example.segments_en.json --zh vi
    - 设置 `HF_ENDPOINT=https://hf-mirror.com`，或手动将模型文件放置在 `models/large-v3/` 目录下。
 
 ### 备注
-- AGENTS.md §1 Preflight 的 `.venv/bin/video-translate` 是 Linux/macOS 写法；
-  Windows 下等价调用为 `uv run video-translate`（由 `uv` 定位项目 `.venv`）。
+- 所有命令一律 **`uv run` 前缀**（[Spec 23](docs/specs/23-environment-location.md) /
+  [ADR-029](docs/adr/029-command-entry-uv-run.md)）—— `uv` 会定位项目 `.venv`，
+  无需手写 `.venv/bin/video-translate` 或 `.venv\Scripts\...` 的完整路径。
 - `doctor` 会报告 ffmpeg/ffprobe、HF 模型缓存、依赖、音频画像与 VAD 路由建议，
   开工前必须先跑（AGENTS.md 铁律）。ffmpeg/ffprobe 缺失时 `doctor` 默认 `EXIT_DOCTOR_FAIL(7)` 退出（硬依赖，缺之转写必崩）；其余项默认仅打印 `[MISS]`，`--strict` 才把所有 `[MISS]` 升格为失败。
 - 模型（large-v3）**默认落项目根 `models/large-v3/`**（零 C 盘，见 §6 规范）；

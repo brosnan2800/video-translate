@@ -90,10 +90,12 @@ a 41 s gap at 922→963 s).
   window start; no downstream recomputation.
 - **Audit is idempotent-ish.** If no hole (`≥ min_gap`) and no collapse is found,
   the input is returned unchanged and the audit is essentially free.
-- **Content type, not length, decides VAD.** The probe always runs with
-  `vad_filter = use_vad` (default `False`), i.e. the same VAD-off default as the
-  main transcription (see ADR-011). Forcing VAD here would re-introduce the very
-  drop this module exists to fix.
+- **Content type, not length, decides VAD.** The forced decode runs with
+  `vad_filter = False` **hard-coded** —— recovery is **always bare**
+  ([ADR-016](../adr/016-recall-recovery-net.md) T2a). Forcing VAD here would
+  re-introduce the very drop this module exists to fix.
+  （`use_vad` 仅为 CLI 兼容入参、**被解码忽略**，见下方 §Defaults —— 原文写作
+  `vad_filter = use_vad` 与该行自相矛盾。）
 
 ## Defaults
 | Param | Default | Notes |

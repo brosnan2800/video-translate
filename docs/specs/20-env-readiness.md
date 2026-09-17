@@ -33,10 +33,13 @@ Spec 23（命令入口确定化，统一 `uv run`）。
 - 新旗标 `--ffmpeg`：下载便携版到 `tools/ffmpeg/` 并写 `.env.local` 的
   `VT_FFMPEG_DIR`（ADR-024）；`ensure_ffmpeg` 按平台选源 + 走代理 + 幂等（已存在跳过）。
 
-### `doctor` 子命令（`uv run video-translate doctor`，等价 `make doctor`）
+### `doctor` 子命令（`uv run video-translate doctor`）
 
-- ffmpeg/ffprobe 缺失 → `[MISS]` + `run: video-translate setup --ffmpeg`。
-- 模型 `[MISS]`（不存在或 < 2 GiB）→ `run: video-translate setup`。
+> `Makefile` 已移除（[ADR-030](../adr/030-control-plane.md)）—— 原文「等价 `make doctor`」
+> 的对应物已不存在，一律用 `uv run`。
+
+- ffmpeg/ffprobe 缺失 → `[MISS]` + `run: uv run video-translate setup --ffmpeg`（**默认 exit 7**）。
+- 模型 `[MISS]`（不存在或 < 2 GiB）→ `run: uv run video-translate setup`。
 - CUDA 来源标注：`venv-torch` / `env` / `none`（ADR-026）。
 - 全部 [OK] 即「就绪」，可进入转写 / 翻译 / 生成字幕。
 

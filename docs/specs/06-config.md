@@ -35,9 +35,11 @@ user's decision. `resolve_config()` records the winning source per key in
 | `merge_max_gap`   | `0.5`                       | `VT_MERGE_MAX_GAP`  | `[merge] merge_max_gap` |
 | `merge_max_chars` | `42`                        | `VT_MERGE_MAX_CHARS`| `[merge] merge_max_chars` |
 
-`device`/`compute_type` are intentionally **not** configurable — forced to
-`cpu`/`int8` (ADR-001). Env casts: `chunk`/`merge_max_*` → float, `merge_max_chars`
-→ int, `merge_enabled` → bool. `lang="auto"` normalises to `None`.
+`device`/`compute_type` default to **`auto`** and **are** overridable
+(`--device` / `--compute-type` / `VT_DEVICE` / `VT_COMPUTE_TYPE` / `[transcribe]`) ——
+有 CUDA 用 CUDA，否则回落 cpu/int8（[ADR-014](../adr/014-cuda-device-abstraction.md)；
+ADR-001 的「强制 cpu/int8」已被其取代）。Env casts: `chunk`/`merge_max_*` → float,
+`merge_max_chars` → int, `merge_enabled` → bool. `lang="auto"` normalises to `None`.
 
 V2 proxy resolution: `proxy=None` triggers `proxy.detect_proxy()` — order
 `--no-proxy` → `--proxy` → `VT_PROXY` → `HTTPS_PROXY`/`HTTP_PROXY` → TCP probe
@@ -69,14 +71,21 @@ cache_dir = "~/.cache/huggingface"
 ```
 
 ## `setup` behavior
-- If `_model_cached(model)` → print "reusing, no download", exit 0.
-- Else set up HTTP proxy, then instantiate `WhisperModel(model, cpu, int8)` which
-  triggers the HF download (~3GB for large-v3). Exit 3 on download failure, 4 on
-  SOCKS proxy.
-- HF cache is **shared** at `~/.cache/huggingface`; the model is downloaded once
-  per machine and reused across projects.
+- If `model_cached(model)` → print "reusing, no download", exit 0
+  （含 **E3 完整性校验**：`model.bin` 小于 2 GiB 视为残缺 → 不算已缓存，删除后重下）。
+- Else set up HTTP proxy, then instantiate `WhisperModel(...)` which triggers the
+  download (~3GB for large-v3). Exit 3 on download failure, 4 on SOCKS proxy.
+- **模型落点：项目本地优先** —— 默认 `<repo>/models/<name>/`（含 `model.bin`，随项目
+  拷贝、**零 C 盘**）；仅当项目根 `models/` 缺失时才回退 `HF_HOME`
+  （默认 `~/.cache/huggingface`，可作覆盖）。见
+  [ADR-025](../adr/025-model-cache-self-heal.md) / `MAJOR_VERSION_PLAN` 规则 R5。
 
 ## `doctor` behavior
-Prints readiness of ffmpeg / ffprobe / HF cache dir / model-cached, the forced
+Prints readiness of ffmpeg / ffprobe / HF cache dir / model-cached, the resolved
 device+compute_type, NVIDIA-CUDA presence, and whether faster-whisper &
-deep-translator import. Always returns 0 (diagnostic, non-fatal).
+deep-translator import.
+
+**退出码**：ffmpeg / ffprobe 缺失 → **`EXIT_DOCTOR_FAIL` (7)**（核心硬依赖，默认即拦，
+修复命令 `setup --ffmpeg`）；`--strict` 下其余可选依赖（whisperx / demucs / nltk /
+proxy）缺失同样 7；否则 `0`。（原文「Always returns 0」的旧口径已被 E 系列 /
+[TOOLCHAIN.md](../../TOOLCHAIN.md) §2.1 取代。）

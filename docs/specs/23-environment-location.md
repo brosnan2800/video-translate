@@ -93,16 +93,19 @@
 - 注意：`uv` 若曾被 `pip install` 进旧 Python 环境（如 `F:\Python311\Scripts`），
   清理 PATH 旧环境前应先独立安装 `uv`（见 ADR-029 §影响）。
 
-### 4. Makefile 语义（`uv run` 化，保证正确性）
+### 4. Makefile 语义（**已废止 —— Makefile 已移除**）
 
-- `PY` / `PIP` 改为 `uv run python` / `uv run python -m pip`。
-- `doctor` / `test` / `setup` 后半段一律经 `uv run`，杜绝裸 `python` 漂移。
-- `make` 在本机不存在时，等价入口为 `uv run`（本 Spec §1），二者不冲突。
+> ⚠️ **本节描述的对象已不存在**：`Makefile` 已由 [ADR-030](../adr/030-control-plane.md) 移除
+> （`docs/index.md` 亦已声明）。原文「`PY`/`PIP` 改 `uv run python`」「`make doctor` 的等价入口」
+> 等条目**不再适用** —— 一切命令直接用 `uv run` 前缀（本 Spec §1），中间没有 `make` 这一层。
+>
+> 保留此节仅为解释**历史引用**：旧文档中出现的 `make setup` / `make doctor` / `make test`
+> 一律等价为 `uv run video-translate setup` / `uv run video-translate doctor` / `uv run pytest`。
 
 ## 范围与边界
 
-- **IN**：入口约定（§1）、`doctor` entry 状态行（§2）、`uv` 引导说明（§3）、
-  Makefile `uv run` 化（§4）。
+- **IN**：入口约定（§1）、`doctor` entry 状态行（§2）、测试入口硬自检（§2.1）、
+  `uv` 引导说明（§3）；§4 为**历史说明**（Makefile 已由 ADR-030 移除）。
 - **OUT**：不改转写 / 翻译 / 生成业务逻辑；不自动修改系统 PATH（清理指引
   见 ADR-029 §影响，由用户确认后执行）；不改 `uv.lock` / `pyproject.toml`。
 

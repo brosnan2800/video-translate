@@ -10,10 +10,13 @@ Implements the CLI/UX overhaul (decision A1–A4).
 
 ## Zero-config happy path
 ```
-video-translate run video.mp4                 # agent engine (default)
-video-translate run video.mp4 --engine google # headless end-to-end
-video-translate transcribe video.mp4          # stage-only
+uv run video-translate run video.mp4                 # agent engine (default)
+uv run video-translate run video.mp4 --engine google # headless end-to-end
+uv run video-translate transcribe video.mp4          # stage-only
 ```
+> 命令入口一律 `uv run` 前缀（[Spec 23](23-environment-location.md) / ADR-029）；
+> 日常推荐用唯一入口 `pipeline`（[Spec 24](24-pipeline-behavior.md)），
+> `run` / `transcribe` 为底层原语。
 - `INPUT` is a **positional** argument (was `--input` in V1).
 - `--outdir` defaults to the video's own directory (`Path(INPUT).parent`).
 - `--base` defaults to the video filename stem (`Path(INPUT).stem`); was hardcoded

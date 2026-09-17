@@ -105,17 +105,24 @@
 
 ## TDD 验收清单
 
-- [ ] `whisperx_available()`：mock import 成功 / 失败分别返回 `True` / `False`；
-      macOS 平台探测返回 `False`。
-- [ ] `align_fingerprint`：相同输入稳定；后端变化时不同；与转写指纹解耦。
-- [ ] `align_segments` 不变量：text / 段数 / 顺序 / 分组不变，仅 `words[].start/end`
-      被改写；原时间戳单调保留。
-- [ ] `align_segments` 词数不匹配：mock 返回不同词数 → 该段保留原词戳 + 告警，
-      其余段回写。
-- [ ] 显存清理：mock `torch.cuda` 验证 `del` + `empty_cache` 在对齐前后被调用。
-- [ ] 降级：显式 whisperx + 库缺失 / macOS → `transcribe_video` 不出错，回退 none，
-      退出 `EXIT_OK`。
-- [ ] 配置三级覆盖：CLI > 环境变量 > toml > 默认；非法值回落 auto。
-- [ ] 对齐缓存写入与二次复用：第一次写 `{base}.{fp}.chunk_{ci}.whisperx.json`，
-      第二次命中跳过。
-- [ ] **golden 回归**：`--align none` 路径与现状字节级一致（转写指纹不变）。
+> 全部**已落地**（[ADR-028](../adr/028-whisperx-alignment-pass.md)，T4 标记 DONE）；
+> 覆盖测试见每项括注的文件名。
+
+- [x] `whisperx_available()`：mock import 成功 / 失败分别返回 `True` / `False`；
+      macOS 平台探测返回 `False`。（`tests/test_align.py`）
+- [x] `align_fingerprint`：相同输入稳定；后端变化时不同；与转写指纹解耦。
+      （`tests/test_align.py`）
+- [x] `align_segments` 不变量：text / 段数 / 顺序 / 分组不变，仅 `words[].start/end`
+      被改写；原时间戳单调保留。（`tests/test_align.py`）
+- [x] `align_segments` 词数不匹配：mock 返回不同词数 → 该段保留原词戳 + 告警，
+      其余段回写。（`tests/test_align.py::test_align_segments_unmatched_word_count_keeps_dtw`）
+- [x] 显存清理：mock `torch.cuda` 验证 `del` + `empty_cache` 在对齐前后被调用。
+      （`tests/test_align.py::test_release_align_memory_calls_cuda_cleanup`）
+- [x] 降级：显式 whisperx + 库缺失 / macOS → `transcribe_video` 不出错，回退 none，
+      退出 `EXIT_OK`。（`tests/test_control_plane_intent.py` / `tests/test_transcribe_contract.py`）
+- [x] 配置三级覆盖：CLI > 环境变量 > toml > 默认；非法值回落 auto。
+      （`tests/test_config.py` / `tests/test_config_routing.py`）
+- [x] 对齐缓存写入与二次复用：第一次写 `{base}.{fp}.chunk_{ci}.whisperx.json`，
+      第二次命中跳过。（`tests/test_transcribe_contract.py`）
+- [x] **golden 回归**：`--align none` 路径与现状字节级一致（转写指纹不变）。
+      （`tests/test_merge_golden.py` 等；`docs/golden/` 缺失时自动 skip）

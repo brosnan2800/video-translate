@@ -5,7 +5,7 @@
 - **最终字幕版本**：`_v7`（391 段，双语/纯中/纯英/txt 四件套）
 - **相关提交**：`ea77a83`（代码加固）、`24f98ed`（文档同步）、`1fbc98e`（大版本计划改名）
 - **配套规格**：[Spec 16 fill-gaps](specs/16-fill-gaps.md)、[Spec 17 verify-align](specs/17-verify-align.md)、[ADR-011 vad-opt-in](adr/011-vad-opt-in.md)
-- **V7 及更早的坑**：见 `AGENTS.md` 的 `### Hard-won pitfalls` 段（quiet/low-volume 那批）。本文只覆盖 **V8–V13** 这次翻译实际踩到的坑。
+- **V7 及更早的坑**：见 [`HISTORY.md`](HISTORY.md) 的 `### Hard-won pitfalls` 段（quiet/low-volume 那批）—— **该段已从 `AGENTS.md` 迁至 HISTORY**。本文只覆盖 **V8–V13** 这次翻译实际踩到的坑。
 
 ---
 
@@ -124,7 +124,7 @@
 
 ## 相关文档
 
-- `AGENTS.md` → `### Hard-won pitfalls`（V7 及更早的坑）+ `## V8–V13 additions`（本文各缺陷的「固化方案」视角）
-- `README.md` → `What's new since V6`（V7–V13 特性概览，EN/ZH 双语）
+- [`HISTORY.md`](HISTORY.md) → `### Hard-won pitfalls`（V7 及更早的坑）+ `## V8–V13 additions`（本文各缺陷的「固化方案」视角）—— **两节都在 HISTORY，不在 `AGENTS.md`**
+- [`README.md`](../README.md) → 「核心特性」节（V7–V13 特性概览；原文引用的 `What's new since V6` 章节已不存在）
 - `docs/specs/16-fill-gaps.md`、`docs/specs/17-verify-align.md`（缺陷 #1–#6 的规格）
 - `docs/adr/011-vad-opt-in.md`（VAD 改选开的设计决策）

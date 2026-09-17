@@ -14,15 +14,24 @@ Module: `transcribe.py` (+ `ffmpeg_utils.py`). Produces `{base}.segments_en.json
      `chunk_{ci}.json`; delete the WAV.
 4. Merge all chunk lists in order → `{base}.segments_en.json`.
 
-## Forced parameters (not configurable)
+## Decoding parameters
+
+> 原节标题为「Forced parameters (**not configurable**)」—— 该口径**已被后续决策取代**：
+> `device` / `compute_type` 改为 `auto` 且可覆盖（[ADR-014](../adr/014-cuda-device-abstraction.md)）、
+> VAD 默认**裸跑**（[ADR-011](../adr/011-vad-opt-in.md) / [ADR-034](../adr/034-audio-routing-redesign.md)）、
+> beam / best_of 提升为 5（V4 反幻觉）。下表为**现状**。
+
 | Param | Value | Rationale |
 |---|---|---|
-| device | `cpu` | CTranslate2 has no AMD/Metal GPU support (see ADR-001) |
-| compute_type | `int8` | Fits CPU, acceptable quality |
-| beam_size | `1` | Greedy; large-v3 quality loss negligible, ~1.5x faster |
-| best_of | `1` | With greedy decoding |
-| vad_filter | `True` | Drops silence → cleaner segmentation |
-| vad_parameters | `min_silence_duration_ms=500, speech_pad_ms=200` | Tuned values |
+| device | `auto`（可经 `--device` / `VT_DEVICE` / `[transcribe]` 覆盖） | ADR-014：有 CUDA 用 CUDA，否则回落 cpu |
+| compute_type | `auto`（同上） | 同上；无 CUDA 时解析为 int8 |
+| beam_size | `5` | 反幻觉标准设置；比 greedy 慢约 3-5x（V4） |
+| best_of | `5` | 与 beam 配套 |
+| condition_on_previous_text | `False` | 跨段上下文会让幻觉自我强化（V4） |
+| repetition_penalty | `1.1` | 段内轻度重复惩罚（V4） |
+| vad_filter | `use_vad`（**默认 `False`**） | ADR-011 / ADR-034：默认裸跑，保留笑声/欢呼下的真音 |
+| vad_parameters | `min_silence_duration_ms=500, speech_pad_ms=200` | **仅 `--vad` 时生效** |
+| word_timestamps | `True` | 词级时间戳（Spec 12）：切分与补洞的依据 |
 | audio | `-ar 16000 -ac 1` | Whisper's expected input |
 
 ## Resume guarantee (improvement over original)
