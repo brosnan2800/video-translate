@@ -52,3 +52,7 @@ docs/golden/
 # .codebuddy/plans/ 被上面 .codebuddy/* 一并忽略（无需单独列出）：
 # 它是 plan 模式的自动产物（文件名带 hash 后缀、frontmatter 为 todos 清单），
 # 属**工具中间产物**，不是项目契约 —— 契约一律走 docs/adr/ + docs/specs/。
+
+# 临时入口脚本/中间产物（测试与排查用，非项目资产）
+_pytmp/
+_pt.txt
